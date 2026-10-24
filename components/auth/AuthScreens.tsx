@@ -129,6 +129,10 @@ export function AuthScreens({ initialMode = "login" }: AuthScreensProps) {
       if (data.session) {
         await refreshProfileFromSession();
         router.push("/");
+        // If on the home page root, also trigger a router refresh or window navigation so the dashboard mounts
+        if (typeof window !== "undefined" && (window.location.pathname === "/" || window.location.pathname === "")) {
+          router.refresh();
+        }
       }
     } catch (err) {
       setErrorMsg(
@@ -205,6 +209,10 @@ export function AuthScreens({ initialMode = "login" }: AuthScreensProps) {
       if (data.session) {
         await refreshProfileFromSession();
         router.push("/");
+        // If on the home page root, also trigger a router refresh or window navigation so the dashboard mounts
+        if (typeof window !== "undefined" && (window.location.pathname === "/" || window.location.pathname === "")) {
+          router.refresh();
+        }
       } else {
         setSuccessNotice(
           "Account registered in Supabase! Please check your email inbox to confirm your address, or sign in directly once confirmed."
