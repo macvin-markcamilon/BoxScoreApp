@@ -4,10 +4,9 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   outputFileTracingRoot: path.join(__dirname),
-  distDir: process.env.NODE_ENV === "production" ? ".next-prod" : ".next",
   webpack: (config, { dev }) => {
     if (dev) {
-      // Prevent filesystem cache corruption (__webpack_modules__[moduleId] is not a function) during rapid HMR
+      // Prevent filesystem cache corruption during rapid HMR in dev
       config.cache = {
         type: "memory",
       };
