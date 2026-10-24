@@ -1122,6 +1122,20 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
       }
 
       if (leaguesErr) {
+        // If there is an error fetching from remote Supabase (network failure or quota), gracefully fallback to local cache
+        const cachedLg = readLocalCache<LeagueRecord[]>(STORAGE_KEYS.LEAGUES, []);
+        const cachedFoll = readLocalCache<string[]>(STORAGE_KEYS.FOLLOWS, []);
+        const cachedTm = readLocalCache<LeagueTeam[]>(STORAGE_KEYS.TEAMS, []);
+        if (cachedLg.length > 0) {
+          set({
+            leagues: cachedLg,
+            followedLeagueIds: cachedFoll,
+            teams: cachedTm,
+            isDataLoading: false,
+          });
+          return;
+        }
+
         set({
           errorBanner: leaguesErr.message,
           isDataLoading: false,
@@ -1129,19 +1143,30 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
         return;
       }
 
-      const [{ data: followsData }, { data: teamsData }, { data: membersData }] = await Promise.all([
-        supabase
-          .from("league_follows")
-          .select("league_id")
-          .eq("user_id", profile.id),
-        supabase
-          .from("teams")
-          .select("*")
-          .order("created_at", { ascending: true }),
-        supabase
-          .from("league_members")
-          .select("*"),
+      // Safely query auxiliary tables without crashing if any table (like league_members) is missing
+      const [followsRes, teamsRes, membersRes] = await Promise.all([
+        Promise.resolve(
+          supabase
+            .from("league_follows")
+            .select("league_id")
+            .eq("user_id", profile.id)
+        ).catch(() => ({ data: [], error: null })),
+        Promise.resolve(
+          supabase
+            .from("teams")
+            .select("*")
+            .order("created_at", { ascending: true })
+        ).catch(() => ({ data: [], error: null })),
+        Promise.resolve(
+          supabase
+            .from("league_members")
+            .select("*")
+        ).catch(() => ({ data: [], error: null })),
       ]);
+
+      const followsData = followsRes?.data ?? [];
+      const teamsData = teamsRes?.data ?? [];
+      const membersData = membersRes?.data ?? [];
 
       const mappedLeagues = (leaguesData ?? [])
         .map((r) => mapDbLeagueRow(r as Record<string, unknown>))
@@ -1254,8 +1279,28 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
         gameSessionsByMatchId: nextGameSessions,
         isDataLoading: false,
       });
-    } catch {
-      set({ isDataLoading: false });
+    } catch (err) {
+      // If network fetch fails (e.g., TypeError: Failed to fetch on cold start or offline), fallback gracefully to cached leagues
+      const cachedLg = readLocalCache<LeagueRecord[]>(STORAGE_KEYS.LEAGUES, []);
+      const cachedFoll = readLocalCache<string[]>(STORAGE_KEYS.FOLLOWS, []);
+      const cachedTm = readLocalCache<LeagueTeam[]>(STORAGE_KEYS.TEAMS, []);
+      const cachedTourn = readLocalCache<Record<string, LeagueTournamentData>>(STORAGE_KEYS.TOURNAMENTS, {});
+
+      if (cachedLg.length > 0) {
+        set({
+          leagues: cachedLg,
+          followedLeagueIds: cachedFoll,
+          teams: cachedTm,
+          tournamentsByLeagueId: cachedTourn,
+          isDataLoading: false,
+          errorBanner: null,
+        });
+      } else {
+        set({
+          isDataLoading: false,
+          errorBanner: err instanceof Error ? err.message : "Failed to load leagues.",
+        });
+      }
     }
   },
 
