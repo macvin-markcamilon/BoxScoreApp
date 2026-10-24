@@ -1,0 +1,95 @@
+@import "tailwindcss";
+
+:root {
+  --font-roboto-condensed: "Roboto Condensed", ui-sans-serif, system-ui, sans-serif;
+  --brand-crimson: #8B0D0E;
+  --brand-navy: #0B2F5C;
+  --surface-light: #F8FAFC;
+  --surface-dark: #020617;
+  --text-light: #0F172A;
+  --text-dark: #F8FAFC;
+  --surface-color: var(--surface-light);
+  --text-color: var(--text-light);
+  --accent-color: var(--brand-crimson);
+
+  color-scheme: light;
+  accent-color: var(--accent-color);
+  color: var(--text-color);
+}
+
+@supports (color: light-dark(white, black)) {
+  :root {
+    --surface-color: light-dark(var(--surface-light), var(--surface-dark));
+    --text-color: light-dark(var(--text-light), var(--text-dark));
+    --accent-color: light-dark(var(--brand-crimson), #F87171);
+  }
+}
+
+body {
+  font-family: var(--font-roboto-condensed), ui-sans-serif, system-ui, sans-serif;
+  line-height: 1.5;
+  text-align: start;
+  background-color: var(--surface-color);
+  color: var(--text-color);
+  overflow-wrap: break-word;
+}
+
+/* Typography guidance: balanced headings/table headers & pretty body copy */
+h1, h2, h3, h4, th {
+  text-wrap: balance;
+}
+
+p, blockquote {
+  text-wrap: pretty;
+}
+
+/* Component-specific dark theme for the Courtside Live Scorekeeper Engine */
+.courtside-dark-surface {
+  color-scheme: dark;
+  background-color: #020617;
+  /* Re-specify inherited color properties so light-dark() re-resolves under dark color-scheme */
+  color: var(--text-color);
+  accent-color: var(--accent-color);
+}
+
+/* Native <dialog> modal backdrop styling per light-dismiss-a-dialog guidance */
+dialog::backdrop {
+  background-color: rgba(2, 6, 23, 0.65);
+  backdrop-filter: blur(3px);
+}
+
+/* Responsive data table wrapper with sticky headers & container query context */
+.table-wrapper {
+  overflow: auto;
+  max-inline-size: 100%;
+  container-type: inline-size;
+}
+
+.table-wrapper table {
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.table-wrapper thead {
+  position: sticky;
+  inset-block-start: 0;
+  z-index: 2;
+}
+
+.table-wrapper tbody th {
+  position: sticky;
+  inset-inline-start: 0;
+  z-index: 1;
+}
+
+/* OBS Transparent Alpha Checkerboard Pattern */
+.obs-checkerboard {
+  background-color: #1E293B;
+  background-image:
+    linear-gradient(45deg, #0F172A 25%, transparent 25%),
+    linear-gradient(-45deg, #0F172A 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #0F172A 75%),
+    linear-gradient(-45deg, transparent 75%, #0F172A 75%);
+  background-size: 24px 24px;
+  background-position: 0 0, 0 12px, 12px -12px, -12px 0;
+}
