@@ -17,6 +17,9 @@ create table if not exists public.profiles (
   positions text[] not null default '{}',
   account_roles text[] not null default '{}',
   avatar_url text,
+  bio text,
+  jersey_number integer,
+  phone text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -34,6 +37,146 @@ create policy "Users can insert their own profile"
 create policy "Users can update their own profile"
   on public.profiles for update
   using (auth.uid() = id);
+
+-- Automatic Profile Sync Trigger:
+-- Automatically copies new users from auth.users into public.profiles upon registration!
+create or replace function public.handle_new_user()
+returns trigger
+language plpgsql
+security definer set search_path = public
+as $$
+begin
+  insert into public.profiles (
+    id,
+    email,
+    first_name,
+    last_name,
+    birthday,
+    address,
+    height_cm,
+    weight_kg,
+    positions,
+    account_roles,
+    avatar_url,
+    bio,
+    jersey_number,
+    phone
+  )
+  values (
+    new.id,
+    new.email,
+    coalesce(new.raw_user_meta_data->>'first_name', ''),
+    coalesce(new.raw_user_meta_data->>'last_name', ''),
+    case 
+      when (new.raw_user_meta_data->>'birthday') is not null and (new.raw_user_meta_data->>'birthday') != '' 
+      then (new.raw_user_meta_data->>'birthday')::date 
+      else null 
+    end,
+    coalesce(new.raw_user_meta_data->>'address', ''),
+    case 
+      when (new.raw_user_meta_data->>'height_cm') is not null and (new.raw_user_meta_data->>'height_cm') != '' 
+      then (new.raw_user_meta_data->>'height_cm')::numeric 
+      else null 
+    end,
+    case 
+      when (new.raw_user_meta_data->>'weight_kg') is not null and (new.raw_user_meta_data->>'weight_kg') != '' 
+      then (new.raw_user_meta_data->>'weight_kg')::numeric 
+      else null 
+    end,
+    coalesce(
+      array(select jsonb_array_elements_text(new.raw_user_meta_data->'positions')),
+      '{}'::text[]
+    ),
+    coalesce(
+      array(select jsonb_array_elements_text(new.raw_user_meta_data->'account_roles')),
+      '{}'::text[]
+    ),
+    coalesce(new.raw_user_meta_data->>'image_url', new.raw_user_meta_data->>'avatar_url', ''),
+    coalesce(new.raw_user_meta_data->>'bio', ''),
+    case 
+      when (new.raw_user_meta_data->>'jersey_number') is not null and (new.raw_user_meta_data->>'jersey_number') != '' 
+      then (new.raw_user_meta_data->>'jersey_number')::integer 
+      else null 
+    end,
+    coalesce(new.raw_user_meta_data->>'phone', '')
+  )
+  on conflict (id) do update set
+    email = excluded.email,
+    first_name = case when excluded.first_name != '' then excluded.first_name else public.profiles.first_name end,
+    last_name = case when excluded.last_name != '' then excluded.last_name else public.profiles.last_name end,
+    birthday = coalesce(excluded.birthday, public.profiles.birthday),
+    address = coalesce(excluded.address, public.profiles.address),
+    height_cm = coalesce(excluded.height_cm, public.profiles.height_cm),
+    weight_kg = coalesce(excluded.weight_kg, public.profiles.weight_kg),
+    positions = case when array_length(excluded.positions, 1) > 0 then excluded.positions else public.profiles.positions end,
+    account_roles = case when array_length(excluded.account_roles, 1) > 0 then excluded.account_roles else public.profiles.account_roles end,
+    avatar_url = coalesce(excluded.avatar_url, public.profiles.avatar_url),
+    updated_at = now();
+  return new;
+end;
+$$;
+
+drop trigger if exists on_auth_user_created on auth.users;
+create trigger on_auth_user_created
+  after insert or update on auth.users
+  for each row execute procedure public.handle_new_user();
+
+-- Backfill existing users into public.profiles:
+insert into public.profiles (
+  id,
+  email,
+  first_name,
+  last_name,
+  birthday,
+  address,
+  height_cm,
+  weight_kg,
+  positions,
+  account_roles,
+  avatar_url,
+  bio,
+  jersey_number,
+  phone
+)
+select
+  u.id,
+  u.email,
+  coalesce(u.raw_user_meta_data->>'first_name', ''),
+  coalesce(u.raw_user_meta_data->>'last_name', ''),
+  case 
+    when (u.raw_user_meta_data->>'birthday') is not null and (u.raw_user_meta_data->>'birthday') != '' 
+    then (u.raw_user_meta_data->>'birthday')::date 
+    else null 
+  end,
+  coalesce(u.raw_user_meta_data->>'address', ''),
+  case 
+    when (u.raw_user_meta_data->>'height_cm') is not null and (u.raw_user_meta_data->>'height_cm') != '' 
+    then (u.raw_user_meta_data->>'height_cm')::numeric 
+    else null 
+  end,
+  case 
+    when (u.raw_user_meta_data->>'weight_kg') is not null and (u.raw_user_meta_data->>'weight_kg') != '' 
+    then (u.raw_user_meta_data->>'weight_kg')::numeric 
+    else null 
+  end,
+  coalesce(
+    array(select jsonb_array_elements_text(u.raw_user_meta_data->'positions')),
+    '{}'::text[]
+  ),
+  coalesce(
+    array(select jsonb_array_elements_text(u.raw_user_meta_data->'account_roles')),
+    '{}'::text[]
+  ),
+  coalesce(u.raw_user_meta_data->>'image_url', u.raw_user_meta_data->>'avatar_url', ''),
+  coalesce(u.raw_user_meta_data->>'bio', ''),
+  case 
+    when (u.raw_user_meta_data->>'jersey_number') is not null and (u.raw_user_meta_data->>'jersey_number') != '' 
+    then (u.raw_user_meta_data->>'jersey_number')::integer 
+    else null 
+  end,
+  coalesce(u.raw_user_meta_data->>'phone', '')
+from auth.users u
+on conflict (id) do nothing;
 
 -- 2. Leagues Table
 create table if not exists public.leagues (
