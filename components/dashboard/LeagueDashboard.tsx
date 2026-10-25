@@ -2563,24 +2563,36 @@ create policy "Auth teams delete" on public.teams for delete using (auth.uid() =
                               <span className="text-xs font-black uppercase tracking-wider text-slate-800">
                                 Official Team Roster ({team.roster.length})
                               </span>
-                              <div className="flex items-center gap-3">
-                                <button
-                                  type="button"
-                                  onClick={() => openEditTeamModal(team)}
-                                  className="inline-flex items-center gap-1 text-xs font-black uppercase text-[#0B2F5C] hover:underline cursor-pointer"
-                                >
-                                  <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
-                                  Edit Roster / Staff
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => openBulkPlayersModal(team)}
-                                  className="inline-flex items-center gap-1 text-xs font-black uppercase text-indigo-700 hover:underline cursor-pointer"
-                                >
-                                  <Upload className="h-3.5 w-3.5" aria-hidden="true" />
-                                  Bulk Upload
-                                </button>
-                              </div>
+                              {(() => {
+                                const canEditThisTeam = canEditLeagueDetails(
+                                  getUserLeagueRole(
+                                    selectedLeague,
+                                    userProfile?.id,
+                                    userProfile?.email
+                                  )
+                                );
+                                if (!canEditThisTeam) return null;
+                                return (
+                                  <div className="flex items-center gap-3">
+                                    <button
+                                      type="button"
+                                      onClick={() => openEditTeamModal(team)}
+                                      className="inline-flex items-center gap-1 text-xs font-black uppercase text-[#0B2F5C] hover:underline cursor-pointer"
+                                    >
+                                      <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
+                                      Edit Roster / Staff
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => openBulkPlayersModal(team)}
+                                      className="inline-flex items-center gap-1 text-xs font-black uppercase text-indigo-700 hover:underline cursor-pointer"
+                                    >
+                                      <Upload className="h-3.5 w-3.5" aria-hidden="true" />
+                                      Bulk Upload
+                                    </button>
+                                  </div>
+                                );
+                              })()}
                             </div>
 
                             {team.roster.length === 0 ? (
@@ -2629,28 +2641,38 @@ create policy "Auth teams delete" on public.teams for delete using (auth.uid() =
                                           <Crown className="h-3 w-3" aria-hidden="true" />
                                           Captain
                                         </span>
-                                      ) : (
-                                        <div className="flex items-center gap-1 shrink-0">
-                                          <button
-                                            type="button"
-                                            onClick={async () => {
-                                              await revertRosterPlayerToAccount(team.id, player.id);
-                                            }}
-                                            title="Revert player to account jersey and picture"
-                                            className="inline-flex items-center gap-0.5 rounded border border-slate-200 bg-white px-1.5 py-0.5 text-[0.62rem] font-bold text-slate-500 hover:bg-slate-50 cursor-pointer"
-                                          >
-                                            <RotateCcw className="h-2.5 w-2.5" />
-                                            Reset
-                                          </button>
-                                          <button
-                                            type="button"
-                                            onClick={() => setTeamCaptain(team.id, player.id)}
-                                            className="text-[0.65rem] font-bold text-slate-400 hover:text-amber-600 cursor-pointer"
-                                          >
-                                            Set Cap
-                                          </button>
-                                        </div>
-                                      )}
+                                      ) : (() => {
+                                        const canEditThisTeam = canEditLeagueDetails(
+                                          getUserLeagueRole(
+                                            selectedLeague,
+                                            userProfile?.id,
+                                            userProfile?.email
+                                          )
+                                        );
+                                        if (!canEditThisTeam) return null;
+                                        return (
+                                          <div className="flex items-center gap-1 shrink-0">
+                                            <button
+                                              type="button"
+                                              onClick={async () => {
+                                                await revertRosterPlayerToAccount(team.id, player.id);
+                                              }}
+                                              title="Revert player to account jersey and picture"
+                                              className="inline-flex items-center gap-0.5 rounded border border-slate-200 bg-white px-1.5 py-0.5 text-[0.62rem] font-bold text-slate-500 hover:bg-slate-50 cursor-pointer"
+                                            >
+                                              <RotateCcw className="h-2.5 w-2.5" />
+                                              Reset
+                                            </button>
+                                            <button
+                                              type="button"
+                                              onClick={() => setTeamCaptain(team.id, player.id)}
+                                              className="text-[0.65rem] font-bold text-slate-400 hover:text-amber-600 cursor-pointer"
+                                            >
+                                              Set Cap
+                                            </button>
+                                          </div>
+                                        );
+                                      })()}
                                     </div>
                                   );
                                 })}
