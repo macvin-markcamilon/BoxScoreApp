@@ -2218,7 +2218,8 @@ export function LeagueGameManagement({
             <button
               type="button"
               onClick={() => handleCoachOrBenchTechnical(side)}
-              className="rounded-xl bg-slate-950/85 px-3 py-1.5 text-[0.65rem] font-black uppercase text-amber-300 hover:bg-slate-950 cursor-pointer"
+              disabled={!userCanScore}
+              className="rounded-xl bg-slate-950/85 px-3 py-1.5 text-[0.65rem] font-black uppercase text-amber-300 hover:bg-slate-950 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
             >
               Coach / Bench Tech (TF)
             </button>
@@ -2243,6 +2244,7 @@ export function LeagueGameManagement({
               selectedCallingRefereeId={selectedCallingRefereeId}
               onChangeCallingReferee={setSelectedCallingRefereeId}
               onTriggerAction={handleTriggerPlayerCardAction}
+              disabled={!userCanScore}
             />
           ))}
         </div>
@@ -2299,8 +2301,9 @@ export function LeagueGameManagement({
                 </div>
                 <button
                   type="button"
+                  disabled={!userCanScore}
                   onClick={() => handleSubstitutePlayer(side, p.playerId)}
-                  className="rounded-lg px-2.5 py-1 text-[0.62rem] font-black uppercase text-white hover:opacity-90 cursor-pointer shrink-0"
+                  className="rounded-lg px-2.5 py-1 text-[0.62rem] font-black uppercase text-white hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer shrink-0"
                   style={{ backgroundColor: teamColor }}
                 >
                   Sub In
@@ -2316,7 +2319,9 @@ export function LeagueGameManagement({
   return (
     <div className="space-y-6">
       {/* User Role & Permission Banner in Live Game Management */}
-      <section className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white px-5 py-3.5 shadow-xs">
+      <section className={`flex flex-wrap items-center justify-between gap-3 rounded-2xl border px-5 py-3.5 shadow-xs ${
+        userRole === "VIEWER" ? "border-amber-300 bg-amber-50/70" : "border-slate-200 bg-white"
+      }`}>
         <div className="flex items-center gap-2.5">
           <Shield
             className={`h-5 w-5 ${
@@ -2326,7 +2331,7 @@ export function LeagueGameManagement({
                   ? "text-blue-600"
                   : userRole !== "VIEWER"
                     ? "text-emerald-600"
-                    : "text-slate-400"
+                    : "text-amber-600"
             }`}
           />
           <div>
@@ -2342,7 +2347,7 @@ export function LeagueGameManagement({
                       ? "bg-blue-100 text-blue-900"
                       : userRole !== "VIEWER"
                         ? "bg-emerald-100 text-emerald-900"
-                        : "bg-slate-100 text-slate-600"
+                        : "bg-amber-200/80 text-amber-950 font-black"
                 }`}
               >
                 {userRole === "OWNER"
@@ -2357,10 +2362,10 @@ export function LeagueGameManagement({
                           ? "Table Official • Shot Clock"
                           : userRole === "TABLE_OFFICIAL"
                             ? "Table Official (All Stations)"
-                            : "Spectator / Read-Only"}
+                            : "Spectator / Read-Only (Viewer)"}
               </span>
             </div>
-            <p className="text-[0.68rem] text-slate-500">
+            <p className="text-[0.68rem] text-slate-600">
               {userCanScore && userCanClock && userCanShotClock
                 ? "You have full access to operate the live scorebook, game clock, shot clock, and roster substitutions."
                 : userCanScore
@@ -2369,7 +2374,7 @@ export function LeagueGameManagement({
                     ? "You are assigned as Game Timer (Game clock, timeouts, and periods enabled)."
                     : userCanShotClock
                       ? "You are assigned as Shot Clock Operator (24s / 14s shot clock resets enabled)."
-                      : "You are viewing this match in read-only mode. Contact the League Creator to get an Admin or Table Official role."}
+                      : "READ-ONLY VIEW: You are in Viewer mode for this league. Only the League Owner, Admins, or assigned Table Officials can operate the scorebook."}
             </p>
           </div>
         </div>
@@ -2464,9 +2469,9 @@ export function LeagueGameManagement({
 
             <button
               type="button"
-              disabled={session.playEvents.length === 0}
+              disabled={!userCanScore || session.playEvents.length === 0}
               onClick={handleUndoLastPlay}
-              className="inline-flex items-center gap-1 rounded-xl bg-[#8B0D0E] px-3.5 py-2 text-xs font-black uppercase tracking-wider text-white shadow-2xs hover:opacity-95 disabled:opacity-40 cursor-pointer"
+              className="inline-flex items-center gap-1 rounded-xl bg-[#8B0D0E] px-3.5 py-2 text-xs font-black uppercase tracking-wider text-white shadow-2xs hover:opacity-95 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
             >
               <Undo2 className="h-3.5 w-3.5" />
               Undo Last Play
@@ -2474,9 +2479,9 @@ export function LeagueGameManagement({
 
             <button
               type="button"
-              disabled={isSavingLiveGame}
+              disabled={isSavingLiveGame || (!userCanScore && !userCanClock)}
               onClick={handleSaveLiveGameToCloud}
-              className="inline-flex items-center gap-1.5 rounded-xl bg-[#0B2F5C] px-3.5 py-2 text-xs font-black uppercase tracking-wider text-white shadow-xs hover:opacity-95 disabled:opacity-50 cursor-pointer"
+              className="inline-flex items-center gap-1.5 rounded-xl bg-[#0B2F5C] px-3.5 py-2 text-xs font-black uppercase tracking-wider text-white shadow-xs hover:opacity-95 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
             >
               <Save className="h-4 w-4" />
               {isSavingLiveGame ? "Saving..." : "Save Game"}
@@ -2484,8 +2489,9 @@ export function LeagueGameManagement({
 
             <button
               type="button"
+              disabled={!userCanScore && !userCanClock}
               onClick={handleFinalizeAndSyncToBracket}
-              className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-black uppercase tracking-wider text-white shadow-xs hover:bg-emerald-700 cursor-pointer"
+              className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-black uppercase tracking-wider text-white shadow-xs hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
             >
               <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
               Finalize Game &amp; Sync
@@ -2493,9 +2499,10 @@ export function LeagueGameManagement({
 
             <button
               type="button"
+              disabled={!userCanScore && !userCanClock}
               onClick={handleResetFullScorebook}
               title="Reset Scorebook Session for this Game"
-              className="inline-flex items-center gap-1 rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-black uppercase text-slate-700 hover:bg-slate-100 cursor-pointer"
+              className="inline-flex items-center gap-1 rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-black uppercase text-slate-700 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
             >
               <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
               Reset
@@ -2638,8 +2645,9 @@ export function LeagueGameManagement({
             <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
+                disabled={!userCanScore && !userCanClock}
                 onClick={handleRandomizeRefereeCrew}
-                className="inline-flex items-center gap-1.5 rounded-xl bg-amber-400 px-3.5 py-1.5 text-xs font-black uppercase tracking-wider text-slate-950 shadow-2xs hover:bg-amber-300 cursor-pointer"
+                className="inline-flex items-center gap-1.5 rounded-xl bg-amber-400 px-3.5 py-1.5 text-xs font-black uppercase tracking-wider text-slate-950 shadow-2xs hover:bg-amber-300 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
               >
                 <Shuffle className="h-3.5 w-3.5" aria-hidden="true" />
                 Randomize 4-Official Referee Crew
@@ -3089,8 +3097,8 @@ export function LeagueGameManagement({
                   <button
                     type="button"
                     onClick={() => handleCallTimeout("HOME")}
-                    disabled={session.homeTimeoutsRemaining <= 0}
-                    className="rounded-lg bg-[#8B0D0E] px-2.5 py-1.5 text-[0.65rem] font-black uppercase text-white hover:opacity-90 disabled:opacity-40 cursor-pointer"
+                    disabled={session.homeTimeoutsRemaining <= 0 || (!userCanScore && !userCanClock)}
+                    className="rounded-lg bg-[#8B0D0E] px-2.5 py-1.5 text-[0.65rem] font-black uppercase text-white hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
                   >
                     Call TO
                   </button>
@@ -3110,8 +3118,9 @@ export function LeagueGameManagement({
                       <button
                         key={p}
                         type="button"
+                        disabled={!userCanClock}
                         onClick={() => handleSelectPeriod(p)}
-                        className={`rounded-lg px-3 py-1 text-xs font-black uppercase transition-all cursor-pointer ${
+                        className={`rounded-lg px-3 py-1 text-xs font-black uppercase transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
                           active
                             ? "bg-[#0B2F5C] text-white shadow-2xs"
                             : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-100"
@@ -3127,24 +3136,26 @@ export function LeagueGameManagement({
                 <div className="col-span-8 rounded-2xl border border-slate-200 bg-white p-3 shadow-2xs">
                   <div className="flex items-center justify-between text-[0.62rem] font-black uppercase text-slate-500 px-1">
                     <span>{currentPeriodLabel} GAME CLOCK</span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setManualMinutesInput(
-                          String(Math.floor(session.clockSecondsRemaining / 60))
-                        );
-                        setManualSecondsInput(
-                          String(session.clockSecondsRemaining % 60).padStart(
-                            2,
-                            "0"
-                          )
-                        );
-                        setIsEditingClock((prev) => !prev);
-                      }}
-                      className="text-[#8B0D0E] hover:underline cursor-pointer"
-                    >
-                      {isEditingClock ? "Cancel" : "Set Time"}
-                    </button>
+                    {userCanClock && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setManualMinutesInput(
+                            String(Math.floor(session.clockSecondsRemaining / 60))
+                          );
+                          setManualSecondsInput(
+                            String(session.clockSecondsRemaining % 60).padStart(
+                              2,
+                              "0"
+                            )
+                          );
+                          setIsEditingClock((prev) => !prev);
+                        }}
+                        className="text-[#8B0D0E] hover:underline cursor-pointer"
+                      >
+                        {isEditingClock ? "Cancel" : "Set Time"}
+                      </button>
+                    )}
                   </div>
 
                   {isEditingClock ? (
@@ -3191,36 +3202,41 @@ export function LeagueGameManagement({
                   <div className="mt-2 flex items-center justify-center gap-1.5">
                     <button
                       type="button"
+                      disabled={!userCanClock}
                       onClick={() => handleAdjustGameClock(-60)}
-                      className="rounded border border-slate-200 bg-slate-50 px-2 py-0.5 text-[0.62rem] font-black text-slate-700 hover:bg-slate-100 cursor-pointer"
+                      className="rounded border border-slate-200 bg-slate-50 px-2 py-0.5 text-[0.62rem] font-black text-slate-700 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
                     >
                       -1m
                     </button>
                     <button
                       type="button"
+                      disabled={!userCanClock}
                       onClick={() => handleAdjustGameClock(-1)}
-                      className="rounded border border-slate-200 bg-slate-50 px-2 py-0.5 text-[0.62rem] font-black text-slate-700 hover:bg-slate-100 cursor-pointer"
+                      className="rounded border border-slate-200 bg-slate-50 px-2 py-0.5 text-[0.62rem] font-black text-slate-700 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
                     >
                       -1s
                     </button>
                     <button
                       type="button"
+                      disabled={!userCanClock}
                       onClick={() => handleAdjustGameClock(1)}
-                      className="rounded border border-slate-200 bg-slate-50 px-2 py-0.5 text-[0.62rem] font-black text-slate-700 hover:bg-slate-100 cursor-pointer"
+                      className="rounded border border-slate-200 bg-slate-50 px-2 py-0.5 text-[0.62rem] font-black text-slate-700 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
                     >
                       +1s
                     </button>
                     <button
                       type="button"
+                      disabled={!userCanClock}
                       onClick={() => handleAdjustGameClock(60)}
-                      className="rounded border border-slate-200 bg-slate-50 px-2 py-0.5 text-[0.62rem] font-black text-slate-700 hover:bg-slate-100 cursor-pointer"
+                      className="rounded border border-slate-200 bg-slate-50 px-2 py-0.5 text-[0.62rem] font-black text-slate-700 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
                     >
                       +1m
                     </button>
                     <button
                       type="button"
+                      disabled={!userCanClock}
                       onClick={handleResetPeriodClock}
-                      className="rounded border border-slate-200 bg-slate-50 px-2 py-0.5 text-[0.62rem] font-black text-[#8B0D0E] hover:bg-rose-50 cursor-pointer"
+                      className="rounded border border-slate-200 bg-slate-50 px-2 py-0.5 text-[0.62rem] font-black text-[#8B0D0E] hover:bg-rose-50 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
                     >
                       Reset
                     </button>
@@ -3243,15 +3259,17 @@ export function LeagueGameManagement({
                   <div className="mt-2 grid grid-cols-2 gap-1">
                     <button
                       type="button"
+                      disabled={!userCanShotClock}
                       onClick={() => handleResetShotClock(shotClockDefault)}
-                      className="rounded bg-[#8B0D0E] py-1 text-[0.65rem] font-black uppercase text-white hover:opacity-90 cursor-pointer"
+                      className="rounded bg-[#8B0D0E] py-1 text-[0.65rem] font-black uppercase text-white hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
                     >
                       {shotClockDefault}s
                     </button>
                     <button
                       type="button"
+                      disabled={!userCanShotClock}
                       onClick={() => handleResetShotClock(orebResetSeconds)}
-                      className="rounded bg-[#0B2F5C] py-1 text-[0.65rem] font-black uppercase text-white hover:opacity-90 cursor-pointer"
+                      className="rounded bg-[#0B2F5C] py-1 text-[0.65rem] font-black uppercase text-white hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
                     >
                       {orebResetSeconds}s
                     </button>
@@ -3262,8 +3280,9 @@ export function LeagueGameManagement({
               <div className="grid grid-cols-2 gap-2.5">
                 <button
                   type="button"
+                  disabled={!userCanClock}
                   onClick={handleToggleClock}
-                  className={`inline-flex items-center justify-center gap-2 rounded-xl py-3 text-xs font-black uppercase tracking-wider shadow-xs cursor-pointer ${
+                  className={`inline-flex items-center justify-center gap-2 rounded-xl py-3 text-xs font-black uppercase tracking-wider shadow-xs cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
                     session.isClockRunning
                       ? "bg-amber-400 text-slate-950 hover:bg-amber-300"
                       : "bg-emerald-600 text-white hover:bg-emerald-700"
@@ -3284,8 +3303,9 @@ export function LeagueGameManagement({
 
                 <button
                   type="button"
+                  disabled={!userCanScore && !userCanClock}
                   onClick={handleTogglePossessionArrow}
-                  className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 bg-white py-3 text-xs font-black uppercase tracking-wider text-slate-800 hover:bg-slate-100 cursor-pointer"
+                  className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-300 bg-white py-3 text-xs font-black uppercase tracking-wider text-slate-800 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
                 >
                   <ArrowLeftRight className="h-4 w-4 text-[#0B2F5C]" />
                   Arrow:{" "}
@@ -3423,8 +3443,8 @@ export function LeagueGameManagement({
                   <button
                     type="button"
                     onClick={() => handleCallTimeout("AWAY")}
-                    disabled={session.awayTimeoutsRemaining <= 0}
-                    className="rounded-lg bg-[#0B2F5C] px-2.5 py-1.5 text-[0.65rem] font-black uppercase text-white hover:opacity-90 disabled:opacity-40 cursor-pointer"
+                    disabled={session.awayTimeoutsRemaining <= 0 || (!userCanScore && !userCanClock)}
+                    className="rounded-lg bg-[#0B2F5C] px-2.5 py-1.5 text-[0.65rem] font-black uppercase text-white hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
                   >
                     Call TO
                   </button>

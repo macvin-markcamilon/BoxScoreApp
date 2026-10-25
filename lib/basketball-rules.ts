@@ -154,49 +154,32 @@ export function getUserLeagueRole(
   league: LeagueRecord | null | undefined,
   userProfileId: string | null | undefined,
   userEmail?: string | null,
-  accountRoles?: string[] | null,
-  displayName?: string | null
+  _accountRoles?: string[] | null,
+  _displayName?: string | null
 ): UserLeagueRole {
   if (!league) return "VIEWER";
   
-  // If owner id matches profile id
+  // 1. If owner id matches profile id
   if (userProfileId && league.ownerId === userProfileId) return "OWNER";
 
-  // Check if owner name matches user's display name or email
-  const trimmedName = displayName?.trim().toLowerCase();
-  const trimmedOwner = league.ownerName?.trim().toLowerCase();
-  if (trimmedName && trimmedOwner && trimmedName === trimmedOwner) {
-    return "OWNER";
-  }
-
-  // Check league members list
+  // 2. Check league members list strictly by user profile id or verified email
   const members = league.members ?? [];
   const normalizedEmail = userEmail?.trim().toLowerCase();
 
   const member = members.find((m) => {
     if (userProfileId && m.userId && m.userId === userProfileId) return true;
     if (normalizedEmail && m.email && m.email.trim().toLowerCase() === normalizedEmail) return true;
-    if (trimmedName && m.displayName && m.displayName.trim().toLowerCase() === trimmedName) return true;
     return false;
   });
 
   if (member) return member.role;
 
-  // Account role fallback: If user account has "Manager" or "Referee", grant TABLE_OFFICIAL permissions
-  if (accountRoles && Array.isArray(accountRoles)) {
-    if (accountRoles.includes("Manager")) {
-      return "ADMIN";
-    }
-    if (accountRoles.includes("Referee")) {
-      return "TABLE_OFFICIAL";
-    }
-  }
-
-  // If local / single-user mode where league owner is default or empty
+  // Local / single-user mode fallback only if league is specifically a local fixture without an owner
   if (league.ownerId === "system" || league.ownerId === "local" || !league.ownerId) {
     return "OWNER";
   }
 
+  // Any other user is strictly a VIEWER (read-only)
   return "VIEWER";
 }
 
