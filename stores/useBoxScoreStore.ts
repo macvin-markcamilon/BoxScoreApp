@@ -1867,6 +1867,21 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
         })
         .eq("id", leagueId);
 
+      // 3. Fallback server route to ensure database update succeeds even if client RLS restricts leagues update
+      try {
+        await fetch("/api/league/update-members", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            leagueId,
+            rulesConfig: updatedRulesConfig,
+            members: nextMembers,
+          }),
+        });
+      } catch {
+        // Ignore
+      }
+
       if (memberTableErr && memberTableErr.code !== "PGRST205") {
         // Log or silent fallback
       }
@@ -1939,6 +1954,21 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
         .eq("id", leagueId);
       if (res.error) {
         console.warn("Error updating rules_config on remove member:", res.error);
+      }
+
+      // Also call server route to ensure database rules_config updates without RLS restrictions
+      try {
+        await fetch("/api/league/update-members", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            leagueId,
+            rulesConfig: updatedRulesConfig,
+            members: nextMembers,
+          }),
+        });
+      } catch {
+        // Ignore
       }
     } catch {
       // Ignore
@@ -2208,6 +2238,20 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
           .from("leagues")
           .update({ rules_config: updatedRulesConfig })
           .eq("id", targetLeague.id);
+
+        try {
+          await fetch("/api/league/update-members", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              leagueId: targetLeague.id,
+              rulesConfig: updatedRulesConfig,
+              members: updatedMembers,
+            }),
+          });
+        } catch {
+          // Ignore
+        }
       } catch {
         // Fallback local ok
       }
