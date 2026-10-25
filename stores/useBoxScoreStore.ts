@@ -390,26 +390,10 @@ function withTimeout<T>(promise: Promise<T>, ms: number, fallbackValue: T): Prom
   });
 }
 
-async function syncTeamsToUserMetadata(teams: LeagueTeam[]) {
-  try {
-    await supabase.auth.updateUser({
-      data: {
-        boxscore_teams: teams.map((t) => ({
-          ...t,
-          imageUrl: "",
-          headCoachImageUrl: "",
-          managerImageUrl: "",
-          assistantCoachStaff: (t.assistantCoachStaff ?? []).map((s) => ({
-            ...s,
-            imageUrl: "",
-          })),
-          roster: t.roster.map((r) => ({ ...r, imageUrl: "" })),
-        })),
-      },
-    });
-  } catch {
-    // Ignore metadata sync network errors
-  }
+async function syncTeamsToUserMetadata(_teams: LeagueTeam[]) {
+  // Do NOT write team rosters or league data to auth.users user_metadata.
+  // user_metadata is encoded directly inside the Supabase JWT access token.
+  // Storing team arrays in user_metadata bloats the JWT and crashes auth with 400 Bad Request.
 }
 
 export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
@@ -737,16 +721,6 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
       } catch {
         return false;
       }
-    } else {
-      try {
-        await supabase.auth.updateUser({
-          data: {
-            boxscore_tournaments: state.tournamentsByLeagueId,
-          },
-        });
-      } catch {
-        // Ignore network/quota warning
-      }
     }
     return true;
   },
@@ -986,7 +960,7 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
     writeLocalCache(STORAGE_KEYS.TEAMS, nextTeams);
 
     try {
-      // 1. Update Supabase auth user_metadata
+      // 1. Update Supabase auth user_metadata (strictly text scalars only, no large images or arrays)
       await supabase.auth.updateUser({
         data: {
           first_name: updatedProfile.firstName,
@@ -997,7 +971,6 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
           weight_kg: updatedProfile.weightKg,
           positions: updatedProfile.positions,
           account_roles: updatedProfile.accountRoles,
-          image_url: updatedProfile.imageUrl,
           bio: updatedProfile.bio,
           jersey_number: updatedProfile.jerseyNumber,
           phone: updatedProfile.phone,
@@ -1417,19 +1390,6 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
         selectedLeagueId: fallbackLeague.id,
       });
 
-      try {
-        await supabase.auth.updateUser({
-          data: {
-            boxscore_leagues: nextLeagues.map((l) => ({
-              ...l,
-              imageUrl: l.imageUrl.length > 4000 ? "" : l.imageUrl,
-            })),
-          },
-        });
-      } catch {
-        // Ignore
-      }
-
       return fallbackLeague;
     }
 
@@ -1529,19 +1489,6 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
       if (error && error.code !== "PGRST205") {
         set({ errorBanner: error.message });
       }
-    } else {
-      try {
-        await supabase.auth.updateUser({
-          data: {
-            boxscore_leagues: nextLeagues.map((l) => ({
-              ...l,
-              imageUrl: l.imageUrl.length > 4000 ? "" : l.imageUrl,
-            })),
-          },
-        });
-      } catch {
-        // Ignore
-      }
     }
 
     return updatedLeague;
@@ -1612,21 +1559,7 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
 
     // 2. Direct Supabase client fallback
     try {
-      if (get().schemaStatus === "ready") {
-        await supabase.from("leagues").delete().eq("id", leagueId);
-      } else {
-        await supabase.auth.updateUser({
-          data: {
-            boxscore_leagues: nextLeagues.map((l) => ({
-              ...l,
-              imageUrl: l.imageUrl.length > 4000 ? "" : l.imageUrl,
-            })),
-            boxscore_teams: nextTeams,
-            boxscore_follows: nextFollows,
-            boxscore_tournaments: nextTournaments,
-          },
-        });
-      }
+      await supabase.from("leagues").delete().eq("id", leagueId);
     } catch {
       // Ignore
     }
@@ -1996,17 +1929,6 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
 
     set({ followedLeagueIds: nextFollows });
     writeLocalCache(STORAGE_KEYS.FOLLOWS, nextFollows);
-
-    if (get().schemaStatus === "missing_tables") {
-      try {
-        await supabase.auth.updateUser({
-          data: { boxscore_follows: nextFollows },
-        });
-      } catch {
-        // Ignore
-      }
-      return;
-    }
 
     if (currentlyFollowing) {
       await supabase
