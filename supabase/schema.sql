@@ -4,7 +4,7 @@
 -- Run this script in your Supabase Dashboard -> SQL Editor
 -- ============================================================================
 
--- 1. User Profiles Table (Synced with auth.users)
+-- 1. Ensure public.profiles table exists and has all required columns
 create table if not exists public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
   email text not null,
@@ -16,13 +16,16 @@ create table if not exists public.profiles (
   weight_kg numeric(5,1),
   positions text[] not null default '{}',
   account_roles text[] not null default '{}',
-  avatar_url text,
-  bio text,
-  jersey_number integer,
-  phone text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+-- Safely add any columns that may be missing from an earlier create table command
+alter table public.profiles add column if not exists avatar_url text;
+alter table public.profiles add column if not exists bio text;
+alter table public.profiles add column if not exists jersey_number integer;
+alter table public.profiles add column if not exists phone text;
+alter table public.profiles add column if not exists updated_at timestamptz not null default now();
 
 alter table public.profiles enable row level security;
 
