@@ -44,6 +44,7 @@ const STORAGE_KEYS = {
   GAME_SESSIONS: "boxscore_real_game_sessions_v1",
   IMAGE_VAULT: "boxscore_image_vault_v1",
   DELETED_LEAGUES: "boxscore_deleted_league_ids_v1",
+  PROFILE_OVERRIDES: "boxscore_profile_overrides_v1",
 };
 
 export interface TeamUpsertInput {
@@ -848,7 +849,15 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
           // Table may not exist yet
         }
 
-        const profile = mapAuthUserToProfile(session.user, dbProfileRow);
+        const overridesMap = readLocalCache<Record<string, Partial<UserProfile>>>(
+          STORAGE_KEYS.PROFILE_OVERRIDES,
+          {}
+        );
+        const userOverrides = overridesMap[session.user.id] ?? {};
+        const profile: UserProfile = {
+          ...mapAuthUserToProfile(session.user, dbProfileRow),
+          ...userOverrides,
+        };
         writeLocalCache(STORAGE_KEYS.PROFILE, profile);
         set({ userProfile: profile, isAuthLoading: false });
         await get().fetchLeaguesAndTeams();
@@ -889,7 +898,15 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
         // Ignore if table doesn't exist yet
       }
 
-      const profile = mapAuthUserToProfile(user, dbProfileRow);
+      const overridesMap = readLocalCache<Record<string, Partial<UserProfile>>>(
+        STORAGE_KEYS.PROFILE_OVERRIDES,
+        {}
+      );
+      const userOverrides = overridesMap[user.id] ?? {};
+      const profile: UserProfile = {
+        ...mapAuthUserToProfile(user, dbProfileRow),
+        ...userOverrides,
+      };
       writeLocalCache(STORAGE_KEYS.PROFILE, profile);
       set({ userProfile: profile, isAuthLoading: false });
       await get().fetchLeaguesAndTeams();
@@ -915,6 +932,19 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
 
     set({ userProfile: updatedProfile });
     writeLocalCache(STORAGE_KEYS.PROFILE, updatedProfile);
+
+    // Persist user-specific overrides so refreshing or token re-decoding retains the latest edits
+    const currentOverridesMap = readLocalCache<Record<string, Partial<UserProfile>>>(
+      STORAGE_KEYS.PROFILE_OVERRIDES,
+      {}
+    );
+    writeLocalCache(STORAGE_KEYS.PROFILE_OVERRIDES, {
+      ...currentOverridesMap,
+      [current.id]: {
+        ...(currentOverridesMap[current.id] ?? {}),
+        ...updates,
+      },
+    });
 
     // Keep all teams and roster players that correspond to this user account in sync
     const nextTeams = get().teams.map((t) => {
