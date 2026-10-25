@@ -851,10 +851,14 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
         writeLocalCache(STORAGE_KEYS.PROFILE, profile);
         set({ userProfile: profile, isAuthLoading: false });
         await get().fetchLeaguesAndTeams();
-      } else if (!cachedProfile) {
-        set({ userProfile: null, isAuthLoading: false });
       } else {
-        set({ isAuthLoading: false });
+        if (!cachedProfile) {
+          set({ userProfile: null, isAuthLoading: false });
+        } else {
+          set({ isAuthLoading: false });
+        }
+        // Even if session is not yet loaded or cached, fetch public leagues & notifications
+        await get().fetchLeaguesAndTeams();
       }
     } catch (err) {
       set({
@@ -902,6 +906,7 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
       };
       writeLocalCache(STORAGE_KEYS.PROFILE, profile);
       set({ userProfile: profile, isAuthLoading: false });
+      await get().fetchLeaguesAndTeams();
     } catch {
       set({ isAuthLoading: false });
     }
@@ -1107,9 +1112,6 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
   },
 
   fetchLeaguesAndTeams: async () => {
-    const profile = get().userProfile;
-    if (!profile) return;
-
     set({ isDataLoading: true });
 
     try {
@@ -1194,13 +1196,16 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
       }
 
       // Safely query auxiliary tables without crashing if any table (like league_members) is missing
+      const profile = get().userProfile;
       const [followsRes, teamsRes, membersRes] = await Promise.all([
-        Promise.resolve(
-          supabase
-            .from("league_follows")
-            .select("league_id")
-            .eq("user_id", profile.id)
-        ).catch(() => ({ data: [], error: null })),
+        profile?.id
+          ? Promise.resolve(
+              supabase
+                .from("league_follows")
+                .select("league_id")
+                .eq("user_id", profile.id)
+            ).catch(() => ({ data: [], error: null }))
+          : Promise.resolve({ data: [], error: null }),
         Promise.resolve(
           supabase
             .from("teams")
@@ -1442,7 +1447,13 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
       }
     }
 
+    // 3. Periodic fallback poll every 8 seconds to ensure seamless sync even if WebSocket reconnects
+    const pollInterval = setInterval(() => {
+      void get().fetchLeaguesAndTeams();
+    }, 8000);
+
     return () => {
+      clearInterval(pollInterval);
       try {
         leaguesChannel.unsubscribe();
       } catch {
