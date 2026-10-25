@@ -17,10 +17,14 @@ export default function HomePage() {
     activeSection,
     initializeSession,
     refreshProfileFromSession,
+    setupRealtimeSubscriptions,
   } = useBoxScoreStore();
 
   useEffect(() => {
     initializeSession();
+
+    // Setup Supabase Realtime & broadcast subscription for instantaneous cross-user role invitations
+    const cleanupRealtime = setupRealtimeSubscriptions();
 
     const {
       data: { subscription },
@@ -33,9 +37,10 @@ export default function HomePage() {
     });
 
     return () => {
+      cleanupRealtime();
       subscription.unsubscribe();
     };
-  }, [initializeSession, refreshProfileFromSession]);
+  }, [initializeSession, refreshProfileFromSession, setupRealtimeSubscriptions]);
 
   if (isAuthLoading) {
     return (

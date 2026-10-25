@@ -137,6 +137,7 @@ interface BoxScoreState {
   resetAllLocalData: () => void;
 
   fetchLeaguesAndTeams: () => Promise<void>;
+  setupRealtimeSubscriptions: () => () => void;
   createLeague: (input: {
     name: string;
     imageUrl: string;
@@ -1308,12 +1309,65 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
         }
       }
 
+      // Synthesize notifications from all leagues' persisted members
+      const existingNotifs = readLocalCache<AppNotification[]>(
+        STORAGE_KEYS.NOTIFICATIONS,
+        get().notifications ?? []
+      );
+      const notifMap = new Map<string, AppNotification>();
+      for (const n of existingNotifs) {
+        notifMap.set(n.id, n);
+      }
+
+      for (const lg of mappedLeagues) {
+        const members = lg.members ?? [];
+        for (const m of members) {
+          const notifId = `inv-${m.id}`;
+          const currentExisting = notifMap.get(notifId);
+          const memberStatus = m.status ?? "PENDING";
+          const roleLabel =
+            m.role === "ADMIN"
+              ? "League Admin"
+              : m.role === "OFFICIAL_SCORER"
+                ? "Official Scorer"
+                : m.role === "GAME_TIMER"
+                  ? "Game Timer"
+                  : m.role === "SHOT_CLOCK"
+                    ? "Shot Clock Operator"
+                    : "Table Official";
+
+          const synthesized: AppNotification = {
+            id: notifId,
+            recipientEmail: m.email.trim().toLowerCase(),
+            recipientUserId: m.userId,
+            senderUserId: m.addedBy || lg.ownerId,
+            senderName: lg.ownerName || "League Creator",
+            type: "LEAGUE_ROLE_ASSIGNMENT",
+            title: "League Role Invitation",
+            message: `${lg.ownerName || "League Creator"} invited you to be ${roleLabel} for ${lg.name}. Accept to gain access.`,
+            leagueId: lg.id,
+            leagueName: lg.name,
+            assignedRole: m.role,
+            memberId: m.id,
+            status: memberStatus,
+            isRead: currentExisting ? currentExisting.isRead : false,
+            createdAt: m.createdAt || lg.createdAt,
+          };
+          notifMap.set(notifId, synthesized);
+        }
+      }
+
+      const mergedNotifications = Array.from(notifMap.values()).sort(
+        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+      );
+
       writeLocalCache(STORAGE_KEYS.LEAGUES, mappedLeagues);
       writeLocalCache(STORAGE_KEYS.FOLLOWS, mappedFollows);
       writeLocalCache(STORAGE_KEYS.TEAMS, mappedTeams);
       writeLocalCache(STORAGE_KEYS.TOURNAMENTS, nextTournaments);
       writeLocalCache(STORAGE_KEYS.REFEREES, nextReferees);
       writeLocalCache(STORAGE_KEYS.GAME_SESSIONS, nextGameSessions);
+      writeLocalCache(STORAGE_KEYS.NOTIFICATIONS, mergedNotifications);
 
       set({
         schemaStatus: "ready",
@@ -1323,6 +1377,7 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
         tournamentsByLeagueId: nextTournaments,
         refereesByLeagueId: nextReferees,
         gameSessionsByMatchId: nextGameSessions,
+        notifications: mergedNotifications,
         isDataLoading: false,
       });
     } catch (err) {
@@ -1355,6 +1410,50 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
         });
       }
     }
+  },
+
+  setupRealtimeSubscriptions: () => {
+    // 1. Supabase Realtime Postgres Changes on `leagues` table
+    const leaguesChannel = supabase
+      .channel("boxscore_leagues_realtime_sync")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "leagues" },
+        () => {
+          // Whenever a league is updated (e.g. member added/updated/removed), refresh leagues and notifications immediately
+          void get().fetchLeaguesAndTeams();
+        }
+      )
+      .on("broadcast", { event: "NOTIFICATION_EVENT" }, () => {
+        void get().fetchLeaguesAndTeams();
+      })
+      .subscribe();
+
+    // 2. BroadcastChannel for fast intra-browser tab communication
+    let localBc: BroadcastChannel | null = null;
+    if (typeof window !== "undefined" && "BroadcastChannel" in window) {
+      try {
+        localBc = new BroadcastChannel("boxscore_notifications_sync");
+        localBc.onmessage = () => {
+          void get().fetchLeaguesAndTeams();
+        };
+      } catch {
+        // Ignore
+      }
+    }
+
+    return () => {
+      try {
+        leaguesChannel.unsubscribe();
+      } catch {
+        // Ignore
+      }
+      try {
+        localBc?.close();
+      } catch {
+        // Ignore
+      }
+    };
   },
 
   createLeague: async (input) => {
@@ -1995,7 +2094,13 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
       STORAGE_KEYS.NOTIFICATIONS,
       get().notifications ?? []
     );
-    const targetNotif = notifications.find((n) => n.id === notificationId);
+    // Find notification by direct id or by memberId (e.g. inv-5b927c...)
+    const targetNotif = notifications.find(
+      (n) =>
+        n.id === notificationId ||
+        `inv-${n.memberId}` === notificationId ||
+        n.id === `inv-${notificationId}`
+    );
     if (!targetNotif) return false;
 
     const profile = get().userProfile;
@@ -2003,7 +2108,7 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
 
     // 1. Update notification status to ACCEPTED
     const updatedNotifications = notifications.map((n) =>
-      n.id === notificationId
+      n.id === targetNotif.id || n.memberId === targetNotif.memberId
         ? { ...n, status: "ACCEPTED" as const, isRead: true }
         : n
     );
@@ -2066,7 +2171,7 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
     if (typeof window !== "undefined" && "BroadcastChannel" in window) {
       try {
         const bc = new BroadcastChannel("boxscore_notifications_sync");
-        bc.postMessage({ type: "NOTIFICATION_ACCEPTED", notificationId });
+        bc.postMessage({ type: "NOTIFICATION_ACCEPTED", notificationId: targetNotif.id });
         bc.close();
       } catch {
         // Ignore
@@ -2081,12 +2186,17 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
       STORAGE_KEYS.NOTIFICATIONS,
       get().notifications ?? []
     );
-    const targetNotif = notifications.find((n) => n.id === notificationId);
+    const targetNotif = notifications.find(
+      (n) =>
+        n.id === notificationId ||
+        `inv-${n.memberId}` === notificationId ||
+        n.id === `inv-${notificationId}`
+    );
     if (!targetNotif) return false;
 
     // 1. Update notification status to DECLINED
     const updatedNotifications = notifications.map((n) =>
-      n.id === notificationId
+      n.id === targetNotif.id || n.memberId === targetNotif.memberId
         ? { ...n, status: "DECLINED" as const, isRead: true }
         : n
     );
@@ -2141,7 +2251,7 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
     if (typeof window !== "undefined" && "BroadcastChannel" in window) {
       try {
         const bc = new BroadcastChannel("boxscore_notifications_sync");
-        bc.postMessage({ type: "NOTIFICATION_DECLINED", notificationId });
+        bc.postMessage({ type: "NOTIFICATION_DECLINED", notificationId: targetNotif.id });
         bc.close();
       } catch {
         // Ignore
