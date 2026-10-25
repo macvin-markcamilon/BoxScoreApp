@@ -1848,6 +1848,7 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
           email: newMember.email,
           display_name: newMember.displayName,
           role: newMember.role,
+          status: newMember.status || "PENDING",
           added_by: newMember.addedBy,
         });
 
@@ -1898,14 +1899,39 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
       l.id === leagueId ? updatedLeague : l
     );
     writeLocalCache(STORAGE_KEYS.LEAGUES, nextLeagues);
-    set({ leagues: nextLeagues });
+
+    // Also remove any notification associated with this member
+    const existingNotifs = readLocalCache<AppNotification[]>(
+      STORAGE_KEYS.NOTIFICATIONS,
+      get().notifications ?? []
+    );
+    const updatedNotifs = existingNotifs.filter(
+      (n) => n.memberId !== memberId && n.id !== `inv-${memberId}`
+    );
+    writeLocalCache(STORAGE_KEYS.NOTIFICATIONS, updatedNotifs);
+
+    set({ leagues: nextLeagues, notifications: updatedNotifs });
+
+    // Broadcast across tabs
+    if (typeof window !== "undefined" && "BroadcastChannel" in window) {
+      try {
+        const bc = new BroadcastChannel("boxscore_notifications_sync");
+        bc.postMessage({ type: "MEMBER_REMOVED", memberId, leagueId });
+        bc.close();
+      } catch {
+        // Ignore
+      }
+    }
 
     try {
       await supabase.from("league_members").delete().eq("id", memberId);
-      await supabase
+      const res = await supabase
         .from("leagues")
         .update({ rules_config: updatedRulesConfig })
         .eq("id", leagueId);
+      if (res.error) {
+        console.warn("Error updating rules_config on remove member:", res.error);
+      }
     } catch {
       // Ignore
     }
