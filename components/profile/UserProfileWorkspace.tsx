@@ -318,35 +318,16 @@ export function UserProfileWorkspace() {
       </div>
 
       {/* Main Profile Card Header */}
-      <div className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
-        {/* Banner with Brand Navy Gradient */}
-        <div
-          className="relative h-44 w-full p-6 sm:h-52"
-          style={{
-            background: "linear-gradient(135deg, #0B2F5C 0%, #174276 50%, #8B0D0E 100%)",
-          }}
-        >
-          <div className="absolute right-6 top-6 flex items-center gap-2">
-            {userProfile.accountRoles.map((role) => (
-              <span
-                key={role}
-                className="rounded-full bg-white/15 px-3 py-1 text-xs font-black uppercase tracking-wider text-white backdrop-blur-md border border-white/20"
-              >
-                {role}
-              </span>
-            ))}
-          </div>
-        </div>
-
+      <div className="overflow-hidden rounded-3xl border border-slate-200 bg-white p-6 sm:p-8 shadow-sm">
         {/* Profile Identity Bar */}
-        <div className="relative px-6 pb-6 pt-0 sm:px-8">
-          <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4 -mt-16 sm:-mt-20">
+        <div className="relative">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-6">
             {/* Avatar & Info */}
-            <div className="flex flex-col sm:flex-row items-center sm:items-end gap-5 text-center sm:text-left">
+            <div className="flex flex-col sm:flex-row items-center gap-5 text-center sm:text-left">
               {/* Photo / Avatar */}
-              <div className="relative group">
+              <div className="relative group shrink-0">
                 <div
-                  className="h-28 w-28 sm:h-32 sm:w-32 rounded-2xl border-4 border-white shadow-xl overflow-hidden flex items-center justify-center font-black text-3xl sm:text-4xl text-white"
+                  className="h-28 w-28 sm:h-32 sm:w-32 rounded-2xl border-4 border-slate-100 shadow-lg overflow-hidden flex items-center justify-center font-black text-3xl sm:text-4xl text-white"
                   style={{ backgroundColor: "#8B0D0E" }}
                 >
                   {imageUrl || userProfile.imageUrl ? (
@@ -379,10 +360,21 @@ export function UserProfileWorkspace() {
                 />
               </div>
 
-              {/* Names & Badges */}
-              <div className="pt-2">
-                <div className="flex flex-wrap items-center justify-center sm:justify-start gap-2.5">
-                  <h2 className="text-2xl font-black uppercase tracking-tight text-slate-900">
+              {/* Names, Roles & Badges */}
+              <div>
+                <div className="flex flex-wrap items-center justify-center sm:justify-start gap-2">
+                  {userProfile.accountRoles.map((role) => (
+                    <span
+                      key={role}
+                      className="rounded-md bg-[#0B2F5C] px-2.5 py-0.5 text-[0.68rem] font-black uppercase tracking-wider text-white"
+                    >
+                      {role}
+                    </span>
+                  ))}
+                </div>
+
+                <div className="mt-1.5 flex flex-wrap items-center justify-center sm:justify-start gap-2.5">
+                  <h2 className="text-2xl font-black uppercase tracking-tight text-slate-900 sm:text-3xl">
                     {fullName}
                   </h2>
                   {userProfile.jerseyNumber !== undefined && (
@@ -424,7 +416,7 @@ export function UserProfileWorkspace() {
             </div>
 
             {/* Quick Action: Edit Profile */}
-            <div className="flex items-center justify-center sm:justify-end gap-2 pb-1">
+            <div className="flex items-center justify-center sm:justify-end gap-2 shrink-0">
               {!isEditing ? (
                 <button
                   type="button"

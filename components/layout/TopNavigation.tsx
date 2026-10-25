@@ -113,10 +113,19 @@ export function TopNavigation() {
               }`}
             >
               <div
-                className="flex h-8 w-8 items-center justify-center rounded-lg text-xs font-black text-white shrink-0"
+                className="flex h-8 w-8 items-center justify-center rounded-lg text-xs font-black text-white shrink-0 overflow-hidden"
                 style={{ backgroundColor: "#8B0D0E" }}
               >
-                {initials || <User className="h-4 w-4" aria-hidden="true" />}
+                {userProfile.imageUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={userProfile.imageUrl}
+                    alt={fullName}
+                    className="h-full w-full object-cover"
+                  />
+                ) : (
+                  <span>{initials || <User className="h-4 w-4" aria-hidden="true" />}</span>
+                )}
               </div>
               <div className="flex flex-col">
                 <div className="flex items-center gap-2">
