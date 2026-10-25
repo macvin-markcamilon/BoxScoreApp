@@ -131,6 +131,7 @@ interface BoxScoreState {
   updateUserProfile: (updates: Partial<UserProfile>) => Promise<boolean>;
   searchRegisteredProfiles: (query: string) => Promise<UserProfile[]>;
   signOutUser: () => Promise<void>;
+  resetAllLocalData: () => void;
 
   fetchLeaguesAndTeams: () => Promise<void>;
   createLeague: (input: {
@@ -1100,6 +1101,21 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
     });
   },
 
+  resetAllLocalData: () => {
+    for (const key of Object.values(STORAGE_KEYS)) {
+      removeLocalCache(key);
+    }
+    set({
+      leagues: [],
+      teams: [],
+      followedLeagueIds: [],
+      tournamentsByLeagueId: {},
+      refereesByLeagueId: {},
+      gameSessionsByMatchId: {},
+      selectedLeagueId: null,
+    });
+  },
+
   fetchLeaguesAndTeams: async () => {
     const profile = get().userProfile;
     if (!profile) return;
@@ -1225,16 +1241,10 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
         .map((r) => mapDbTeamRow(r as Record<string, unknown>))
         .map(hydrateTeamImagesFromVault);
 
-      // Hydrate cloud-saved tournaments, referees, and game sessions from `rules_config`
-      const nextTournaments: Record<string, LeagueTournamentData> = {
-        ...get().tournamentsByLeagueId,
-      };
-      const nextReferees: Record<string, LeagueReferee[]> = {
-        ...get().refereesByLeagueId,
-      };
-      const nextGameSessions: Record<string, LiveGameSession> = {
-        ...get().gameSessionsByMatchId,
-      };
+      // Hydrate cloud-saved tournaments, referees, and game sessions from active leagues only
+      const nextTournaments: Record<string, LeagueTournamentData> = {};
+      const nextReferees: Record<string, LeagueReferee[]> = {};
+      const nextGameSessions: Record<string, LiveGameSession> = {};
 
       for (const lg of mappedLeagues) {
         const rawConfig = lg.rulesConfig as LeagueRulesConfig & {

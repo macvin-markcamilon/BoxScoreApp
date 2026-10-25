@@ -56,33 +56,44 @@ export function AppDashboardBlank() {
   const { totalMatchesCount, completedMatchesCount } = useMemo(() => {
     let total = 0;
     let completed = 0;
-    for (const tData of Object.values(tournamentsByLeagueId)) {
+    const activeLeagueIds = new Set(leagues.map((l) => l.id));
+    for (const [lId, tData] of Object.entries(tournamentsByLeagueId)) {
+      if (!activeLeagueIds.has(lId)) continue;
       total += tData.matches.length;
       completed += tData.matches.filter((m) => m.status === "FINAL").length;
     }
     return { totalMatchesCount: total, completedMatchesCount: completed };
-  }, [tournamentsByLeagueId]);
+  }, [leagues, tournamentsByLeagueId]);
 
-  const totalRefereesCount = useMemo(
-    () =>
-      Object.values(refereesByLeagueId).reduce(
-        (sum, list) => sum + (list?.length ?? 0),
-        0
-      ),
-    [refereesByLeagueId]
-  );
+  const totalRefereesCount = useMemo(() => {
+    const activeLeagueIds = new Set(leagues.map((l) => l.id));
+    return Object.entries(refereesByLeagueId).reduce(
+      (sum, [lId, list]) => sum + (activeLeagueIds.has(lId) ? (list?.length ?? 0) : 0),
+      0
+    );
+  }, [leagues, refereesByLeagueId]);
+
+  const activeGameSessions = useMemo(() => {
+    const activeLeagueIds = new Set(leagues.map((l) => l.id));
+    return Object.values(gameSessionsByMatchId).filter(
+      (s) => s.leagueId && activeLeagueIds.has(s.leagueId)
+    );
+  }, [leagues, gameSessionsByMatchId]);
 
   const recentPlayEvents = useMemo(() => {
-    const allEvents = Object.values(gameSessionsByMatchId).flatMap((s) =>
-      s.playEvents.map((ev) => ({
-        ...ev,
-        leagueId: s.leagueId,
-      }))
-    );
+    const activeLeagueIds = new Set(leagues.map((l) => l.id));
+    const allEvents = Object.values(gameSessionsByMatchId)
+      .filter((s) => s.leagueId && activeLeagueIds.has(s.leagueId))
+      .flatMap((s) =>
+        s.playEvents.map((ev) => ({
+          ...ev,
+          leagueId: s.leagueId,
+        }))
+      );
     return allEvents
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(0, 10);
-  }, [gameSessionsByMatchId]);
+  }, [leagues, gameSessionsByMatchId]);
 
   const handleOpenLeagueTab = (leagueId: string, tab: LeagueWorkspaceTab) => {
     setSelectedLeagueId(leagueId);
@@ -219,7 +230,7 @@ export function AppDashboardBlank() {
             </span>
           </div>
           <div className="mt-3 text-3xl font-black text-slate-900 tabular-nums">
-            {Object.keys(gameSessionsByMatchId).length} Scorebooks
+            {activeGameSessions.length} Scorebooks
           </div>
           <p className="mt-1 text-xs font-bold text-slate-500">
             {totalRefereesCount} Referees &amp; Table Officials
