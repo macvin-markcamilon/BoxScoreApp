@@ -852,12 +852,15 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
 
   refreshProfileFromSession: async () => {
     try {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-      if (!user) {
-        removeLocalCache(STORAGE_KEYS.PROFILE);
-        set({ userProfile: null, isAuthLoading: false });
+      const sessionRes = await withTimeout(
+        supabase.auth.getSession(),
+        2500,
+        { data: { session: null }, error: null } as Awaited<
+          ReturnType<typeof supabase.auth.getSession>
+        >
+      );
+      const sessionUser = sessionRes?.data?.session?.user ?? null;
+      if (!sessionUser) {
         return;
       }
 
@@ -866,7 +869,7 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
         const { data: profData } = await supabase
           .from("profiles")
           .select("*")
-          .eq("id", user.id)
+          .eq("id", sessionUser.id)
           .maybeSingle();
         dbProfileRow = (profData as Record<string, unknown>) ?? null;
       } catch {
@@ -877,14 +880,13 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
         STORAGE_KEYS.PROFILE_OVERRIDES,
         {}
       );
-      const userOverrides = overridesMap[user.id] ?? {};
+      const userOverrides = overridesMap[sessionUser.id] ?? {};
       const profile: UserProfile = {
-        ...mapAuthUserToProfile(user, dbProfileRow),
+        ...mapAuthUserToProfile(sessionUser, dbProfileRow),
         ...userOverrides,
       };
       writeLocalCache(STORAGE_KEYS.PROFILE, profile);
       set({ userProfile: profile, isAuthLoading: false });
-      await get().fetchLeaguesAndTeams();
     } catch {
       set({ isAuthLoading: false });
     }
