@@ -29,6 +29,10 @@ import {
   Image as ImageIcon,
   RotateCcw,
 } from "lucide-react";
+import {
+  canEditLeagueDetails,
+  getUserLeagueRole,
+} from "@/lib/basketball-rules";
 import { compressImageFile } from "@/lib/image-utils";
 import { ScorebookAndPlayByPlaySection } from "@/components/dashboard/ScorebookAndPlayByPlaySection";
 import { useBoxScoreStore } from "@/stores/useBoxScoreStore";
@@ -61,11 +65,19 @@ export function GameDetailsWorkspace({
   onSwitchTab,
 }: GameDetailsWorkspaceProps) {
   const {
+    userProfile,
     tournamentsByLeagueId,
     gameSessionsByMatchId,
     activeManageMatchId,
     updateMatchDetailsInLeague,
   } = useBoxScoreStore();
+
+  const userRole = getUserLeagueRole(
+    league,
+    userProfile?.id,
+    userProfile?.email
+  );
+  const canEdit = canEditLeagueDetails(userRole);
 
   const tournament = tournamentsByLeagueId[league.id] ?? null;
   const matches = tournament?.matches ?? [];
@@ -1217,20 +1229,23 @@ export function GameDetailsWorkspace({
             Play By Play ({session.playEvents.length})
           </button>
 
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === "infographics"}
-            onClick={() => setActiveTab("infographics")}
-            className={`inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-black uppercase tracking-wider transition-all cursor-pointer ${
-              activeTab === "infographics"
-                ? "bg-[#8B0D0E] text-white shadow-xs ring-2 ring-amber-400"
-                : "bg-amber-400/20 text-slate-900 hover:bg-amber-400/30"
-            }`}
-          >
-            <Share2 className="h-4 w-4 text-[#8B0D0E]" />
-            Social Media Infographics
-          </button>
+          {/* Social Media Infographics tab: admin/official only */}
+          {canEdit && (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === "infographics"}
+              onClick={() => setActiveTab("infographics")}
+              className={`inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-black uppercase tracking-wider transition-all cursor-pointer ${
+                activeTab === "infographics"
+                  ? "bg-[#0B2F5C] text-white shadow-xs"
+                  : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+              }`}
+            >
+              <Share2 className="h-4 w-4 text-[#8B0D0E]" />
+              Social Media Infographics
+            </button>
+          )}
         </div>
       </section>
 
@@ -1255,40 +1270,43 @@ export function GameDetailsWorkspace({
                   </h2>
                 </div>
 
-                <div className="flex items-center gap-2">
-                  {newsArticleMarkdown && !isEditingArticle && (
+                {/* Admin/Official Only: Generate and Edit News Article */}
+                {canEdit && (
+                  <div className="flex items-center gap-2">
+                    {newsArticleMarkdown && !isEditingArticle && (
+                      <button
+                        type="button"
+                        onClick={() => setIsEditingArticle(true)}
+                        className="inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-black uppercase text-slate-700 hover:bg-slate-50 cursor-pointer shadow-2xs"
+                      >
+                        <Edit3 className="h-3.5 w-3.5 text-blue-600" />
+                        Edit Article
+                      </button>
+                    )}
+
+                    {isEditingArticle && (
+                      <button
+                        type="button"
+                        onClick={handleSaveManualArticle}
+                        disabled={isSavingArticle}
+                        className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-3.5 py-2 text-xs font-black uppercase text-white hover:bg-emerald-700 cursor-pointer shadow-2xs"
+                      >
+                        <Save className="h-3.5 w-3.5" />
+                        {isSavingArticle ? "Saving..." : "Save Changes"}
+                      </button>
+                    )}
+
                     <button
                       type="button"
-                      onClick={() => setIsEditingArticle(true)}
-                      className="inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-black uppercase text-slate-700 hover:bg-slate-50 cursor-pointer shadow-2xs"
+                      onClick={handleGenerateNewsArticle}
+                      disabled={isGeneratingArticle}
+                      className="inline-flex items-center gap-1.5 rounded-xl bg-[#0B2F5C] px-3.5 py-2 text-xs font-black uppercase text-white shadow-2xs hover:opacity-95 cursor-pointer disabled:opacity-50"
                     >
-                      <Edit3 className="h-3.5 w-3.5 text-blue-600" />
-                      Edit Article
+                      <Sparkles className="h-3.5 w-3.5 text-amber-300" />
+                      {isGeneratingArticle ? "Drafting..." : "Generate AI Article"}
                     </button>
-                  )}
-
-                  {isEditingArticle && (
-                    <button
-                      type="button"
-                      onClick={handleSaveManualArticle}
-                      disabled={isSavingArticle}
-                      className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-3.5 py-2 text-xs font-black uppercase text-white hover:bg-emerald-700 cursor-pointer shadow-2xs"
-                    >
-                      <Save className="h-3.5 w-3.5" />
-                      {isSavingArticle ? "Saving..." : "Save Changes"}
-                    </button>
-                  )}
-
-                  <button
-                    type="button"
-                    onClick={handleGenerateNewsArticle}
-                    disabled={isGeneratingArticle}
-                    className="inline-flex items-center gap-1.5 rounded-xl bg-[#0B2F5C] px-3.5 py-2 text-xs font-black uppercase text-white shadow-2xs hover:opacity-95 cursor-pointer disabled:opacity-50"
-                  >
-                    <Sparkles className="h-3.5 w-3.5 text-amber-300" />
-                    {isGeneratingArticle ? "Drafting..." : "Generate AI Article"}
-                  </button>
-                </div>
+                  </div>
+                )}
               </div>
 
               {articleSaveSuccess && (

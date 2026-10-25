@@ -21,6 +21,9 @@ import {
 } from "lucide-react";
 import {
   canEditLeagueDetails,
+  canOperateScorebook,
+  canOperateGameClock,
+  canOperateShotClock,
   getUserLeagueRole,
 } from "@/lib/basketball-rules";
 import { generatePortraitAvatarDataUrl } from "@/lib/image-utils";
@@ -88,6 +91,10 @@ export function LeagueAnalyticsDashboard({
 
   const userRole = getUserLeagueRole(league, userProfile?.id, userProfile?.email);
   const canEdit = canEditLeagueDetails(userRole);
+  const canManageGame =
+    canOperateScorebook(userRole) ||
+    canOperateGameClock(userRole) ||
+    canOperateShotClock(userRole);
 
   const tournament = tournamentsByLeagueId[league.id] ?? null;
   const referees = refereesByLeagueId[league.id] ?? [];
@@ -637,16 +644,30 @@ export function LeagueAnalyticsDashboard({
                       </div>
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={() =>
-                        openMatchInGameManagement(league.id, match.id)
-                      }
-                      className="inline-flex items-center gap-1.5 rounded-xl bg-[#8B0D0E] px-3.5 py-2 text-xs font-black uppercase tracking-wider text-white shadow-2xs hover:opacity-95 cursor-pointer shrink-0"
-                    >
-                      <Play className="h-3.5 w-3.5" />
-                      {hasLiveActivity ? "Resume Scorebook" : "Open Scorebook"}
-                    </button>
+                    {canManageGame ? (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          openMatchInGameManagement(league.id, match.id)
+                        }
+                        className="inline-flex items-center gap-1.5 rounded-xl bg-[#8B0D0E] px-3.5 py-2 text-xs font-black uppercase tracking-wider text-white shadow-2xs hover:opacity-95 cursor-pointer shrink-0"
+                      >
+                        <Play className="h-3.5 w-3.5" />
+                        {hasLiveActivity ? "Resume Scorebook" : "Open Scorebook"}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          openMatchInGameManagement(league.id, match.id);
+                          onSwitchTab("game_details");
+                        }}
+                        className="inline-flex items-center gap-1.5 rounded-xl bg-[#0B2F5C] px-3.5 py-2 text-xs font-black uppercase tracking-wider text-white shadow-2xs hover:opacity-95 cursor-pointer shrink-0"
+                      >
+                        <Trophy className="h-3.5 w-3.5 text-amber-300" />
+                        Game Details
+                      </button>
+                    )}
                   </div>
                 );
               })}

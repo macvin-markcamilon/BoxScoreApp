@@ -42,6 +42,9 @@ import {
 import { LeagueAnalyticsDashboard } from "@/components/dashboard/LeagueAnalyticsDashboard";
 import {
   canManageTeamsAndSchedule,
+  canOperateScorebook,
+  canOperateGameClock,
+  canOperateShotClock,
   getUserLeagueRole,
 } from "@/lib/basketball-rules";
 import {
@@ -103,6 +106,11 @@ export function LeagueTournamentWorkspace({
     userFullName
   );
   const canManageSchedule = canManageTeamsAndSchedule(userRole);
+  const isViewer = userRole === "VIEWER";
+  const canAccessScorebook =
+    canOperateScorebook(userRole) ||
+    canOperateGameClock(userRole) ||
+    canOperateShotClock(userRole);
 
   const existingTournament = tournamentsByLeagueId[league.id] ?? null;
 
@@ -545,7 +553,15 @@ const home = getTeamDisplay(
               return (
                 <div
                   key={match.id}
+                  onClick={() => {
+                    if (isViewer) {
+                      openMatchInGameManagement(league.id, match.id);
+                      onSwitchTab("game_details");
+                    }
+                  }}
                   className={`rounded-2xl border p-4 transition-all ${
+                    isViewer ? "cursor-pointer hover:border-slate-300 hover:shadow-xs" : ""
+                  } ${
                     match.stage === "FINALS"
                       ? "border-amber-400 bg-amber-50/40"
                       : isFinal
@@ -587,58 +603,81 @@ const home = getTeamDisplay(
                       </div>
 
                       {/* Editable Date, Time & Court */}
-                      <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600 pt-1">
-                        <label className="inline-flex items-center gap-1">
-                          <Calendar className="h-3.5 w-3.5 text-[#0B2F5C]" />
-                          <input
-                            type="date"
-                            aria-label="Scheduled date"
-                            value={match.scheduledDate}
-                            onChange={(e) =>
-                              updateMatchDetailsInLeague(league.id, match.id, {
-                                scheduledDate: e.target.value,
-                              })
-                            }
-                            className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[0.7rem] font-bold text-slate-800"
-                          />
-                        </label>
-                        <label className="inline-flex items-center gap-1">
-                          <Clock className="h-3.5 w-3.5 text-[#8B0D0E]" />
-                          <input
-                            type="text"
-                            aria-label="Scheduled time"
-                            value={match.scheduledTime}
-                            onChange={(e) =>
-                              updateMatchDetailsInLeague(league.id, match.id, {
-                                scheduledTime: e.target.value,
-                              })
-                            }
-                            className="w-20 rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[0.7rem] font-bold text-slate-800"
-                          />
-                        </label>
-                      </div>
+                      {isViewer ? (
+                        <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600 pt-1">
+                          <span className="inline-flex items-center gap-1">
+                            <Calendar className="h-3.5 w-3.5 text-[#0B2F5C]" />
+                            <span className="text-[0.7rem] font-bold text-slate-800">
+                              {match.scheduledDate || "TBA"}
+                            </span>
+                          </span>
+                          <span className="inline-flex items-center gap-1">
+                            <Clock className="h-3.5 w-3.5 text-[#8B0D0E]" />
+                            <span className="text-[0.7rem] font-bold text-slate-800">
+                              {match.scheduledTime || "TBA"}
+                            </span>
+                          </span>
+                        </div>
+                      ) : (
+                        <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600 pt-1">
+                          <label className="inline-flex items-center gap-1">
+                            <Calendar className="h-3.5 w-3.5 text-[#0B2F5C]" />
+                            <input
+                              type="date"
+                              aria-label="Scheduled date"
+                              value={match.scheduledDate}
+                              onChange={(e) =>
+                                updateMatchDetailsInLeague(league.id, match.id, {
+                                  scheduledDate: e.target.value,
+                                })
+                              }
+                              className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[0.7rem] font-bold text-slate-800"
+                            />
+                          </label>
+                          <label className="inline-flex items-center gap-1">
+                            <Clock className="h-3.5 w-3.5 text-[#8B0D0E]" />
+                            <input
+                              type="text"
+                              aria-label="Scheduled time"
+                              value={match.scheduledTime}
+                              onChange={(e) =>
+                                updateMatchDetailsInLeague(league.id, match.id, {
+                                  scheduledTime: e.target.value,
+                                })
+                              }
+                              className="w-20 rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[0.7rem] font-bold text-slate-800"
+                            />
+                          </label>
+                        </div>
+                      )}
 
                       <div className="flex items-center gap-1 text-[0.7rem] font-bold text-slate-500">
                         <MapPin className="h-3.5 w-3.5 text-[#8B0D0E] shrink-0" />
-                        <select
-                          aria-label="Assigned court"
-                          value={match.courtName}
-                          onChange={(e) =>
-                            updateMatchDetailsInLeague(league.id, match.id, {
-                              courtName: e.target.value,
-                            })
-                          }
-                          className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[0.7rem] font-bold text-slate-700"
-                        >
-                          {league.courts.map((c) => {
-                            const label = `${c.name} (${c.surfaceType})`;
-                            return (
-                              <option key={c.id} value={label}>
-                                {label}
-                              </option>
-                            );
-                          })}
-                        </select>
+                        {isViewer ? (
+                          <span className="text-[0.7rem] font-bold text-slate-700">
+                            {match.courtName || "Main Gym"}
+                          </span>
+                        ) : (
+                          <select
+                            aria-label="Assigned court"
+                            value={match.courtName}
+                            onChange={(e) =>
+                              updateMatchDetailsInLeague(league.id, match.id, {
+                                courtName: e.target.value,
+                              })
+                            }
+                            className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[0.7rem] font-bold text-slate-700"
+                          >
+                            {league.courts.map((c) => {
+                              const label = `${c.name} (${c.surfaceType})`;
+                              return (
+                                <option key={c.id} value={label}>
+                                  {label}
+                                </option>
+                              );
+                            })}
+                          </select>
+                        )}
                       </div>
                     </div>
 
@@ -681,47 +720,63 @@ const home = getTeamDisplay(
                         )}
                       </div>
 
-                      {/* Score Inputs */}
+                      {/* Score Inputs / Displays */}
                       <div className="flex items-center justify-center gap-1.5 shrink-0 px-1 py-0.5">
-                        <input
-                          type="number"
-                          min={0}
-                          max={250}
-                          placeholder="-"
-                          aria-label={`${home.name} score`}
-                          value={homeScoreVal}
-                          onChange={(e) =>
-                            setScoreInputs((prev) => ({
-                              ...prev,
-                              [match.id]: {
-                                home: e.target.value,
-                                away: awayScoreVal,
-                              },
-                            }))
-                          }
-                          className="w-13 rounded-xl border border-slate-300 bg-white px-1.5 py-1.5 text-center text-sm font-black text-slate-900 tabular-nums shadow-2xs"
-                        />
-                        <span className="text-[0.65rem] font-black uppercase text-slate-400">
-                          VS
-                        </span>
-                        <input
-                          type="number"
-                          min={0}
-                          max={250}
-                          placeholder="-"
-                          aria-label={`${away.name} score`}
-                          value={awayScoreVal}
-                          onChange={(e) =>
-                            setScoreInputs((prev) => ({
-                              ...prev,
-                              [match.id]: {
-                                home: homeScoreVal,
-                                away: e.target.value,
-                              },
-                            }))
-                          }
-                          className="w-13 rounded-xl border border-slate-300 bg-white px-1.5 py-1.5 text-center text-sm font-black text-slate-900 tabular-nums shadow-2xs"
-                        />
+                        {isViewer ? (
+                          <div className="flex items-center gap-2">
+                            <span className="flex h-9 w-12 items-center justify-center rounded-xl border border-slate-200 bg-slate-50 text-sm font-black tabular-nums text-slate-900 shadow-2xs">
+                              {match.homeScore !== null ? match.homeScore : "-"}
+                            </span>
+                            <span className="text-[0.65rem] font-black uppercase text-slate-400">
+                              VS
+                            </span>
+                            <span className="flex h-9 w-12 items-center justify-center rounded-xl border border-slate-200 bg-slate-50 text-sm font-black tabular-nums text-slate-900 shadow-2xs">
+                              {match.awayScore !== null ? match.awayScore : "-"}
+                            </span>
+                          </div>
+                        ) : (
+                          <>
+                            <input
+                              type="number"
+                              min={0}
+                              max={250}
+                              placeholder="-"
+                              aria-label={`${home.name} score`}
+                              value={homeScoreVal}
+                              onChange={(e) =>
+                                setScoreInputs((prev) => ({
+                                  ...prev,
+                                  [match.id]: {
+                                    home: e.target.value,
+                                    away: awayScoreVal,
+                                  },
+                                }))
+                              }
+                              className="w-13 rounded-xl border border-slate-300 bg-white px-1.5 py-1.5 text-center text-sm font-black text-slate-900 tabular-nums shadow-2xs"
+                            />
+                            <span className="text-[0.65rem] font-black uppercase text-slate-400">
+                              VS
+                            </span>
+                            <input
+                              type="number"
+                              min={0}
+                              max={250}
+                              placeholder="-"
+                              aria-label={`${away.name} score`}
+                              value={awayScoreVal}
+                              onChange={(e) =>
+                                setScoreInputs((prev) => ({
+                                  ...prev,
+                                  [match.id]: {
+                                    home: homeScoreVal,
+                                    away: e.target.value,
+                                  },
+                                }))
+                              }
+                              className="w-13 rounded-xl border border-slate-300 bg-white px-1.5 py-1.5 text-center text-sm font-black text-slate-900 tabular-nums shadow-2xs"
+                            />
+                          </>
+                        )}
                       </div>
 
                       {/* Away Team */}
@@ -764,35 +819,38 @@ const home = getTeamDisplay(
 
                     {/* Right: Manage Scorebook / Save Game & Score / Quick Sim / Delete */}
                     <div className="flex flex-wrap items-center justify-end gap-1.5 shrink-0">
-                      {/* Move Game Up/Down Order Controls */}
-                      <div className="flex items-center gap-1">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            reorderMatchesInLeague(league.id, match.id, "up")
-                          }
-                          title="Move Game Up (Earlier in Schedule)"
-                          aria-label={`Move Game #${match.gameNumber} Up`}
-                          className="rounded-lg border border-slate-200 bg-slate-50 p-2 text-slate-700 hover:bg-slate-200 cursor-pointer transition-colors"
-                        >
-                          <ArrowUp className="h-3.5 w-3.5" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            reorderMatchesInLeague(league.id, match.id, "down")
-                          }
-                          title="Move Game Down (Later in Schedule)"
-                          aria-label={`Move Game #${match.gameNumber} Down`}
-                          className="rounded-lg border border-slate-200 bg-slate-50 p-2 text-slate-700 hover:bg-slate-200 cursor-pointer transition-colors"
-                        >
-                          <ArrowDown className="h-3.5 w-3.5" />
-                        </button>
-                      </div>
+                      {/* Move Game Up/Down Order Controls (Hidden for viewers) */}
+                      {!isViewer && (
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              reorderMatchesInLeague(league.id, match.id, "up")
+                            }
+                            title="Move Game Up (Earlier in Schedule)"
+                            aria-label={`Move Game #${match.gameNumber} Up`}
+                            className="rounded-lg border border-slate-200 bg-slate-50 p-2 text-slate-700 hover:bg-slate-200 cursor-pointer transition-colors"
+                          >
+                            <ArrowUp className="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              reorderMatchesInLeague(league.id, match.id, "down")
+                            }
+                            title="Move Game Down (Later in Schedule)"
+                            aria-label={`Move Game #${match.gameNumber} Down`}
+                            className="rounded-lg border border-slate-200 bg-slate-50 p-2 text-slate-700 hover:bg-slate-200 cursor-pointer transition-colors"
+                          >
+                            <ArrowDown className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      )}
 
                       <button
                         type="button"
-                        onClick={() => {
+                        onClick={(e) => {
+                          e.stopPropagation();
                           openMatchInGameManagement(league.id, match.id);
                           onSwitchTab("game_details");
                         }}
@@ -804,65 +862,72 @@ const home = getTeamDisplay(
                         <span className="hidden xl:inline">Details</span>
                       </button>
 
-                      <button
-                        type="button"
-                        onClick={() =>
-                          openMatchInGameManagement(league.id, match.id)
-                        }
-                        title="Open Live Scorebook"
-                        aria-label="Open Live Scorebook"
-                        className="inline-flex items-center gap-1.5 rounded-xl bg-[#8B0D0E] p-2.5 xl:px-3 xl:py-2 text-xs font-black uppercase tracking-wider text-white shadow-2xs hover:opacity-95 cursor-pointer transition-transform active:scale-95"
-                      >
-                        <ClipboardList className="h-4 w-4" />
-                        <span className="hidden xl:inline">Scorebook</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleSaveMatchScore(match)}
-                        title={homeScoreVal && awayScoreVal ? "Save Score" : "Save Game"}
-                        aria-label={homeScoreVal && awayScoreVal ? "Save Score" : "Save Game"}
-                        className={`inline-flex items-center gap-1.5 rounded-xl p-2.5 xl:px-3 xl:py-2 text-xs font-black uppercase tracking-wider text-white transition-all cursor-pointer active:scale-95 ${
-                          savedMatchRowIds[match.id]
-                            ? "bg-emerald-600 ring-2 ring-emerald-300"
-                            : "bg-[#0B2F5C] hover:opacity-95"
-                        }`}
-                      >
-                        {savedMatchRowIds[match.id] ? (
-                          <>
-                            <CheckCircle2 className="h-4 w-4" />
-                            <span className="hidden xl:inline">Saved</span>
-                          </>
-                        ) : (
-                          <>
-                            <Save className="h-4 w-4" />
-                            <span className="hidden xl:inline">
-                              {homeScoreVal && awayScoreVal
-                                ? "Save Score"
-                                : "Save Game"}
-                            </span>
-                          </>
-                        )}
-                      </button>
-                      <button
-                        type="button"
-                        disabled={!match.homeTeamId || !match.awayTeamId}
-                        onClick={() => handleSimulateSingleMatch(match)}
-                        title="Simulate final score"
-                        aria-label="Simulate final score"
-                        className="inline-flex items-center gap-1 rounded-xl border border-slate-300 bg-slate-50 p-2.5 xl:px-2.5 xl:py-2 text-xs font-black uppercase text-slate-700 hover:bg-slate-100 disabled:opacity-40 cursor-pointer active:scale-95"
-                      >
-                        <Dices className="h-4 w-4 text-slate-600" />
-                        <span className="hidden xl:inline">Sim</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => deleteMatchInLeague(league.id, match.id)}
-                        aria-label={`Delete Game #${match.gameNumber}`}
-                        title={`Delete Game #${match.gameNumber}`}
-                        className="rounded-lg p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 cursor-pointer transition-colors"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </button>
+                      {/* Admin/Official Only: Scorebook, Save Game, Sim, Delete */}
+                      {!isViewer && (
+                        <>
+                          {canAccessScorebook && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                openMatchInGameManagement(league.id, match.id)
+                              }
+                              title="Open Live Scorebook"
+                              aria-label="Open Live Scorebook"
+                              className="inline-flex items-center gap-1.5 rounded-xl bg-[#8B0D0E] p-2.5 xl:px-3 xl:py-2 text-xs font-black uppercase tracking-wider text-white shadow-2xs hover:opacity-95 cursor-pointer transition-transform active:scale-95"
+                            >
+                              <ClipboardList className="h-4 w-4" />
+                              <span className="hidden xl:inline">Scorebook</span>
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => handleSaveMatchScore(match)}
+                            title={homeScoreVal && awayScoreVal ? "Save Score" : "Save Game"}
+                            aria-label={homeScoreVal && awayScoreVal ? "Save Score" : "Save Game"}
+                            className={`inline-flex items-center gap-1.5 rounded-xl p-2.5 xl:px-3 xl:py-2 text-xs font-black uppercase tracking-wider text-white transition-all cursor-pointer active:scale-95 ${
+                              savedMatchRowIds[match.id]
+                                ? "bg-emerald-600 ring-2 ring-emerald-300"
+                                : "bg-[#0B2F5C] hover:opacity-95"
+                            }`}
+                          >
+                            {savedMatchRowIds[match.id] ? (
+                              <>
+                                <CheckCircle2 className="h-4 w-4" />
+                                <span className="hidden xl:inline">Saved</span>
+                              </>
+                            ) : (
+                              <>
+                                <Save className="h-4 w-4" />
+                                <span className="hidden xl:inline">
+                                  {homeScoreVal && awayScoreVal
+                                    ? "Save Score"
+                                    : "Save Game"}
+                                </span>
+                              </>
+                            )}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={!match.homeTeamId || !match.awayTeamId}
+                            onClick={() => handleSimulateSingleMatch(match)}
+                            title="Simulate final score"
+                            aria-label="Simulate final score"
+                            className="inline-flex items-center gap-1 rounded-xl border border-slate-300 bg-slate-50 p-2.5 xl:px-2.5 xl:py-2 text-xs font-black uppercase text-slate-700 hover:bg-slate-100 disabled:opacity-40 cursor-pointer active:scale-95"
+                          >
+                            <Dices className="h-4 w-4 text-slate-600" />
+                            <span className="hidden xl:inline">Sim</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => deleteMatchInLeague(league.id, match.id)}
+                            aria-label={`Delete Game #${match.gameNumber}`}
+                            title={`Delete Game #${match.gameNumber}`}
+                            className="rounded-lg p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 cursor-pointer transition-colors"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -2063,26 +2128,30 @@ const home = getTeamDisplay(
           </div>
         </div>
 
-        {/* Quick Sim / Action Footer */}
-        <div className="border-t border-slate-100 bg-slate-50 px-3 py-1.5 flex items-center justify-between gap-2 text-[0.65rem]">
-          <button
-            type="button"
-            onClick={() => openMatchInGameManagement(league.id, match.id)}
-            className="inline-flex items-center gap-1 font-black uppercase text-[#0B2F5C] hover:underline cursor-pointer shrink-0"
-          >
-            <ClipboardList className="h-3 w-3 text-[#8B0D0E]" />
-            Open Scorebook
-          </button>
-          {match.homeTeamId && match.awayTeamId && (
-            <button
-              type="button"
-              onClick={() => handleSimulateSingleMatch(match)}
-              className="font-black uppercase text-[#8B0D0E] hover:underline cursor-pointer shrink-0"
-            >
-              {isFinal ? "Re-Sim" : "Sim Result →"}
-            </button>
-          )}
-        </div>
+        {/* Quick Sim / Action Footer (Hidden for Viewers) */}
+        {!isViewer && (
+          <div className="border-t border-slate-100 bg-slate-50 px-3 py-1.5 flex items-center justify-between gap-2 text-[0.65rem]">
+            {canAccessScorebook && (
+              <button
+                type="button"
+                onClick={() => openMatchInGameManagement(league.id, match.id)}
+                className="inline-flex items-center gap-1 font-black uppercase text-[#0B2F5C] hover:underline cursor-pointer shrink-0"
+              >
+                <ClipboardList className="h-3 w-3 text-[#8B0D0E]" />
+                Open Scorebook
+              </button>
+            )}
+            {match.homeTeamId && match.awayTeamId && (
+              <button
+                type="button"
+                onClick={() => handleSimulateSingleMatch(match)}
+                className="font-black uppercase text-[#8B0D0E] hover:underline cursor-pointer shrink-0 ml-auto"
+              >
+                {isFinal ? "Re-Sim" : "Sim Result →"}
+              </button>
+            )}
+          </div>
+        )}
       </div>
     );
   };
@@ -2122,33 +2191,35 @@ const home = getTeamDisplay(
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
-            {selectedFormatId === "MULTI_STAGE" && (
+          {!isViewer && (
+            <div className="flex flex-wrap items-center gap-2">
+              {selectedFormatId === "MULTI_STAGE" && (
+                <button
+                  type="button"
+                  onClick={() => seedPlayoffsInLeague(league.id)}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-amber-400 px-4 py-2.5 text-xs font-black uppercase tracking-wider text-slate-950 shadow-sm hover:bg-amber-300 cursor-pointer"
+                >
+                  <Trophy className="h-4 w-4" />
+                  Seed Playoff Bracket from Pool Standings
+                </button>
+              )}
               <button
                 type="button"
-                onClick={() => seedPlayoffsInLeague(league.id)}
-                className="inline-flex items-center gap-1.5 rounded-xl bg-amber-400 px-4 py-2.5 text-xs font-black uppercase tracking-wider text-slate-950 shadow-sm hover:bg-amber-300 cursor-pointer"
+                onClick={handleSimulateAllPlayableMatches}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-[#0B2F5C] px-4 py-2.5 text-xs font-black uppercase tracking-wider text-white hover:opacity-95 cursor-pointer"
               >
-                <Trophy className="h-4 w-4" />
-                Seed Playoff Bracket from Pool Standings
+                <Play className="h-3.5 w-3.5" />
+                Simulate Next Playable Round
               </button>
-            )}
-            <button
-              type="button"
-              onClick={handleSimulateAllPlayableMatches}
-              className="inline-flex items-center gap-1.5 rounded-xl bg-[#0B2F5C] px-4 py-2.5 text-xs font-black uppercase tracking-wider text-white hover:opacity-95 cursor-pointer"
-            >
-              <Play className="h-3.5 w-3.5" />
-              Simulate Next Playable Round
-            </button>
-            <button
-              type="button"
-              onClick={() => onSwitchTab("schedule")}
-              className="inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-slate-50 px-3.5 py-2.5 text-xs font-black uppercase tracking-wider text-slate-800 hover:bg-slate-100 cursor-pointer"
-            >
-              Change Format / Edit Schedule
-            </button>
-          </div>
+              <button
+                type="button"
+                onClick={() => onSwitchTab("schedule")}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-slate-50 px-3.5 py-2.5 text-xs font-black uppercase tracking-wider text-slate-800 hover:bg-slate-100 cursor-pointer"
+              >
+                Change Format / Edit Schedule
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Tournament Champion Banner if Crowned */}
@@ -2332,7 +2403,7 @@ const home = getTeamDisplay(
                 the next round column on the right.
               </p>
             </div>
-            {selectedFormatId === "MULTI_STAGE" && (
+            {selectedFormatId === "MULTI_STAGE" && !isViewer && (
               <button
                 type="button"
                 onClick={() => seedPlayoffsInLeague(league.id)}

@@ -88,9 +88,9 @@ export function TopNavigation() {
               target="_blank"
               rel="noopener noreferrer"
               title="Open Arena Scoreboard Projector in new tab"
-              className="inline-flex items-center gap-1.5 rounded-xl border border-amber-400/30 bg-amber-400/15 px-3 py-2 text-xs font-black uppercase tracking-wider text-amber-300 hover:bg-amber-400/25 transition-all cursor-pointer"
+              className="inline-flex items-center gap-1.5 rounded-xl px-4 py-2 text-xs font-black uppercase tracking-wider text-slate-200 hover:bg-white/10 hover:text-white transition-all cursor-pointer"
             >
-              <Tv className="h-4 w-4 text-amber-300" />
+              <Tv className="h-4 w-4" />
               Live Scoreboard
             </Link>
           </nav>

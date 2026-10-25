@@ -46,6 +46,9 @@ import { LeagueTournamentWorkspace } from "@/components/dashboard/LeagueTourname
 import {
   canEditLeagueDetails,
   canManageLeagueRoles,
+  canOperateScorebook,
+  canOperateGameClock,
+  canOperateShotClock,
   getUserLeagueRole,
   BASKETBALL_RULEBOOK_PRESETS,
 } from "@/lib/basketball-rules";
@@ -1764,124 +1767,158 @@ create policy "Auth teams delete" on public.teams for delete using (auth.uid() =
               </div>
 
               {/* Managed League Sub-Navigation Tabs: League Dashboard | Teams | Games Schedule | Bracket */}
-              <div
-                role="tablist"
-                aria-label={`${selectedLeague.name} Management Sections`}
-                className="mt-6 flex flex-wrap items-center gap-2 border-t border-slate-200 pt-4"
-              >
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={selectedLeagueTab === "league_dashboard"}
-                  onClick={() => setSelectedLeagueTab("league_dashboard")}
-                  className={`inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-black uppercase tracking-wider transition-all cursor-pointer ${
-                    selectedLeagueTab === "league_dashboard"
-                      ? "bg-[#0B2F5C] text-white shadow-xs"
-                      : "bg-slate-100 text-slate-700 hover:bg-slate-200"
-                  }`}
-                >
-                  <LayoutDashboard className="h-4 w-4" aria-hidden="true" />
-                  League Dashboard
-                </button>
+              {(() => {
+                const currentRole = getUserLeagueRole(
+                  selectedLeague,
+                  userProfile?.id,
+                  userProfile?.email
+                );
+                const isViewer = currentRole === "VIEWER";
+                const canManageGame = canOperateScorebook(currentRole) || canOperateGameClock(currentRole) || canOperateShotClock(currentRole);
 
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={selectedLeagueTab === "categories"}
-                  onClick={() => setSelectedLeagueTab("categories")}
-                  className={`inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-black uppercase tracking-wider transition-all cursor-pointer ${
-                    selectedLeagueTab === "categories"
-                      ? "bg-[#0B2F5C] text-white shadow-xs"
-                      : "bg-slate-100 text-slate-700 hover:bg-slate-200"
-                  }`}
-                >
-                  <Layers className="h-4 w-4 text-amber-500" aria-hidden="true" />
-                  Categories ({selectedLeague.categories?.length ?? 0})
-                </button>
+                return (
+                  <div
+                    role="tablist"
+                    aria-label={`${selectedLeague.name} Management Sections`}
+                    className="mt-6 flex flex-wrap items-center gap-2 border-t border-slate-200 pt-4"
+                  >
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={selectedLeagueTab === "league_dashboard"}
+                      onClick={() => setSelectedLeagueTab("league_dashboard")}
+                      className={`inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-black uppercase tracking-wider transition-all cursor-pointer ${
+                        selectedLeagueTab === "league_dashboard"
+                          ? "bg-[#0B2F5C] text-white shadow-xs"
+                          : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                      }`}
+                    >
+                      <LayoutDashboard className="h-4 w-4" aria-hidden="true" />
+                      League Dashboard
+                    </button>
 
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={selectedLeagueTab === "teams"}
-                  onClick={() => setSelectedLeagueTab("teams")}
-                  className={`inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-black uppercase tracking-wider transition-all cursor-pointer ${
-                    selectedLeagueTab === "teams"
-                      ? "bg-[#8B0D0E] text-white shadow-xs"
-                      : "bg-slate-100 text-slate-700 hover:bg-slate-200"
-                  }`}
-                >
-                  <Users className="h-4 w-4" aria-hidden="true" />
-                  Teams ({selectedLeagueTeams.length})
-                </button>
+                    {/* Categories tab: hidden for viewers */}
+                    {!isViewer && (
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={selectedLeagueTab === "categories"}
+                        onClick={() => setSelectedLeagueTab("categories")}
+                        className={`inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-black uppercase tracking-wider transition-all cursor-pointer ${
+                          selectedLeagueTab === "categories"
+                            ? "bg-[#0B2F5C] text-white shadow-xs"
+                            : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                        }`}
+                      >
+                        <Layers className="h-4 w-4 text-amber-500" aria-hidden="true" />
+                        Categories ({selectedLeague.categories?.length ?? 0})
+                      </button>
+                    )}
 
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={selectedLeagueTab === "schedule"}
-                  onClick={() => setSelectedLeagueTab("schedule")}
-                  className={`inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-black uppercase tracking-wider transition-all cursor-pointer ${
-                    selectedLeagueTab === "schedule"
-                      ? "bg-[#0B2F5C] text-white shadow-xs"
-                      : "bg-slate-100 text-slate-700 hover:bg-slate-200"
-                  }`}
-                >
-                  <Calendar className="h-4 w-4" aria-hidden="true" />
-                  Games Schedule (
-                  {tournamentsByLeagueId[selectedLeague.id]?.matches.length ?? 0}
-                  )
-                </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={selectedLeagueTab === "teams"}
+                      onClick={() => setSelectedLeagueTab("teams")}
+                      className={`inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-black uppercase tracking-wider transition-all cursor-pointer ${
+                        selectedLeagueTab === "teams"
+                          ? "bg-[#0B2F5C] text-white shadow-xs"
+                          : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                      }`}
+                    >
+                      <Users className="h-4 w-4" aria-hidden="true" />
+                      Teams ({selectedLeagueTeams.length})
+                    </button>
 
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={selectedLeagueTab === "bracket"}
-                  onClick={() => setSelectedLeagueTab("bracket")}
-                  className={`inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-black uppercase tracking-wider transition-all cursor-pointer ${
-                    selectedLeagueTab === "bracket"
-                      ? "bg-[#8B0D0E] text-white shadow-xs"
-                      : "bg-slate-100 text-slate-700 hover:bg-slate-200"
-                  }`}
-                >
-                  <GitBranch className="h-4 w-4" aria-hidden="true" />
-                  Bracket
-                </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={selectedLeagueTab === "schedule"}
+                      onClick={() => setSelectedLeagueTab("schedule")}
+                      className={`inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-black uppercase tracking-wider transition-all cursor-pointer ${
+                        selectedLeagueTab === "schedule"
+                          ? "bg-[#0B2F5C] text-white shadow-xs"
+                          : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                      }`}
+                    >
+                      <Calendar className="h-4 w-4" aria-hidden="true" />
+                      Games Schedule (
+                      {tournamentsByLeagueId[selectedLeague.id]?.matches.length ?? 0}
+                      )
+                    </button>
 
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={selectedLeagueTab === "game_management"}
-                  onClick={() => setSelectedLeagueTab("game_management")}
-                  className={`inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-black uppercase tracking-wider transition-all cursor-pointer ${
-                    selectedLeagueTab === "game_management"
-                      ? "bg-[#0B2F5C] text-white shadow-xs ring-2 ring-amber-400"
-                      : "bg-amber-400/25 text-slate-900 hover:bg-amber-400/40"
-                  }`}
-                >
-                  <ClipboardList className="h-4 w-4 text-[#8B0D0E]" aria-hidden="true" />
-                  Game Management (Scorebook)
-                </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={selectedLeagueTab === "bracket"}
+                      onClick={() => setSelectedLeagueTab("bracket")}
+                      className={`inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-black uppercase tracking-wider transition-all cursor-pointer ${
+                        selectedLeagueTab === "bracket"
+                          ? "bg-[#0B2F5C] text-white shadow-xs"
+                          : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                      }`}
+                    >
+                      <GitBranch className="h-4 w-4" aria-hidden="true" />
+                      Bracket
+                    </button>
 
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={selectedLeagueTab === "game_details"}
-                  onClick={() => setSelectedLeagueTab("game_details")}
-                  className={`inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-black uppercase tracking-wider transition-all cursor-pointer ${
-                    selectedLeagueTab === "game_details"
-                      ? "bg-[#8B0D0E] text-white shadow-xs ring-2 ring-amber-400"
-                      : "bg-slate-100 text-slate-700 hover:bg-slate-200"
-                  }`}
-                >
-                  <Trophy className="h-4 w-4 text-amber-500" aria-hidden="true" />
-                  Game Details
-                </button>
-              </div>
+                    {/* Game Management (Scorebook): only visible to authorized table officials and admins */}
+                    {canManageGame && (
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={selectedLeagueTab === "game_management"}
+                        onClick={() => setSelectedLeagueTab("game_management")}
+                        className={`inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-black uppercase tracking-wider transition-all cursor-pointer ${
+                          selectedLeagueTab === "game_management"
+                            ? "bg-[#0B2F5C] text-white shadow-xs"
+                            : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                        }`}
+                      >
+                        <ClipboardList className="h-4 w-4 text-[#8B0D0E]" aria-hidden="true" />
+                        Game Management (Scorebook)
+                      </button>
+                    )}
+
+                    {/* Game Details: only shown for admins/officials here; viewers reach it by clicking game cards in Games Schedule */}
+                    {!isViewer && (
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={selectedLeagueTab === "game_details"}
+                        onClick={() => setSelectedLeagueTab("game_details")}
+                        className={`inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-black uppercase tracking-wider transition-all cursor-pointer ${
+                          selectedLeagueTab === "game_details"
+                            ? "bg-[#0B2F5C] text-white shadow-xs"
+                            : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                        }`}
+                      >
+                        <Trophy className="h-4 w-4 text-amber-500" aria-hidden="true" />
+                        Game Details
+                      </button>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
           </section>
 
           {/* CONDITIONAL TAB WORKSPACE: CATEGORIES vs TEAMS vs GAME MANAGEMENT vs LEAGUE DASHBOARD / GAMES SCHEDULE / BRACKET */}
-          {selectedLeagueTab === "categories" ? (
-            <section className="space-y-6">
+          {(() => {
+            const currentRole = getUserLeagueRole(
+              selectedLeague,
+              userProfile?.id,
+              userProfile?.email
+            );
+            const isViewer = currentRole === "VIEWER";
+            const canManageGame =
+              canOperateScorebook(currentRole) ||
+              canOperateGameClock(currentRole) ||
+              canOperateShotClock(currentRole);
+
+            if (selectedLeagueTab === "categories" && !isViewer) {
+              return (
+                <section className="space-y-6">
               <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white p-6 shadow-xs">
                 <div>
                   <div className="flex items-center gap-2">
@@ -2148,8 +2185,12 @@ create policy "Auth teams delete" on public.teams for delete using (auth.uid() =
                 )}
               </div>
             </section>
-          ) : selectedLeagueTab === "teams" ? (
-          <section className="space-y-4">
+              );
+            }
+
+            if (selectedLeagueTab === "teams") {
+              return (
+                <section className="space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="text-2xl font-black uppercase tracking-tight text-slate-900">
@@ -2988,45 +3029,57 @@ create policy "Auth teams delete" on public.teams for delete using (auth.uid() =
                             <span className="text-xs font-black uppercase tracking-wider text-slate-800">
                               Official Team Roster ({team.roster.length})
                             </span>
-                            <div className="flex items-center gap-3">
-                              <button
-                                type="button"
-                                onClick={() => openEditTeamModal(team)}
-                                className="inline-flex items-center gap-1 text-xs font-black uppercase text-[#0B2F5C] hover:underline cursor-pointer"
-                              >
-                                <Pencil
-                                  className="h-3.5 w-3.5"
-                                  aria-hidden="true"
-                                />
-                                Edit Roster / Staff
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => openBulkPlayersModal(team)}
-                                className="inline-flex items-center gap-1 text-xs font-black uppercase text-indigo-700 hover:underline cursor-pointer"
-                              >
-                                <Upload
-                                  className="h-3.5 w-3.5"
-                                  aria-hidden="true"
-                                />
-                                Bulk Upload
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  setQuickAddTeamId(
-                                    quickAddTeamId === team.id ? null : team.id
-                                  )
-                                }
-                                className="inline-flex items-center gap-1 text-xs font-black uppercase text-[#8B0D0E] hover:underline cursor-pointer"
-                              >
-                                <UserPlus
-                                  className="h-3.5 w-3.5"
-                                  aria-hidden="true"
-                                />
-                                + Add Player
-                              </button>
-                            </div>
+                            {(() => {
+                              const canEdit = canEditLeagueDetails(
+                                getUserLeagueRole(
+                                  selectedLeague,
+                                  userProfile?.id,
+                                  userProfile?.email
+                                )
+                              );
+                              if (!canEdit) return null;
+                              return (
+                                <div className="flex items-center gap-3">
+                                  <button
+                                    type="button"
+                                    onClick={() => openEditTeamModal(team)}
+                                    className="inline-flex items-center gap-1 text-xs font-black uppercase text-[#0B2F5C] hover:underline cursor-pointer"
+                                  >
+                                    <Pencil
+                                      className="h-3.5 w-3.5"
+                                      aria-hidden="true"
+                                    />
+                                    Edit Roster / Staff
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => openBulkPlayersModal(team)}
+                                    className="inline-flex items-center gap-1 text-xs font-black uppercase text-indigo-700 hover:underline cursor-pointer"
+                                  >
+                                    <Upload
+                                      className="h-3.5 w-3.5"
+                                      aria-hidden="true"
+                                    />
+                                    Bulk Upload
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setQuickAddTeamId(
+                                        quickAddTeamId === team.id ? null : team.id
+                                      )
+                                    }
+                                    className="inline-flex items-center gap-1 text-xs font-black uppercase text-[#8B0D0E] hover:underline cursor-pointer"
+                                  >
+                                    <UserPlus
+                                      className="h-3.5 w-3.5"
+                                      aria-hidden="true"
+                                    />
+                                    + Add Player
+                                  </button>
+                                </div>
+                              );
+                            })()}
                           </div>
 
                           {/* Quick Add Player Inline Form */}
@@ -3412,27 +3465,51 @@ create policy "Auth teams delete" on public.teams for delete using (auth.uid() =
               </div>
             )}
           </section>
-          ) : selectedLeagueTab === "game_management" ? (
-            <LeagueGameManagement
-              league={selectedLeague}
-              teams={selectedLeagueTeams}
-              onSwitchTab={setSelectedLeagueTab}
-            />
-          ) : selectedLeagueTab === "game_details" ? (
-            <GameDetailsWorkspace
-              league={selectedLeague}
-              teams={selectedLeagueTeams}
-              onSwitchTab={setSelectedLeagueTab}
-            />
-          ) : (
-            <LeagueTournamentWorkspace
-              league={selectedLeague}
-              teams={selectedLeagueTeams}
-              activeTab={selectedLeagueTab}
-              onSwitchTab={setSelectedLeagueTab}
-              onEditLeague={() => openEditLeagueModal(selectedLeague)}
-            />
-          )}
+              );
+            }
+
+            if (selectedLeagueTab === "game_management") {
+              if (!canManageGame) {
+                // If viewer lands here, fallback to schedule
+                return (
+                  <LeagueTournamentWorkspace
+                    league={selectedLeague}
+                    teams={selectedLeagueTeams}
+                    activeTab="schedule"
+                    onSwitchTab={setSelectedLeagueTab}
+                    onEditLeague={() => openEditLeagueModal(selectedLeague)}
+                  />
+                );
+              }
+              return (
+                <LeagueGameManagement
+                  league={selectedLeague}
+                  teams={selectedLeagueTeams}
+                  onSwitchTab={setSelectedLeagueTab}
+                />
+              );
+            }
+
+            if (selectedLeagueTab === "game_details") {
+              return (
+                <GameDetailsWorkspace
+                  league={selectedLeague}
+                  teams={selectedLeagueTeams}
+                  onSwitchTab={setSelectedLeagueTab}
+                />
+              );
+            }
+
+            return (
+              <LeagueTournamentWorkspace
+                league={selectedLeague}
+                teams={selectedLeagueTeams}
+                activeTab={selectedLeagueTab}
+                onSwitchTab={setSelectedLeagueTab}
+                onEditLeague={() => openEditLeagueModal(selectedLeague)}
+              />
+            );
+          })()}
         </div>
       ) : (
         /* =====================================================================
