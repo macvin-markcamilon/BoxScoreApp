@@ -211,7 +211,7 @@ export function LeagueDashboard() {
 
   const [leagueFilterTab, setLeagueFilterTab] = useState<
     "created" | "followed" | "all"
-  >("created");
+  >("all");
   const [copiedSql, setCopiedSql] = useState(false);
 
   // Create / Update League Dialog (<dialog closedby="any">)
