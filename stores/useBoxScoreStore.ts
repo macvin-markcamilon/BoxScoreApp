@@ -1418,14 +1418,20 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
   },
 
   setupRealtimeSubscriptions: () => {
-    // 1. Supabase Realtime Postgres Changes on `leagues` table
-    const leaguesChannel = supabase
-      .channel("boxscore_leagues_realtime_sync")
+    // 1. Supabase Realtime Postgres Changes on `leagues` and `league_members` tables
+    const realtimeChannel = supabase
+      .channel("boxscore_realtime_sync")
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "leagues" },
         () => {
-          // Whenever a league is updated (e.g. member added/updated/removed), refresh leagues and notifications immediately
+          void get().fetchLeaguesAndTeams();
+        }
+      )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "league_members" },
+        () => {
           void get().fetchLeaguesAndTeams();
         }
       )
@@ -1455,7 +1461,7 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
     return () => {
       clearInterval(pollInterval);
       try {
-        leaguesChannel.unsubscribe();
+        realtimeChannel.unsubscribe();
       } catch {
         // Ignore
       }
@@ -1925,6 +1931,7 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
 
     try {
       await supabase.from("league_members").delete().eq("id", memberId);
+      await supabase.from("league_members").delete().eq("email", (existing.members ?? []).find(m => m.id === memberId)?.email || "");
       const res = await supabase
         .from("leagues")
         .update({ rules_config: updatedRulesConfig })

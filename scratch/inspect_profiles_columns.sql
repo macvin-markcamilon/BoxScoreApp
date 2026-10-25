@@ -1,0 +1,3 @@
+-- In the screenshot:
+-- id, email, first_name, last_name, birthday, address
+-- but avatar_url was NOT in the initial table!
