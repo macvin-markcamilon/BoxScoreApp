@@ -43,6 +43,7 @@ const STORAGE_KEYS = {
   REFEREES: "boxscore_real_referees_v1",
   GAME_SESSIONS: "boxscore_real_game_sessions_v1",
   IMAGE_VAULT: "boxscore_image_vault_v1",
+  DELETED_LEAGUES: "boxscore_deleted_league_ids_v1",
 };
 
 export interface TeamUpsertInput {
@@ -520,6 +521,7 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
   },
 
   syncFromLocalStorage: () => {
+    const deletedIds = readLocalCache<string[]>(STORAGE_KEYS.DELETED_LEAGUES, []);
     const cachedSessions = readLocalCache<Record<string, LiveGameSession>>(
       STORAGE_KEYS.GAME_SESSIONS,
       {}
@@ -530,11 +532,15 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
     const cachedLeagues = readLocalCache<LeagueRecord[]>(
       STORAGE_KEYS.LEAGUES,
       []
-    ).map(hydrateLeagueImageFromVault);
+    )
+      .filter((l) => !deletedIds.includes(l.id))
+      .map(hydrateLeagueImageFromVault);
     const cachedTeams = readLocalCache<LeagueTeam[]>(
       STORAGE_KEYS.TEAMS,
       []
-    ).map(hydrateTeamImagesFromVault);
+    )
+      .filter((t) => !deletedIds.includes(t.leagueId))
+      .map(hydrateTeamImagesFromVault);
 
     set({
       gameSessionsByMatchId: {
@@ -1082,18 +1088,19 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
         } = await supabase.auth.getUser();
         const meta = user?.user_metadata ?? {};
 
+        const deletedIds = readLocalCache<string[]>(STORAGE_KEYS.DELETED_LEAGUES, []);
         const rawLeagues = readLocalCache<LeagueRecord[]>(
           STORAGE_KEYS.LEAGUES,
           Array.isArray(meta.boxscore_leagues) ? meta.boxscore_leagues : []
-        );
+        ).filter((l) => !deletedIds.includes(l.id));
         const cachedFollows = readLocalCache<string[]>(
           STORAGE_KEYS.FOLLOWS,
           Array.isArray(meta.boxscore_follows) ? meta.boxscore_follows : []
-        );
+        ).filter((id) => !deletedIds.includes(id));
         const rawTeams = readLocalCache<LeagueTeam[]>(
           STORAGE_KEYS.TEAMS,
           Array.isArray(meta.boxscore_teams) ? meta.boxscore_teams : []
-        );
+        ).filter((t) => !deletedIds.includes(t.leagueId));
 
         const hydratedLeagues = rawLeagues.map(hydrateLeagueImageFromVault);
         const hydratedTeams = rawTeams.map(hydrateTeamImagesFromVault);
@@ -1123,9 +1130,16 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
 
       if (leaguesErr) {
         // If there is an error fetching from remote Supabase (network failure or quota), gracefully fallback to local cache
-        const cachedLg = readLocalCache<LeagueRecord[]>(STORAGE_KEYS.LEAGUES, []);
-        const cachedFoll = readLocalCache<string[]>(STORAGE_KEYS.FOLLOWS, []);
-        const cachedTm = readLocalCache<LeagueTeam[]>(STORAGE_KEYS.TEAMS, []);
+        const deletedIds = readLocalCache<string[]>(STORAGE_KEYS.DELETED_LEAGUES, []);
+        const cachedLg = readLocalCache<LeagueRecord[]>(STORAGE_KEYS.LEAGUES, []).filter(
+          (l) => !deletedIds.includes(l.id)
+        );
+        const cachedFoll = readLocalCache<string[]>(STORAGE_KEYS.FOLLOWS, []).filter(
+          (id) => !deletedIds.includes(id)
+        );
+        const cachedTm = readLocalCache<LeagueTeam[]>(STORAGE_KEYS.TEAMS, []).filter(
+          (t) => !deletedIds.includes(t.leagueId)
+        );
         if (cachedLg.length > 0) {
           set({
             leagues: cachedLg,
@@ -1168,8 +1182,11 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
       const teamsData = teamsRes?.data ?? [];
       const membersData = membersRes?.data ?? [];
 
+      const deletedIds = readLocalCache<string[]>(STORAGE_KEYS.DELETED_LEAGUES, []);
+
       const mappedLeagues = (leaguesData ?? [])
         .map((r) => mapDbLeagueRow(r as Record<string, unknown>))
+        .filter((l) => !deletedIds.includes(l.id))
         .map(hydrateLeagueImageFromVault);
       const mappedFollows = (followsData ?? []).map((r) =>
         String((r as Record<string, unknown>).league_id)
@@ -1281,9 +1298,16 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
       });
     } catch (err) {
       // If network fetch fails (e.g., TypeError: Failed to fetch on cold start or offline), fallback gracefully to cached leagues
-      const cachedLg = readLocalCache<LeagueRecord[]>(STORAGE_KEYS.LEAGUES, []);
-      const cachedFoll = readLocalCache<string[]>(STORAGE_KEYS.FOLLOWS, []);
-      const cachedTm = readLocalCache<LeagueTeam[]>(STORAGE_KEYS.TEAMS, []);
+      const deletedIds = readLocalCache<string[]>(STORAGE_KEYS.DELETED_LEAGUES, []);
+      const cachedLg = readLocalCache<LeagueRecord[]>(STORAGE_KEYS.LEAGUES, []).filter(
+        (l) => !deletedIds.includes(l.id)
+      );
+      const cachedFoll = readLocalCache<string[]>(STORAGE_KEYS.FOLLOWS, []).filter(
+        (id) => !deletedIds.includes(id)
+      );
+      const cachedTm = readLocalCache<LeagueTeam[]>(STORAGE_KEYS.TEAMS, []).filter(
+        (t) => !deletedIds.includes(t.leagueId)
+      );
       const cachedTourn = readLocalCache<Record<string, LeagueTournamentData>>(STORAGE_KEYS.TOURNAMENTS, {});
 
       if (cachedLg.length > 0) {
@@ -1497,6 +1521,13 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
       return false;
     }
 
+    // Persist deleted league ID tombstone to ensure it never resurrects upon reload or cache rehydration
+    const deletedIds = readLocalCache<string[]>(STORAGE_KEYS.DELETED_LEAGUES, []);
+    if (!deletedIds.includes(leagueId)) {
+      const nextDeletedIds = [...deletedIds, leagueId];
+      writeLocalCache(STORAGE_KEYS.DELETED_LEAGUES, nextDeletedIds);
+    }
+
     const nextLeagues = get().leagues.filter((l) => l.id !== leagueId);
     const nextTeams = get().teams.filter((t) => t.leagueId !== leagueId);
     const nextFollows = get().followedLeagueIds.filter((id) => id !== leagueId);
@@ -1525,6 +1556,21 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
           : get().selectedLeagueId,
     });
 
+    // 1. Attempt server-side delete API first (clean headers without large cookies/bearer tokens)
+    try {
+      const res = await fetch("/api/league/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ leagueId, ownerId: profile.id }),
+      });
+      if (res.ok) {
+        return true;
+      }
+    } catch {
+      // Fall through to direct Supabase client fallback
+    }
+
+    // 2. Direct Supabase client fallback
     try {
       if (get().schemaStatus === "ready") {
         await supabase.from("leagues").delete().eq("id", leagueId);
