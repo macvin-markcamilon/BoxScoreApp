@@ -163,10 +163,13 @@ export function getUserLeagueRole(
   if (userProfileId && league.ownerId === userProfileId) return "OWNER";
 
   // 2. Check league members list strictly by user profile id or verified email
+  // NOTE: Members must have status === 'ACCEPTED' (or undefined for backward compatibility)
   const members = league.members ?? [];
   const normalizedEmail = userEmail?.trim().toLowerCase();
 
   const member = members.find((m) => {
+    // If explicitly marked as PENDING or DECLINED, member has not accepted role yet
+    if (m.status === "PENDING" || m.status === "DECLINED") return false;
     if (userProfileId && m.userId && m.userId === userProfileId) return true;
     if (normalizedEmail && m.email && m.email.trim().toLowerCase() === normalizedEmail) return true;
     return false;

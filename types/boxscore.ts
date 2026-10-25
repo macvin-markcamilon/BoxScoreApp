@@ -37,7 +37,28 @@ export interface LeagueMember {
   email: string;
   displayName: string;
   role: LeagueMemberRole;
+  status?: "PENDING" | "ACCEPTED" | "DECLINED";
   addedBy: string;
+  createdAt: string;
+}
+
+export type AppNotificationType = "LEAGUE_ROLE_ASSIGNMENT";
+
+export interface AppNotification {
+  id: string;
+  recipientEmail: string;
+  recipientUserId?: string;
+  senderUserId: string;
+  senderName: string;
+  type: AppNotificationType;
+  title: string;
+  message: string;
+  leagueId: string;
+  leagueName: string;
+  assignedRole: LeagueMemberRole;
+  memberId: string;
+  status: "PENDING" | "ACCEPTED" | "DECLINED";
+  isRead: boolean;
   createdAt: string;
 }
 

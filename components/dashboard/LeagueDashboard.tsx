@@ -450,7 +450,9 @@ export function LeagueDashboard() {
 
     setIsAddingMember(false);
     if (result) {
-      setMemberActionNotice(`Successfully added ${result.displayName} as ${result.role.replace("_", " ")}!`);
+      setMemberActionNotice(
+        `Role invitation sent to ${result.displayName || result.email} (${result.role.replace("_", " ")})! They must accept the in-app notification before acquiring permissions.`
+      );
       setNewMemberEmail("");
       setNewMemberName("");
     }
@@ -5151,7 +5153,7 @@ create policy "Auth teams delete" on public.teams for delete using (auth.uid() =
                 className="inline-flex items-center gap-1.5 rounded-xl bg-[#0B2F5C] px-4 py-2 text-xs font-black uppercase tracking-wider text-white shadow-xs hover:opacity-95 disabled:opacity-50 cursor-pointer"
               >
                 <UserPlus className="h-3.5 w-3.5" />
-                {isAddingMember ? "Adding..." : "Add to League"}
+                {isAddingMember ? "Sending Invite..." : "Send Role Invitation"}
               </button>
             </div>
           </form>
@@ -5159,7 +5161,7 @@ create policy "Auth teams delete" on public.teams for delete using (auth.uid() =
           {/* Existing Assigned Members List */}
           <div className="space-y-3">
             <h3 className="text-xs font-black uppercase tracking-wider text-slate-700">
-              Active Admins &amp; Table Officials ({selectedLeague?.members?.length ?? 0})
+              League Admins &amp; Table Officials ({selectedLeague?.members?.length ?? 0})
             </h3>
 
             {(!selectedLeague?.members || selectedLeague.members.length === 0) ? (
@@ -5194,6 +5196,23 @@ create policy "Auth teams delete" on public.teams for delete using (auth.uid() =
                                 : member.role === "SHOT_CLOCK"
                                   ? "Shot Clock Operator"
                                   : "Table Official"}
+                        </span>
+
+                        {/* Status Badge */}
+                        <span
+                          className={`rounded-md px-2 py-0.5 text-[0.62rem] font-black uppercase tracking-wider border ${
+                            member.status === "PENDING"
+                              ? "bg-amber-50 text-amber-700 border-amber-300"
+                              : member.status === "DECLINED"
+                                ? "bg-rose-50 text-rose-700 border-rose-300"
+                                : "bg-emerald-50 text-emerald-700 border-emerald-300"
+                          }`}
+                        >
+                          {member.status === "PENDING"
+                            ? "Pending Acceptance"
+                            : member.status === "DECLINED"
+                              ? "Declined"
+                              : "Active Official"}
                         </span>
                       </div>
                       <span className="text-[0.7rem] text-slate-500">
