@@ -1265,6 +1265,7 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
             email: String(m.email),
             displayName: String(m.display_name ?? m.email),
             role: m.role as LeagueMemberRole,
+            status: (m.status as "PENDING" | "ACCEPTED" | "DECLINED") || "PENDING",
             addedBy: String(m.added_by),
             createdAt: String(m.created_at ?? new Date().toISOString()),
           }));
@@ -1453,10 +1454,10 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
       }
     }
 
-    // 3. Periodic fallback poll every 8 seconds to ensure seamless sync even if WebSocket reconnects
+    // 3. Periodic fallback poll every 3 seconds to ensure seamless sync even if WebSocket reconnects
     const pollInterval = setInterval(() => {
       void get().fetchLeaguesAndTeams();
-    }, 8000);
+    }, 3000);
 
     return () => {
       clearInterval(pollInterval);
@@ -2198,6 +2199,7 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
         await supabase
           .from("league_members")
           .update({
+            status: "ACCEPTED",
             user_id: profile?.id,
           })
           .eq("id", targetNotif.memberId);
@@ -2282,6 +2284,13 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
       set({ leagues: nextLeagues });
 
       try {
+        await supabase
+          .from("league_members")
+          .update({
+            status: "DECLINED",
+          })
+          .eq("id", targetNotif.memberId);
+
         await supabase
           .from("leagues")
           .update({ rules_config: updatedRulesConfig })
