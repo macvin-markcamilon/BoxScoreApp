@@ -121,7 +121,17 @@ export function AuthScreens({ initialMode = "login" }: AuthScreensProps) {
       });
 
       if (error) {
-        setErrorMsg(error.message);
+        if (
+          error.message?.includes("504") ||
+          error.status === 504 ||
+          (error as unknown as { statusCode?: number }).statusCode === 504
+        ) {
+          setErrorMsg(
+            "Supabase cloud database is warming up or experiencing high latency (HTTP 504 Gateway Timeout). Please wait a few seconds and try signing in again."
+          );
+        } else {
+          setErrorMsg(error.message);
+        }
         setIsSubmitting(false);
         return;
       }
@@ -185,7 +195,17 @@ export function AuthScreens({ initialMode = "login" }: AuthScreensProps) {
       });
 
       if (error) {
-        setErrorMsg(error.message);
+        if (
+          error.message?.includes("504") ||
+          error.status === 504 ||
+          (error as unknown as { statusCode?: number }).statusCode === 504
+        ) {
+          setErrorMsg(
+            "Supabase cloud database is warming up or experiencing high latency (HTTP 504 Gateway Timeout). Please wait a few seconds and try signing in again."
+          );
+        } else {
+          setErrorMsg(error.message);
+        }
         setIsSubmitting(false);
         return;
       }
