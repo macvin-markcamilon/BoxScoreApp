@@ -725,12 +725,65 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
           .update({ rules_config: enrichedRulesConfig })
           .eq("id", leagueId);
         if (error && error.code !== "PGRST205") {
-          return false;
+          // If direct client update failed or RLS blocked, use server route
+          try {
+            await fetch("/api/league/update-members", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                leagueId,
+                rulesConfig: enrichedRulesConfig,
+              }),
+            });
+          } catch {
+            // Ignore
+          }
         }
       } catch {
-        return false;
+        try {
+          await fetch("/api/league/update-members", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              leagueId,
+              rulesConfig: enrichedRulesConfig,
+            }),
+          });
+        } catch {
+          // Ignore
+        }
       }
     }
+
+    // 3. Broadcast tournament / game session update across browser tabs and Supabase Realtime
+    if (typeof window !== "undefined") {
+      try {
+        const bcNotif = new BroadcastChannel("boxscore_notifications_sync");
+        bcNotif.postMessage({ type: "TOURNAMENT_UPDATED", leagueId });
+        bcNotif.close();
+      } catch {
+        // Ignore
+      }
+      try {
+        const bcGames = new BroadcastChannel("boxscore_game_sessions_sync");
+        bcGames.postMessage({ type: "TOURNAMENT_UPDATED", leagueId });
+        bcGames.close();
+      } catch {
+        // Ignore
+      }
+    }
+
+    try {
+      const syncChannel = supabase.channel("boxscore_realtime_sync");
+      syncChannel.send({
+        type: "broadcast",
+        event: "NOTIFICATION_EVENT",
+        payload: { type: "TOURNAMENT_UPDATED", leagueId },
+      });
+    } catch {
+      // Ignore
+    }
+
     return true;
   },
 
@@ -1278,8 +1331,18 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
         if (rawConfig?._persistedTournament) {
           const localT = nextTournaments[lg.id];
           const cloudT = rawConfig._persistedTournament;
+
+          // Check if cloud tournament has any completed games or scores entered
+          const cloudHasScores = Array.isArray(cloudT.matches) && cloudT.matches.some(
+            (m) => m.status === "FINAL" || m.status === "LIVE" || (m.homeScore ?? 0) > 0 || (m.awayScore ?? 0) > 0
+          );
+          const localHasScores = Array.isArray(localT?.matches) && localT.matches.some(
+            (m) => m.status === "FINAL" || m.status === "LIVE" || (m.homeScore ?? 0) > 0 || (m.awayScore ?? 0) > 0
+          );
+
           if (
             !localT ||
+            (cloudHasScores && !localHasScores) ||
             new Date(cloudT.updatedAt || 0).getTime() >=
               new Date(localT.updatedAt || 0).getTime()
           ) {

@@ -61,6 +61,7 @@ import {
   BracketingFormatId,
   LeagueRecord,
   LeagueTeam,
+  LeagueTournamentData,
   LeagueWorkspaceTab,
   TournamentMatch,
 } from "@/types/boxscore";
@@ -82,6 +83,7 @@ export function LeagueTournamentWorkspace({
 }: LeagueTournamentWorkspaceProps) {
   const {
     userProfile,
+    isDataLoading,
     tournamentsByLeagueId,
     openMatchInGameManagement,
     saveLeagueTournamentData,
@@ -182,9 +184,21 @@ export function LeagueTournamentWorkspace({
     }
   }, [existingTournament]);
 
-  // Auto-initialize tournament schedule if teams exist and none generated yet
+  // Auto-initialize tournament schedule ONLY if data has loaded, no tournament exists anywhere, teams exist, and user can manage schedule
   useEffect(() => {
-    if (!existingTournament && teams.length >= 2) {
+    // If data is still loading from cloud, wait
+    if (isDataLoading) return;
+    // If the league already has a tournament saved in rulesConfig, wait for store to hydrate or hydrate it directly
+    const rawPersisted = (league.rulesConfig as unknown as Record<string, unknown>)?._persistedTournament as LeagueTournamentData | undefined;
+    if (rawPersisted && rawPersisted.matches && rawPersisted.matches.length > 0) {
+      if (!existingTournament) {
+        saveLeagueTournamentData(league.id, rawPersisted);
+      }
+      return;
+    }
+
+    // Only owners/admins with canManageSchedule should auto-generate a fresh schedule; viewers/officials must never overwrite
+    if (!existingTournament && teams.length >= 2 && canManageSchedule) {
       const initial = generateUnifiedLeagueTournamentData({
         league,
         teams,
@@ -197,7 +211,7 @@ export function LeagueTournamentWorkspace({
       });
       saveLeagueTournamentData(league.id, initial);
     }
-  }, [existingTournament, league, teams, saveLeagueTournamentData]);
+  }, [existingTournament, league, teams, isDataLoading, canManageSchedule, saveLeagueTournamentData]);
 
   const teamMap = new Map(teams.map((t) => [t.id, t]));
 
