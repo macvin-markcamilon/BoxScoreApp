@@ -236,22 +236,6 @@ export function LeagueGameManagement({
 
   const existingTournament = tournamentsByLeagueId[league.id] ?? null;
 
-  useEffect(() => {
-    if (!existingTournament && teams.length >= 2) {
-      const initial = generateLeagueTournamentData({
-        league,
-        teams,
-        formatId: teams.length >= 6 ? "MULTI_STAGE" : "SINGLE_ELIMINATION",
-        poolsCount: teams.length >= 6 ? 2 : 1,
-        advancingPerPool: 2,
-        seriesBestOf: 3,
-        stepladderVariant: "PAGE_MCINTYRE_TOP4",
-        dailyTimeSlots: DEFAULT_DAILY_TIME_SLOTS,
-      });
-      saveLeagueTournamentData(league.id, initial);
-    }
-  }, [existingTournament, league, teams, saveLeagueTournamentData]);
-
   const matches = useMemo(
     () => existingTournament?.matches ?? [],
     [existingTournament]

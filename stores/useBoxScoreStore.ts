@@ -404,6 +404,9 @@ async function syncTeamsToUserMetadata(_teams: LeagueTeam[]) {
   // Storing team arrays in user_metadata bloats the JWT and crashes auth with 400 Bad Request.
 }
 
+let sessionSaveCloudDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+let lastCloudSaveTime = 0;
+
 export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
   isAuthLoading: true,
   isDataLoading: false,
@@ -503,7 +506,7 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
     set({ gameSessionsByMatchId: nextSessions });
     writeLocalCache(STORAGE_KEYS.GAME_SESSIONS, nextSessions);
 
-    // Broadcast across browser tabs and windows via BroadcastChannel
+    // 1. Broadcast across browser tabs and windows via BroadcastChannel
     if (typeof window !== "undefined") {
       try {
         const bc = new BroadcastChannel("boxscore_game_sessions_sync");
@@ -511,6 +514,47 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
         bc.close();
       } catch {
         // Fallback to localStorage events
+      }
+    }
+
+    // 2. Broadcast via Supabase Realtime so other devices and browsers sync immediately
+    try {
+      const syncChannel = supabase.channel("boxscore_realtime_sync");
+      syncChannel.send({
+        type: "broadcast",
+        event: "GAME_SESSION_UPDATE",
+        payload: { matchId, session },
+      });
+    } catch {
+      // Ignore
+    }
+
+    // 3. Persist live game sessions to Supabase Cloud
+    // Throttled: if clock is running, debounce every 2500ms; if stopped/paused/scored, persist immediately
+    const leagueId = session.leagueId;
+    if (leagueId) {
+      const now = Date.now();
+      const isTick = session.isClockRunning;
+      if (isTick) {
+        if (now - lastCloudSaveTime > 2500) {
+          lastCloudSaveTime = now;
+          void get().persistLeagueGamesToCloud(leagueId);
+        } else {
+          if (sessionSaveCloudDebounceTimer) {
+            clearTimeout(sessionSaveCloudDebounceTimer);
+          }
+          sessionSaveCloudDebounceTimer = setTimeout(() => {
+            lastCloudSaveTime = Date.now();
+            void get().persistLeagueGamesToCloud(leagueId);
+          }, 2500);
+        }
+      } else {
+        if (sessionSaveCloudDebounceTimer) {
+          clearTimeout(sessionSaveCloudDebounceTimer);
+          sessionSaveCloudDebounceTimer = null;
+        }
+        lastCloudSaveTime = now;
+        void get().persistLeagueGamesToCloud(leagueId);
       }
     }
   },
@@ -537,11 +581,29 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
       .filter((t) => !deletedIds.includes(t.leagueId))
       .map(hydrateTeamImagesFromVault);
 
+    const currentSessions = get().gameSessionsByMatchId;
+    const mergedSessions: Record<string, LiveGameSession> = {
+      ...currentSessions,
+    };
+    for (const [mId, cached] of Object.entries(cachedSessions)) {
+      const current = currentSessions[mId];
+      if (!current) {
+        mergedSessions[mId] = cached;
+      } else {
+        // If local memory has an actively ticking clock, do NOT allow stale cached session to stop or revert it
+        if (current.isClockRunning && !cached.isClockRunning) {
+          continue;
+        }
+        const currentUpdated = new Date(current.updatedAt || 0).getTime();
+        const cachedUpdated = new Date(cached.updatedAt || 0).getTime();
+        if (cachedUpdated >= currentUpdated) {
+          mergedSessions[mId] = cached;
+        }
+      }
+    }
+
     set({
-      gameSessionsByMatchId: {
-        ...get().gameSessionsByMatchId,
-        ...cachedSessions,
-      },
+      gameSessionsByMatchId: mergedSessions,
       tournamentsByLeagueId: {
         ...get().tournamentsByLeagueId,
         ...cachedTournaments,
@@ -1290,9 +1352,15 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
         .map(hydrateTeamImagesFromVault);
 
       // Hydrate cloud-saved tournaments, referees, and game sessions from active leagues only
-      const nextTournaments: Record<string, LeagueTournamentData> = {};
-      const nextReferees: Record<string, LeagueReferee[]> = {};
-      const nextGameSessions: Record<string, LiveGameSession> = {};
+      const nextTournaments: Record<string, LeagueTournamentData> = {
+        ...get().tournamentsByLeagueId,
+      };
+      const nextReferees: Record<string, LeagueReferee[]> = {
+        ...get().refereesByLeagueId,
+      };
+      const nextGameSessions: Record<string, LiveGameSession> = {
+        ...get().gameSessionsByMatchId,
+      };
 
       for (const lg of mappedLeagues) {
         const rawConfig = lg.rulesConfig as LeagueRulesConfig & {
@@ -1367,12 +1435,18 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
             rawConfig._persistedGameSessions
           )) {
             const localSess = nextGameSessions[mId];
-            if (
-              !localSess ||
-              new Date(cloudSess.updatedAt || 0).getTime() >=
-                new Date(localSess.updatedAt || 0).getTime()
-            ) {
+            if (!localSess) {
               nextGameSessions[mId] = cloudSess;
+            } else {
+              // If local session currently has an active clock running, never allow cloud to overwrite or pause it
+              if (localSess.isClockRunning && !cloudSess.isClockRunning) {
+                continue;
+              }
+              const cloudTime = new Date(cloudSess.updatedAt || 0).getTime();
+              const localTime = new Date(localSess.updatedAt || 0).getTime();
+              if (cloudTime >= localTime) {
+                nextGameSessions[mId] = cloudSess;
+              }
             }
           }
         }
@@ -1501,6 +1575,25 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
       )
       .on("broadcast", { event: "NOTIFICATION_EVENT" }, () => {
         void get().fetchLeaguesAndTeams();
+      })
+      .on("broadcast", { event: "GAME_SESSION_UPDATE" }, (payload: { payload?: { matchId?: string; session?: LiveGameSession } }) => {
+        const matchId = payload?.payload?.matchId;
+        const incomingSession = payload?.payload?.session;
+        if (matchId && incomingSession) {
+          const currentSessions = get().gameSessionsByMatchId;
+          const current = currentSessions[matchId];
+          // If we are locally running the clock and the incoming session is stopped or older, don't revert
+          if (current?.isClockRunning && !incomingSession.isClockRunning) {
+            return;
+          }
+          const currentUpdated = new Date(current?.updatedAt || 0).getTime();
+          const incomingUpdated = new Date(incomingSession.updatedAt || 0).getTime();
+          if (!current || incomingUpdated >= currentUpdated) {
+            const next = { ...currentSessions, [matchId]: incomingSession };
+            set({ gameSessionsByMatchId: next });
+            writeLocalCache(STORAGE_KEYS.GAME_SESSIONS, next);
+          }
+        }
       })
       .subscribe();
 
