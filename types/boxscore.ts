@@ -180,6 +180,7 @@ export interface LiveGameSession {
   clockSecondsRemaining: number;
   shotClockSeconds: number;
   isClockRunning: boolean;
+  clockLeaderId?: string;
   possessionArrow: "HOME" | "AWAY";
   activeBallPossession?: "HOME" | "AWAY";
   homeScore: number;

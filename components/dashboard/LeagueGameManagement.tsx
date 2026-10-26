@@ -345,6 +345,9 @@ export function LeagueGameManagement({
   const [timeoutSecondsRemaining, setTimeoutSecondsRemaining] = useState<number>(0);
   const [isSavingLiveGame, setIsSavingLiveGame] = useState(false);
 
+  // Dedicated client instance ID for clock leadership (prevents multiple tabs/windows from duplicate countdown ticks)
+  const clientInstanceIdRef = useRef<string>(generateUUID());
+
   // Active Basketball Play State-Machine Flow
   const [activePlayFlow, setActivePlayFlow] = useState<PlayFlowState | null>(
     null
@@ -447,6 +450,15 @@ export function LeagueGameManagement({
   useEffect(() => {
     if (!matchId || !isClockRunning) return;
 
+    // Leader election: Only the window that started the clock (or took leadership) runs the countdown tick.
+    // Passive windows display the leader's tick via BroadcastChannel and Supabase Realtime without double-ticking.
+    const isClockLeader =
+      !session?.clockLeaderId ||
+      session.clockLeaderId === clientInstanceIdRef.current;
+    if (!isClockLeader) {
+      return;
+    }
+
     let lastTickTime = Date.now();
     let accumulatedMs = 0;
 
@@ -540,6 +552,7 @@ export function LeagueGameManagement({
         clockSecondsRemaining: nextGameClock,
         shotClockSeconds: nextShotClock,
         isClockRunning: nextGameClock > 0,
+        clockLeaderId: clientInstanceIdRef.current,
         homePlayerStats: updatedHomeStats,
         awayPlayerStats: updatedAwayStats,
         updatedAt: new Date().toISOString(),
@@ -547,7 +560,7 @@ export function LeagueGameManagement({
     }, 250);
 
     return () => clearInterval(timer);
-  }, [matchId, isClockRunning, saveGameSession]);
+  }, [matchId, isClockRunning, session?.clockLeaderId, saveGameSession]);
 
   // Live Timeout Countdown Timer (60s official timeout countdown)
   useEffect(() => {
@@ -674,6 +687,7 @@ export function LeagueGameManagement({
       return {
         ...prev,
         isClockRunning: nextRunning,
+        clockLeaderId: nextRunning ? clientInstanceIdRef.current : undefined,
       };
     });
   };

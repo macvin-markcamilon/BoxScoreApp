@@ -752,6 +752,7 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
       ...r,
       imageUrl: "", // keep cloud payload compact; portraits are in Image Vault or generated
     }));
+    const leagueTeams = state.teams.filter((t) => t.leagueId === leagueId);
     const leagueGameSessions: Record<string, LiveGameSession> = {};
     for (const [mId, sess] of Object.entries(state.gameSessionsByMatchId)) {
       if (sess.leagueId === leagueId) {
@@ -763,6 +764,7 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
     writeLocalCache(STORAGE_KEYS.TOURNAMENTS, state.tournamentsByLeagueId);
     writeLocalCache(STORAGE_KEYS.REFEREES, state.refereesByLeagueId);
     writeLocalCache(STORAGE_KEYS.GAME_SESSIONS, state.gameSessionsByMatchId);
+    writeLocalCache(STORAGE_KEYS.TEAMS, state.teams);
 
     if (!league) return true;
 
@@ -771,6 +773,7 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
       _persistedTournament: tournament ?? null,
       _persistedReferees: referees,
       _persistedGameSessions: leagueGameSessions,
+      _persistedTeams: leagueTeams,
     } as LeagueRulesConfig & Record<string, unknown>;
 
     const nextLeagues = state.leagues.map((l) =>
@@ -1367,9 +1370,18 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
           _persistedTournament?: LeagueTournamentData | null;
           _persistedReferees?: LeagueReferee[];
           _persistedGameSessions?: Record<string, LiveGameSession>;
+          _persistedTeams?: LeagueTeam[];
           _persistedMembers?: LeagueMember[];
           _persistedCategories?: LeagueCategory[];
         };
+
+        if (Array.isArray(rawConfig?._persistedTeams) && rawConfig._persistedTeams.length > 0) {
+          for (const pt of rawConfig._persistedTeams) {
+            if (!mappedTeams.some((t) => t.id === pt.id)) {
+              mappedTeams.push(hydrateTeamImagesFromVault(pt));
+            }
+          }
+        }
 
         if (Array.isArray(rawConfig?._persistedCategories) && rawConfig._persistedCategories.length > 0) {
           lg.categories = rawConfig._persistedCategories;
@@ -1556,12 +1568,19 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
   },
 
   setupRealtimeSubscriptions: () => {
-    // 1. Supabase Realtime Postgres Changes on `leagues` and `league_members` tables
+    // 1. Supabase Realtime Postgres Changes on `leagues`, `teams`, and `league_members` tables
     const realtimeChannel = supabase
       .channel("boxscore_realtime_sync")
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "leagues" },
+        () => {
+          void get().fetchLeaguesAndTeams();
+        }
+      )
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "teams" },
         () => {
           void get().fetchLeaguesAndTeams();
         }
