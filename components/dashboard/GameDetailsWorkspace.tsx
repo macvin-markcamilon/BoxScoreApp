@@ -960,16 +960,19 @@ export function GameDetailsWorkspace({
     });
 
     // 6. PLAYER IMAGE (DRAWN BEFORE BADGE)
-    // Matches Image 1 / Blueprint: Positioned to the left, shifted 10% more to the left (-280px)
+    // Matches Blueprint: Anchored so that player's torso/face center is consistently aligned at ~315px from left edge
+    // Regardless of whether it is an NBA landscape cutout (1040x760, aspect 1.37) or a 1:1 user profile upload (aspect 1.0)
     const playerImgUrl = selectedInfographicPlayer.imageUrl;
     const playerImg = await loadImageAsync(playerImgUrl);
 
     if (playerImg) {
-      // Scale player image while maintaining aspect ratio, anchored to bottom left
+      // Scale player image while maintaining aspect ratio, anchored to bottom
       const targetHeight = 880;
       const aspect = playerImg.width / playerImg.height;
       const targetWidth = targetHeight * aspect;
-      const drawX = -288;
+      // Fixed center alignment point at X = 315px ensures both landscape (aspect > 1.2) and square (aspect ~ 1.0)
+      // player portraits occupy the exact same optical horizontal position.
+      const drawX = Math.round(315 - targetWidth / 2);
       const drawY = 1080 - targetHeight;
       ctx.drawImage(playerImg, drawX, drawY, targetWidth, targetHeight);
     } else {

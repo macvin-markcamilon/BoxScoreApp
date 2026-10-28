@@ -1130,7 +1130,7 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
             weight_kg: updatedProfile.weightKg,
             positions: updatedProfile.positions,
             account_roles: updatedProfile.accountRoles,
-            image_url: updatedProfile.imageUrl,
+            avatar_url: updatedProfile.imageUrl,
             bio: updatedProfile.bio,
             jersey_number: updatedProfile.jerseyNumber,
             phone: updatedProfile.phone,
