@@ -1,60 +1,64 @@
 "use client";
 
-import React, { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import {
   ArrowLeft,
+  ArrowRight,
+  ArrowLeftRight,
   Camera,
+  Check,
   Circle,
+  Copy,
   Download,
-  FastForward,
-  FolderDown,
+  Film,
+  Grid,
   HardDrive,
-  Info,
-  Maximize2,
-  Minimize2,
-  Play,
+  Layers,
+  Layout,
+  Monitor,
   Pause,
+  Play,
+  Plus,
+  Radio,
   RefreshCw,
   Repeat,
-  Radio,
+  Scissors,
   Settings,
-  Shield,
+  Sliders,
+  Sparkles,
   Square,
   Trash2,
   Tv,
   Video,
-  Volume2,
-  VolumeX,
-  Sliders,
-  Sparkles,
-  Layers,
-  ChevronDown,
-  Copy,
-  Check,
-  Film,
+  Zap,
 } from "lucide-react";
 import { BoxScoreLogo } from "@/components/brand/BoxScoreLogo";
 import { useBoxScoreStore } from "@/stores/useBoxScoreStore";
 import {
   StoredGameVideo,
+  TimelineFrame,
   saveVideoToIndexedDB,
   getAllStoredVideos,
   deleteStoredVideo,
 } from "@/lib/video-storage";
 import { generateUUID } from "@/lib/uuid";
-import {
-  LeagueRecord,
-  LeagueTeam,
-  LiveGameSession,
-  TournamentMatch,
-} from "@/types/boxscore";
+import { LiveGameSession } from "@/types/boxscore";
 
 function formatClock(seconds: number): string {
-  const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
+  const safe = Math.max(0, Math.floor(seconds));
+  const m = Math.floor(safe / 60);
+  const s = safe % 60;
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
+function formatPreciseTime(seconds: number): string {
+  const safe = Math.max(0, seconds);
+  const m = Math.floor(safe / 60);
+  const s = Math.floor(safe % 60);
+  const tenths = Math.floor((safe % 1) * 10);
+  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}.${tenths}`;
 }
 
 function getPeriodLabel(period: number, maxRegularPeriods = 4): string {
@@ -65,7 +69,140 @@ function getPeriodLabel(period: number, maxRegularPeriods = 4): string {
   return otIndex === 1 ? "OT" : `OT${otIndex}`;
 }
 
-export type StorageLocation = "browser_indexeddb" | "local_filesystem" | "download_prompt";
+export type StorageLocation =
+  | "browser_indexeddb"
+  | "local_filesystem"
+  | "download_prompt";
+
+export type SceneLayoutMode =
+  | "single"
+  | "split_50_50"
+  | "pip_bottom_right"
+  | "pip_top_right"
+  | "quad_grid";
+
+export interface SceneCameraSlot {
+  id: string;
+  label: string;
+  sourceType: "camera" | "screen" | "court_sim";
+  deviceId: string;
+  angleName: string;
+}
+
+export interface ReplayClipConfig {
+  videoId: string;
+  videoTitle: string;
+  startSec: number;
+  endSec: number;
+  playbackRate: number;
+}
+
+export interface StudioScene {
+  id: string;
+  name: string;
+  kind: "camera_scene" | "replay_scene";
+  layout: SceneLayoutMode;
+  cameras: SceneCameraSlot[];
+  replayConfig?: ReplayClipConfig;
+}
+
+const DEFAULT_SCENES: StudioScene[] = [
+  {
+    id: "scene-main-1cam",
+    name: "Scene 1: Main Court (1 Cam)",
+    kind: "camera_scene",
+    layout: "single",
+    cameras: [
+      {
+        id: "cam-slot-1",
+        label: "Camera 1 (Center Court)",
+        sourceType: "camera",
+        deviceId: "",
+        angleName: "CAM 1 • CENTER COURT",
+      },
+    ],
+  },
+  {
+    id: "scene-dual-2cam",
+    name: "Scene 2: Dual Camera Split (2 Cams)",
+    kind: "camera_scene",
+    layout: "split_50_50",
+    cameras: [
+      {
+        id: "cam-slot-2a",
+        label: "Camera 1 (Main Wide)",
+        sourceType: "camera",
+        deviceId: "",
+        angleName: "CAM 1 • WIDE",
+      },
+      {
+        id: "cam-slot-2b",
+        label: "Camera 2 (Baseline / Rim)",
+        sourceType: "court_sim",
+        deviceId: "",
+        angleName: "CAM 2 • BASELINE",
+      },
+    ],
+  },
+  {
+    id: "scene-pip-2cam",
+    name: "Scene 3: Court + Coach PiP (2 Cams)",
+    kind: "camera_scene",
+    layout: "pip_bottom_right",
+    cameras: [
+      {
+        id: "cam-slot-3a",
+        label: "Camera 1 (Main Court)",
+        sourceType: "camera",
+        deviceId: "",
+        angleName: "CAM 1 • MAIN",
+      },
+      {
+        id: "cam-slot-3b",
+        label: "Camera 2 (Bench / Rim PiP)",
+        sourceType: "court_sim",
+        deviceId: "",
+        angleName: "CAM 2 • BENCH PIP",
+      },
+    ],
+  },
+  {
+    id: "scene-quad-4cam",
+    name: "Scene 4: Multi-Cam Quad (4 Cams)",
+    kind: "camera_scene",
+    layout: "quad_grid",
+    cameras: [
+      {
+        id: "cam-slot-4a",
+        label: "Camera 1 (Center)",
+        sourceType: "camera",
+        deviceId: "",
+        angleName: "CAM 1 • CENTER",
+      },
+      {
+        id: "cam-slot-4b",
+        label: "Camera 2 (Left Rim)",
+        sourceType: "court_sim",
+        deviceId: "",
+        angleName: "CAM 2 • LEFT RIM",
+      },
+      {
+        id: "cam-slot-4c",
+        label: "Camera 3 (Right Rim)",
+        sourceType: "court_sim",
+        deviceId: "",
+        angleName: "CAM 3 • RIGHT RIM",
+      },
+      {
+        id: "cam-slot-4d",
+        label: "Camera 4 (Scorers Table)",
+        sourceType: "court_sim",
+        deviceId: "",
+        angleName: "CAM 4 • TABLE",
+      },
+    ],
+  },
+];
 
 function LiveBroadcastStudioContent() {
   const searchParams = useSearchParams();
@@ -82,53 +219,73 @@ function LiveBroadcastStudioContent() {
     syncFromLocalStorage,
   } = useBoxScoreStore();
 
-  // Selected League & Match state
+  // Selected League & Match
   const [selectedLeagueId, setSelectedLeagueId] = useState<string>("");
   const [selectedMatchId, setSelectedMatchId] = useState<string>("");
 
-  // Video Devices & Source State
+  // OBS Scenes State (Preview on Left, Live Program on Right)
+  const [scenes, setScenes] = useState<StudioScene[]>(DEFAULT_SCENES);
+  const [previewSceneId, setPreviewSceneId] = useState<string>("scene-main-1cam");
+  const [liveSceneId, setLiveSceneId] = useState<string>("scene-main-1cam");
+  const [isTransitioning, setIsTransitioning] = useState<boolean>(false);
+  const [showOverlayInPreview, setShowOverlayInPreview] = useState<boolean>(true);
+  const [newSceneNameInput, setNewSceneNameInput] = useState<string>("");
+
+  // Hardware Video Devices & Active Streams Map (keyed by slot.id)
   const [videoDevices, setVideoDevices] = useState<MediaDeviceInfo[]>([]);
-  const [selectedDeviceId, setSelectedDeviceId] = useState<string>("");
-  const [videoSourceType, setVideoSourceType] = useState<"camera" | "screen">("camera");
-  const [cameraActive, setCameraActive] = useState<boolean>(false);
+  const [activeSlotIds, setActiveSlotIds] = useState<Record<string, boolean>>({});
   const [cameraError, setCameraError] = useState<string | null>(null);
+  const streamBySlotRef = useRef<Record<string, MediaStream>>({});
+  const videoElBySlotRef = useRef<Record<string, HTMLVideoElement>>({});
 
   // Scorebug Overlay Customization
-  const [scorebugPosition, setScorebugPosition] = useState<"bottom_bar" | "top_bar" | "top_corner">("bottom_bar");
-  const [scorebugTheme, setScorebugTheme] = useState<"broadcast_dark" | "clean_light" | "vibrant_neon">("broadcast_dark");
+  const [scorebugPosition, setScorebugPosition] = useState<"bottom_bar" | "top_corner">("bottom_bar");
+  const [scorebugTheme, setScorebugTheme] = useState<"broadcast_dark" | "clean_light">("broadcast_dark");
   const [showShotClock, setShowShotClock] = useState<boolean>(true);
-  const [showLeagueLogo, setShowLeagueLogo] = useState<boolean>(true);
   const [showSponsorTag, setShowSponsorTag] = useState<boolean>(true);
   const [sponsorText, setSponsorText] = useState<string>("BOX SCORE LIVE");
 
-  // Recording State
+  // Recording & Live Timeline State
   const [isRecording, setIsRecording] = useState<boolean>(false);
   const [recordSeconds, setRecordSeconds] = useState<number>(0);
+  const [liveRecordingFrames, setLiveRecordingFrames] = useState<TimelineFrame[]>([]);
   const [storageLocation, setStorageLocation] = useState<StorageLocation>("browser_indexeddb");
 
-  // Stored Videos & Replay State
+  // Saved Recordings & Bottom Camera Timeline State
   const [storedVideos, setStoredVideos] = useState<StoredGameVideo[]>([]);
-  const [replayVideo, setReplayVideo] = useState<StoredGameVideo | null>(null);
-  const [isReplayPlaying, setIsReplayPlaying] = useState<boolean>(false);
-  const [replaySpeed, setReplaySpeed] = useState<number>(0.5); // Slow-mo default 0.5x (or 0.25x)
-  const [replayLoop, setReplayLoop] = useState<boolean>(true);
-  const [isOverlayingReplayOnLive, setIsOverlayingReplayOnLive] = useState<boolean>(false);
-
-  // Streaming Guide Tab
-  const [activeControlTab, setActiveControlTab] = useState<"camera" | "scorebug" | "recording" | "replays" | "streaming">("camera");
+  const [selectedTimelineVideoId, setSelectedTimelineVideoId] = useState<string>("");
+  const [timelinePlayheadSec, setTimelinePlayheadSec] = useState<number>(0);
+  const [trimStartSec, setTrimStartSec] = useState<number>(0);
+  const [trimEndSec, setTrimEndSec] = useState<number>(8);
+  const [selectedReplaySpeed, setSelectedReplaySpeed] = useState<number>(0.5);
+  const [replayClipLabel, setReplayClipLabel] = useState<string>("");
+  const [timelineNotice, setTimelineNotice] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
-  // References
-  const videoPreviewRef = useRef<HTMLVideoElement | null>(null);
-  const canvasCompositeRef = useRef<HTMLCanvasElement | null>(null);
-  const replayVideoRef = useRef<HTMLVideoElement | null>(null);
+  // Canvas & Video Refs
+  const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const liveCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const previewReplayVideoRef = useRef<HTMLVideoElement | null>(null);
+  const liveReplayVideoRef = useRef<HTMLVideoElement | null>(null);
+  const timelineScrubVideoRef = useRef<HTMLVideoElement | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<Blob[]>([]);
   const recordIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  const animationFrameRef = useRef<number | null>(null);
-  const currentStreamRef = useRef<MediaStream | null>(null);
+  const liveCaptureFramesRef = useRef<TimelineFrame[]>([]);
+  const recordStartTimeRef = useRef<number>(0);
 
-  // Initialize DB and load leagues/teams
+  // Initialize DB, Realtime & Stored Videos
+  const refreshStoredVideos = useCallback(async () => {
+    const list = await getAllStoredVideos();
+    setStoredVideos(list);
+    if (list.length > 0 && !selectedTimelineVideoId) {
+      const first = list[0];
+      setSelectedTimelineVideoId(first.id);
+      setTrimStartSec(0);
+      setTrimEndSec(Math.max(2, Math.min(first.durationSeconds || 8, 10)));
+    }
+  }, [selectedTimelineVideoId]);
+
   useEffect(() => {
     initializeSession();
     fetchLeaguesAndTeams();
@@ -141,9 +298,9 @@ function LiveBroadcastStudioContent() {
     };
     window.addEventListener("storage", handleStorage);
     return () => window.removeEventListener("storage", handleStorage);
-  }, [initializeSession, fetchLeaguesAndTeams, syncFromLocalStorage]);
+  }, [initializeSession, fetchLeaguesAndTeams, syncFromLocalStorage, refreshStoredVideos]);
 
-  // Set initial selected league & match
+  // Select Initial League
   useEffect(() => {
     if (leagues.length > 0 && !selectedLeagueId) {
       if (initialLeagueId && leagues.some((l) => l.id === initialLeagueId)) {
@@ -154,19 +311,15 @@ function LiveBroadcastStudioContent() {
     }
   }, [leagues, initialLeagueId, selectedLeagueId]);
 
-  // Current selected league object
   const activeLeague = useMemo(() => {
     return leagues.find((l) => l.id === selectedLeagueId) ?? leagues[0] ?? null;
   }, [leagues, selectedLeagueId]);
 
-  // Current matches in the selected league
   const matches = useMemo(() => {
     if (!activeLeague) return [];
-    const tourney = tournamentsByLeagueId[activeLeague.id];
-    return tourney?.matches ?? [];
+    return tournamentsByLeagueId[activeLeague.id]?.matches ?? [];
   }, [activeLeague, tournamentsByLeagueId]);
 
-  // Match selection update
   useEffect(() => {
     if (matches.length > 0) {
       if (initialMatchId && matches.some((m) => m.id === initialMatchId)) {
@@ -183,13 +336,11 @@ function LiveBroadcastStudioContent() {
     return matches.find((m) => m.id === selectedMatchId) ?? matches[0] ?? null;
   }, [matches, selectedMatchId]);
 
-  // Live session for the active match
   const liveSession: LiveGameSession | null = useMemo(() => {
     if (!activeMatch) return null;
     return gameSessionsByMatchId[activeMatch.id] ?? null;
   }, [activeMatch, gameSessionsByMatchId]);
 
-  // Teams info
   const homeTeam = useMemo(() => {
     if (!activeMatch) return null;
     return teams.find((t) => t.id === activeMatch.homeTeamId) ?? null;
@@ -212,402 +363,850 @@ function LiveBroadcastStudioContent() {
   const homeColor = homeTeam?.primaryColor ?? "#8B0D0E";
   const awayColor = awayTeam?.primaryColor ?? "#0B2F5C";
 
-  // Enumerate Cameras & Audio Input Devices
+  // Active Preview & Live Scene objects
+  const previewScene = useMemo(
+    () => scenes.find((s) => s.id === previewSceneId) ?? scenes[0],
+    [scenes, previewSceneId]
+  );
+  const liveScene = useMemo(
+    () => scenes.find((s) => s.id === liveSceneId) ?? scenes[0],
+    [scenes, liveSceneId]
+  );
+
+  // Selected Timeline Video
+  const selectedTimelineVideo = useMemo(
+    () => storedVideos.find((v) => v.id === selectedTimelineVideoId) ?? storedVideos[0] ?? null,
+    [storedVideos, selectedTimelineVideoId]
+  );
+
+  // Enumerate Camera Devices
+  const refreshCameraDevices = useCallback(async () => {
+    if (typeof navigator === "undefined" || !navigator.mediaDevices?.enumerateDevices) {
+      return;
+    }
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const vInputs = devices.filter((d) => d.kind === "videoinput");
+      setVideoDevices(vInputs);
+    } catch {
+      // Ignore before permissions granted
+    }
+  }, []);
+
   useEffect(() => {
-    async function getDevices() {
-      if (typeof navigator === "undefined" || !navigator.mediaDevices?.enumerateDevices) {
+    refreshCameraDevices();
+  }, [refreshCameraDevices]);
+
+  // Ensure hidden <video> element exists for each camera slot
+  const getOrCreateSlotVideoElement = (slotId: string): HTMLVideoElement => {
+    if (!videoElBySlotRef.current[slotId]) {
+      const vid = document.createElement("video");
+      vid.playsInline = true;
+      vid.muted = true;
+      vid.autoplay = true;
+      videoElBySlotRef.current[slotId] = vid;
+    }
+    return videoElBySlotRef.current[slotId];
+  };
+
+  // Start Camera or Screen Stream for a specific Slot
+  const startCameraSlot = async (slot: SceneCameraSlot) => {
+    setCameraError(null);
+    if (slot.sourceType === "court_sim") {
+      setActiveSlotIds((prev) => ({ ...prev, [slot.id]: true }));
+      return;
+    }
+
+    try {
+      // Stop existing stream on this slot if any
+      if (streamBySlotRef.current[slot.id]) {
+        streamBySlotRef.current[slot.id].getTracks().forEach((t) => t.stop());
+      }
+
+      let stream: MediaStream;
+      if (slot.sourceType === "screen") {
+        stream = await navigator.mediaDevices.getDisplayMedia({
+          video: { width: { ideal: 1920 }, height: { ideal: 1080 } },
+          audio: true,
+        });
+      } else {
+        const constraints: MediaStreamConstraints = {
+          video: slot.deviceId
+            ? { deviceId: { exact: slot.deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
+            : { width: { ideal: 1280 }, height: { ideal: 720 } },
+          audio: true,
+        };
+        stream = await navigator.mediaDevices.getUserMedia(constraints);
+      }
+
+      streamBySlotRef.current[slot.id] = stream;
+      const vidEl = getOrCreateSlotVideoElement(slot.id);
+      vidEl.srcObject = stream;
+      await vidEl.play().catch(() => {});
+
+      setActiveSlotIds((prev) => ({ ...prev, [slot.id]: true }));
+      await refreshCameraDevices();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Could not start camera source.";
+      setCameraError(msg);
+    }
+  };
+
+  const stopCameraSlot = (slotId: string) => {
+    if (streamBySlotRef.current[slotId]) {
+      streamBySlotRef.current[slotId].getTracks().forEach((t) => t.stop());
+      delete streamBySlotRef.current[slotId];
+    }
+    if (videoElBySlotRef.current[slotId]) {
+      videoElBySlotRef.current[slotId].srcObject = null;
+    }
+    setActiveSlotIds((prev) => ({ ...prev, [slotId]: false }));
+  };
+
+  // Sync Replay Video Elements when previewScene or liveScene is a Replay Scene
+  useEffect(() => {
+    const syncReplayElement = (
+      scene: StudioScene | undefined,
+      vidEl: HTMLVideoElement | null
+    ) => {
+      if (!vidEl) return;
+      if (!scene || scene.kind !== "replay_scene" || !scene.replayConfig) {
+        vidEl.pause();
         return;
       }
-      try {
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        const vInputs = devices.filter((d) => d.kind === "videoinput");
-        setVideoDevices(vInputs);
-        if (vInputs.length > 0 && !selectedDeviceId) {
-          setSelectedDeviceId(vInputs[0].deviceId);
-        }
-      } catch {
-        // Permissions not granted yet
-      }
-    }
-    getDevices();
-  }, [selectedDeviceId]);
+      const cfg = scene.replayConfig;
+      const targetVideo = storedVideos.find((v) => v.id === cfg.videoId);
+      if (!targetVideo) return;
 
-  // Start Camera Stream
-  const startCamera = async (deviceId?: string) => {
-    setCameraError(null);
-    try {
-      if (currentStreamRef.current) {
-        currentStreamRef.current.getTracks().forEach((t) => t.stop());
+      const currentVideoId = vidEl.getAttribute("data-video-id");
+      if (currentVideoId !== targetVideo.id) {
+        const url = URL.createObjectURL(targetVideo.blob);
+        vidEl.src = url;
+        vidEl.setAttribute("data-video-id", targetVideo.id);
       }
 
-      const devId = deviceId || selectedDeviceId;
-      const constraints: MediaStreamConstraints = {
-        video: devId
-          ? { deviceId: { exact: devId }, width: { ideal: 1920 }, height: { ideal: 1080 } }
-          : { width: { ideal: 1920 }, height: { ideal: 1080 } },
-        audio: true,
-      };
-
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      currentStreamRef.current = stream;
-
-      if (videoPreviewRef.current) {
-        videoPreviewRef.current.srcObject = stream;
-        videoPreviewRef.current.play().catch(() => {});
+      vidEl.playbackRate = cfg.playbackRate;
+      if (vidEl.currentTime < cfg.startSec || vidEl.currentTime >= cfg.endSec) {
+        vidEl.currentTime = cfg.startSec;
       }
-      setCameraActive(true);
-      setVideoSourceType("camera");
-
-      // Re-enumerate to fetch user-friendly device labels now that permission is active
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      setVideoDevices(devices.filter((d) => d.kind === "videoinput"));
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Failed to access camera.";
-      setCameraError(msg);
-      setCameraActive(false);
-    }
-  };
-
-  // Start Screen Capture (e.g. Window, Game Feed, HDMI Capture Card)
-  const startScreenShare = async () => {
-    setCameraError(null);
-    try {
-      if (currentStreamRef.current) {
-        currentStreamRef.current.getTracks().forEach((t) => t.stop());
+      if (vidEl.paused) {
+        vidEl.play().catch(() => {});
       }
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { displaySurface: "window" },
-        audio: true,
-      });
-      currentStreamRef.current = stream;
+    };
 
-      if (videoPreviewRef.current) {
-        videoPreviewRef.current.srcObject = stream;
-        videoPreviewRef.current.play().catch(() => {});
-      }
-      setCameraActive(true);
-      setVideoSourceType("screen");
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Failed to share screen/capture card.";
-      setCameraError(msg);
-      setCameraActive(false);
-    }
-  };
+    syncReplayElement(previewScene, previewReplayVideoRef.current);
+    syncReplayElement(liveScene, liveReplayVideoRef.current);
+  }, [previewScene, liveScene, storedVideos]);
 
-  const stopCamera = () => {
-    if (currentStreamRef.current) {
-      currentStreamRef.current.getTracks().forEach((t) => t.stop());
-      currentStreamRef.current = null;
-    }
-    if (videoPreviewRef.current) {
-      videoPreviewRef.current.srcObject = null;
-    }
-    setCameraActive(false);
-  };
-
-  // Continuous Composite Rendering to Offscreen Canvas for OBS / Recordings
+  // Enforce Replay Trim Loop (Start -> End) on both Preview and Live replay players
   useEffect(() => {
-    const canvas = canvasCompositeRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
+    const interval = setInterval(() => {
+      const checkLoop = (scene: StudioScene | undefined, vidEl: HTMLVideoElement | null) => {
+        if (!scene || scene.kind !== "replay_scene" || !scene.replayConfig || !vidEl) return;
+        const { startSec, endSec, playbackRate } = scene.replayConfig;
+        if (vidEl.playbackRate !== playbackRate) {
+          vidEl.playbackRate = playbackRate;
+        }
+        if (vidEl.currentTime >= endSec || vidEl.ended) {
+          vidEl.currentTime = startSec;
+          vidEl.play().catch(() => {});
+        }
+      };
+      checkLoop(previewScene, previewReplayVideoRef.current);
+      checkLoop(liveScene, liveReplayVideoRef.current);
+    }, 100);
+    return () => clearInterval(interval);
+  }, [previewScene, liveScene]);
 
-    let isRunning = true;
+  // Sync Timeline Scrubber Video Element when user selects a video or scrubs playhead
+  useEffect(() => {
+    const vidEl = timelineScrubVideoRef.current;
+    if (!vidEl || !selectedTimelineVideo) return;
+    const currentId = vidEl.getAttribute("data-scrub-id");
+    if (currentId !== selectedTimelineVideo.id) {
+      const url = URL.createObjectURL(selectedTimelineVideo.blob);
+      vidEl.src = url;
+      vidEl.setAttribute("data-scrub-id", selectedTimelineVideo.id);
+    }
+  }, [selectedTimelineVideo]);
 
-    const renderFrame = () => {
-      if (!isRunning) return;
+  // Helper: Draw a single Camera Slot (Real Webcam, Screen, or Simulated Court Angle) into a target rect
+  const drawCameraSlotRect = useCallback(
+    (
+      ctx: CanvasRenderingContext2D,
+      slot: SceneCameraSlot,
+      slotIndex: number,
+      rx: number,
+      ry: number,
+      rw: number,
+      rh: number,
+      nowMs: number
+    ) => {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(rx, ry, rw, rh);
+      ctx.clip();
 
-      const width = canvas.width;
-      const height = canvas.height;
+      const vidEl = videoElBySlotRef.current[slot.id];
+      const isStreamReady =
+        slot.sourceType !== "court_sim" &&
+        activeSlotIds[slot.id] &&
+        vidEl &&
+        vidEl.readyState >= 2;
 
-      // 1. Draw live camera video or screen share
-      if (
-        isOverlayingReplayOnLive &&
-        replayVideoRef.current &&
-        !replayVideoRef.current.paused &&
-        !replayVideoRef.current.ended
-      ) {
-        // Draw Slow-Motion Replay video
-        ctx.drawImage(replayVideoRef.current, 0, 0, width, height);
+      if (isStreamReady && vidEl) {
+        // Draw live webcam / capture card stream with object-cover scaling
+        const vw = vidEl.videoWidth || 1280;
+        const vh = vidEl.videoHeight || 720;
+        const scale = Math.max(rw / vw, rh / vh);
+        const dw = vw * scale;
+        const dh = vh * scale;
+        const dx = rx + (rw - dw) / 2;
+        const dy = ry + (rh - dh) / 2;
+        ctx.drawImage(vidEl, dx, dy, dw, dh);
+      } else if (slot.sourceType === "court_sim" || activeSlotIds[slot.id]) {
+        // Simulated Dynamic Multi-Cam Court Angle Feed (for testing multi-cam or secondary angles)
+        const grad = ctx.createLinearGradient(rx, ry, rx + rw, ry + rh);
+        if (slotIndex % 3 === 0) {
+          grad.addColorStop(0, "#0f172a");
+          grad.addColorStop(1, "#1e3a8a");
+        } else if (slotIndex % 3 === 1) {
+          grad.addColorStop(0, "#18181b");
+          grad.addColorStop(1, "#4c0519");
+        } else {
+          grad.addColorStop(0, "#090d16");
+          grad.addColorStop(1, "#064e3b");
+        }
+        ctx.fillStyle = grad;
+        ctx.fillRect(rx, ry, rw, rh);
 
-        // Slow-Mo Replay Watermark / Indicator
-        ctx.fillStyle = "rgba(225, 29, 72, 0.9)";
+        // Hardwood court lines perspective
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.14)";
+        ctx.lineWidth = 3;
+        ctx.strokeRect(rx + rw * 0.08, ry + rh * 0.12, rw * 0.84, rh * 0.76);
+
+        // Center court circle
         ctx.beginPath();
-        ctx.roundRect(40, 40, 220, 44, [10]);
+        ctx.arc(rx + rw / 2, ry + rh / 2, Math.min(rw, rh) * 0.16, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // Animated tracking basketball indicator so recordings/replays have clear visual motion
+        const t = nowMs / 650 + slotIndex * 1.7;
+        const bx = rx + rw * 0.5 + Math.cos(t) * (rw * 0.26);
+        const by = ry + rh * 0.5 + Math.sin(t * 1.4) * (rh * 0.22);
+
+        // Glow
+        ctx.fillStyle = "rgba(249, 115, 22, 0.28)";
+        ctx.beginPath();
+        ctx.arc(bx, by, 32, 0, Math.PI * 2);
         ctx.fill();
 
-        ctx.fillStyle = "#ffffff";
-        ctx.font = "900 18px 'Inter', sans-serif";
+        // Ball
+        ctx.fillStyle = "#f97316";
+        ctx.beginPath();
+        ctx.arc(bx, by, 18, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = "#7c2d12";
+        ctx.lineWidth = 2.5;
+        ctx.stroke();
+
+        // Center watermark
+        ctx.fillStyle = "rgba(255, 255, 255, 0.85)";
+        ctx.font = "900 24px 'Inter', sans-serif";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
-        ctx.fillText(`⚡ SLOW-MO REPLAY (${replaySpeed}x)`, 150, 62);
-      } else if (
-        cameraActive &&
-        videoPreviewRef.current &&
-        videoPreviewRef.current.readyState >= 2
-      ) {
-        ctx.drawImage(videoPreviewRef.current, 0, 0, width, height);
-      } else {
-        // Black / Dark Slate arena broadcast background
-        ctx.fillStyle = "#090d16";
-        ctx.fillRect(0, 0, width, height);
+        ctx.fillText(slot.angleName || slot.label.toUpperCase(), rx + rw / 2, ry + rh * 0.25);
 
-        // Placeholder graphic
-        ctx.fillStyle = "#1e293b";
-        ctx.beginPath();
-        ctx.arc(width / 2, height / 2 - 30, 80, 0, Math.PI * 2);
-        ctx.fill();
+        ctx.fillStyle = "rgba(148, 163, 184, 0.85)";
+        ctx.font = "700 15px 'Inter', sans-serif";
+        ctx.fillText(
+          `${awayTeamName} ${awayScore} - ${homeScore} ${homeTeamName} • ${formatClock(clockSeconds)}`,
+          rx + rw / 2,
+          ry + rh * 0.78
+        );
+      } else {
+        // Inactive Camera Slot Placeholder
+        ctx.fillStyle = "#090d16";
+        ctx.fillRect(rx, ry, rw, rh);
+
+        ctx.strokeStyle = "rgba(148, 163, 184, 0.15)";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(rx + 2, ry + 2, rw - 4, rh - 4);
+
+        ctx.fillStyle = "#475569";
+        ctx.font = "900 22px 'Inter', sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(slot.label.toUpperCase(), rx + rw / 2, ry + rh / 2 - 14);
 
         ctx.fillStyle = "#64748b";
-        ctx.font = "700 24px 'Inter', sans-serif";
-        ctx.textAlign = "center";
-        ctx.fillText("NO CAMERA FEED SELECTED", width / 2, height / 2 + 80);
-        ctx.font = "500 16px 'Inter', sans-serif";
-        ctx.fillText("Select a webcam, capture card, or screen share to begin", width / 2, height / 2 + 115);
+        ctx.font = "600 14px 'Inter', sans-serif";
+        ctx.fillText(
+          "Click 'Activate Cam' in Sources Dock or switch to Court Sim",
+          rx + rw / 2,
+          ry + rh / 2 + 18
+        );
       }
 
-      // 2. Draw Live Basketball Scorebug Overlay
-      drawScorebugOverlay(ctx, width, height);
-
-      animationFrameRef.current = requestAnimationFrame(renderFrame);
-    };
-
-    renderFrame();
-
-    return () => {
-      isRunning = false;
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current);
-      }
-    };
-  }, [
-    cameraActive,
-    homeTeamName,
-    awayTeamName,
-    homeScore,
-    awayScore,
-    homeColor,
-    awayColor,
-    clockSeconds,
-    shotClock,
-    period,
-    isClockRunning,
-    scorebugPosition,
-    scorebugTheme,
-    showShotClock,
-    showLeagueLogo,
-    showSponsorTag,
-    sponsorText,
-    isOverlayingReplayOnLive,
-    replaySpeed,
-  ]);
-
-  // Scorebug rendering logic on Canvas
-  const drawScorebugOverlay = (ctx: CanvasRenderingContext2D, width: number, height: number) => {
-    const isDark = scorebugTheme !== "clean_light";
-    const bgPrimary = isDark ? "rgba(11, 27, 48, 0.94)" : "rgba(255, 255, 255, 0.96)";
-    const textColor = isDark ? "#ffffff" : "#0f172a";
-    const subTextColor = isDark ? "#94a3b8" : "#64748b";
-    const borderColor = isDark ? "rgba(255, 255, 255, 0.15)" : "rgba(0, 0, 0, 0.12)";
-
-    ctx.save();
-
-    if (scorebugPosition === "bottom_bar") {
-      // Bottom Center ESPN/FIBA Style Broadcast Ribbon
-      const bugW = 860;
-      const bugH = 76;
-      const bugX = (width - bugW) / 2;
-      const bugY = height - bugH - 32;
-
-      // Backdrop shadow
-      ctx.shadowColor = "rgba(0, 0, 0, 0.5)";
-      ctx.shadowBlur = 18;
-      ctx.shadowOffsetY = 6;
-
-      // Base bar
-      ctx.fillStyle = bgPrimary;
+      // Camera Angle Label Pill in top-left of its viewport
+      ctx.fillStyle = "rgba(15, 23, 42, 0.82)";
       ctx.beginPath();
-      ctx.roundRect(bugX, bugY, bugW, bugH, [16]);
+      ctx.roundRect(rx + 16, ry + 16, 220, 32, [8]);
       ctx.fill();
 
-      // Border outline
-      ctx.strokeStyle = borderColor;
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
-
-      ctx.shadowColor = "transparent"; // Reset shadow
-
-      // AWAY TEAM Block
-      ctx.fillStyle = awayColor;
+      ctx.fillStyle = isStreamReady ? "#4ade80" : "#38bdf8";
       ctx.beginPath();
-      ctx.roundRect(bugX + 12, bugY + 10, 8, bugH - 20, [4]);
-      ctx.fill();
-
-      ctx.fillStyle = textColor;
-      ctx.font = "900 22px 'Inter', sans-serif";
-      ctx.textAlign = "left";
-      ctx.textBaseline = "middle";
-      ctx.fillText(awayTeamName.slice(0, 12).toUpperCase(), bugX + 30, bugY + bugH / 2);
-
-      ctx.font = "900 32px 'Inter', sans-serif";
-      ctx.textAlign = "right";
-      ctx.fillText(String(awayScore), bugX + 270, bugY + bugH / 2);
-
-      // VS Divider
-      ctx.strokeStyle = borderColor;
-      ctx.beginPath();
-      ctx.moveTo(bugX + 290, bugY + 12);
-      ctx.lineTo(bugX + 290, bugY + bugH - 12);
-      ctx.stroke();
-
-      // HOME TEAM Block
-      ctx.font = "900 32px 'Inter', sans-serif";
-      ctx.textAlign = "left";
-      ctx.fillText(String(homeScore), bugX + 310, bugY + bugH / 2);
-
-      ctx.fillStyle = textColor;
-      ctx.font = "900 22px 'Inter', sans-serif";
-      ctx.fillText(homeTeamName.slice(0, 12).toUpperCase(), bugX + 380, bugY + bugH / 2);
-
-      ctx.fillStyle = homeColor;
-      ctx.beginPath();
-      ctx.roundRect(bugX + 620, bugY + 10, 8, bugH - 20, [4]);
-      ctx.fill();
-
-      // CLOCK & PERIOD Block (Right Section)
-      ctx.fillStyle = isDark ? "rgba(255, 255, 255, 0.08)" : "rgba(0, 0, 0, 0.06)";
-      ctx.beginPath();
-      ctx.roundRect(bugX + 640, bugY + 8, bugW - 648, bugH - 16, [12]);
-      ctx.fill();
-
-      // Clock Display
-      ctx.fillStyle = isClockRunning ? "#38bdf8" : "#f59e0b";
-      ctx.font = "900 24px 'Inter', sans-serif";
-      ctx.textAlign = "center";
-      ctx.fillText(formatClock(clockSeconds), bugX + 700, bugY + 28);
-
-      // Period Display
-      ctx.fillStyle = subTextColor;
-      ctx.font = "800 12px 'Inter', sans-serif";
-      ctx.fillText(getPeriodLabel(period).toUpperCase(), bugX + 700, bugY + 52);
-
-      // Shot Clock Display
-      if (showShotClock) {
-        ctx.fillStyle = shotClock <= 5 ? "#ef4444" : "#eab308";
-        ctx.font = "900 28px 'Inter', sans-serif";
-        ctx.textAlign = "center";
-        ctx.fillText(String(shotClock), bugX + 790, bugY + bugH / 2);
-      }
-    } else {
-      // Top Left Corner Boxscore Bug
-      const bugW = 420;
-      const bugH = 100;
-      const bugX = 40;
-      const bugY = 40;
-
-      ctx.shadowColor = "rgba(0, 0, 0, 0.45)";
-      ctx.shadowBlur = 14;
-      ctx.shadowOffsetY = 4;
-
-      ctx.fillStyle = bgPrimary;
-      ctx.beginPath();
-      ctx.roundRect(bugX, bugY, bugW, bugH, [16]);
-      ctx.fill();
-
-      ctx.strokeStyle = borderColor;
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
-
-      ctx.shadowColor = "transparent";
-
-      // Away row
-      ctx.fillStyle = awayColor;
-      ctx.beginPath();
-      ctx.roundRect(bugX + 12, bugY + 12, 6, 32, [3]);
-      ctx.fill();
-
-      ctx.fillStyle = textColor;
-      ctx.font = "900 17px 'Inter', sans-serif";
-      ctx.textAlign = "left";
-      ctx.textBaseline = "middle";
-      ctx.fillText(awayTeamName.slice(0, 14).toUpperCase(), bugX + 28, bugY + 28);
-
-      ctx.font = "900 22px 'Inter', sans-serif";
-      ctx.textAlign = "right";
-      ctx.fillText(String(awayScore), bugX + 250, bugY + 28);
-
-      // Home row
-      ctx.fillStyle = homeColor;
-      ctx.beginPath();
-      ctx.roundRect(bugX + 12, bugY + 56, 6, 32, [3]);
-      ctx.fill();
-
-      ctx.fillStyle = textColor;
-      ctx.font = "900 17px 'Inter', sans-serif";
-      ctx.textAlign = "left";
-      ctx.fillText(homeTeamName.slice(0, 14).toUpperCase(), bugX + 28, bugY + 72);
-
-      ctx.font = "900 22px 'Inter', sans-serif";
-      ctx.textAlign = "right";
-      ctx.fillText(String(homeScore), bugX + 250, bugY + 72);
-
-      // Right Side Time Box
-      ctx.fillStyle = isDark ? "rgba(255, 255, 255, 0.08)" : "rgba(0, 0, 0, 0.06)";
-      ctx.beginPath();
-      ctx.roundRect(bugX + 270, bugY + 12, bugW - 282, bugH - 24, [10]);
-      ctx.fill();
-
-      ctx.fillStyle = isClockRunning ? "#38bdf8" : "#f59e0b";
-      ctx.font = "900 20px 'Inter', sans-serif";
-      ctx.textAlign = "center";
-      ctx.fillText(formatClock(clockSeconds), bugX + 345, bugY + 36);
-
-      ctx.fillStyle = subTextColor;
-      ctx.font = "800 11px 'Inter', sans-serif";
-      ctx.fillText(getPeriodLabel(period).toUpperCase(), bugX + 345, bugY + 56);
-
-      if (showShotClock) {
-        ctx.fillStyle = shotClock <= 5 ? "#ef4444" : "#eab308";
-        ctx.font = "900 18px 'Inter', sans-serif";
-        ctx.fillText(`SC: ${shotClock}s`, bugX + 345, bugY + 74);
-      }
-    }
-
-    // Top Right Sponsor Watermark
-    if (showSponsorTag) {
-      ctx.fillStyle = "rgba(15, 23, 42, 0.75)";
-      ctx.beginPath();
-      ctx.roundRect(width - 240, 30, 200, 36, [10]);
+      ctx.arc(rx + 30, ry + 32, 5, 0, Math.PI * 2);
       ctx.fill();
 
       ctx.fillStyle = "#ffffff";
-      ctx.font = "900 13px 'Inter', sans-serif";
-      ctx.textAlign = "center";
+      ctx.font = "800 12px 'Inter', sans-serif";
+      ctx.textAlign = "left";
       ctx.textBaseline = "middle";
-      ctx.fillText(`🔴 ${sponsorText}`, width - 140, 48);
+      ctx.fillText(
+        (slot.angleName || slot.label).slice(0, 22).toUpperCase(),
+        rx + 42,
+        ry + 32
+      );
+
+      ctx.restore();
+    },
+    [activeSlotIds, awayTeamName, awayScore, homeScore, homeTeamName, clockSeconds]
+  );
+
+  // Helper: Draw Scorebug Overlay
+  const drawScorebugOverlay = useCallback(
+    (ctx: CanvasRenderingContext2D, width: number, height: number) => {
+      const isDark = scorebugTheme !== "clean_light";
+      const bgPrimary = isDark ? "rgba(11, 27, 48, 0.94)" : "rgba(255, 255, 255, 0.96)";
+      const textColor = isDark ? "#ffffff" : "#0f172a";
+      const subTextColor = isDark ? "#94a3b8" : "#64748b";
+      const borderColor = isDark ? "rgba(255, 255, 255, 0.18)" : "rgba(0, 0, 0, 0.14)";
+
+      ctx.save();
+
+      if (scorebugPosition === "bottom_bar") {
+        const bugW = 860;
+        const bugH = 76;
+        const bugX = (width - bugW) / 2;
+        const bugY = height - bugH - 28;
+
+        ctx.shadowColor = "rgba(0, 0, 0, 0.55)";
+        ctx.shadowBlur = 18;
+        ctx.shadowOffsetY = 6;
+
+        ctx.fillStyle = bgPrimary;
+        ctx.beginPath();
+        ctx.roundRect(bugX, bugY, bugW, bugH, [16]);
+        ctx.fill();
+
+        ctx.strokeStyle = borderColor;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        ctx.shadowColor = "transparent";
+
+        // Away Team
+        ctx.fillStyle = awayColor;
+        ctx.beginPath();
+        ctx.roundRect(bugX + 12, bugY + 10, 8, bugH - 20, [4]);
+        ctx.fill();
+
+        ctx.fillStyle = textColor;
+        ctx.font = "900 22px 'Inter', sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        ctx.fillText(awayTeamName.slice(0, 12).toUpperCase(), bugX + 30, bugY + bugH / 2);
+
+        ctx.font = "900 34px 'Inter', sans-serif";
+        ctx.textAlign = "right";
+        ctx.fillText(String(awayScore), bugX + 270, bugY + bugH / 2);
+
+        // Divider
+        ctx.strokeStyle = borderColor;
+        ctx.beginPath();
+        ctx.moveTo(bugX + 290, bugY + 12);
+        ctx.lineTo(bugX + 290, bugY + bugH - 12);
+        ctx.stroke();
+
+        // Home Team
+        ctx.font = "900 34px 'Inter', sans-serif";
+        ctx.textAlign = "left";
+        ctx.fillText(String(homeScore), bugX + 310, bugY + bugH / 2);
+
+        ctx.fillStyle = textColor;
+        ctx.font = "900 22px 'Inter', sans-serif";
+        ctx.fillText(homeTeamName.slice(0, 12).toUpperCase(), bugX + 380, bugY + bugH / 2);
+
+        ctx.fillStyle = homeColor;
+        ctx.beginPath();
+        ctx.roundRect(bugX + 620, bugY + 10, 8, bugH - 20, [4]);
+        ctx.fill();
+
+        // Clock & Period Box
+        ctx.fillStyle = isDark ? "rgba(255, 255, 255, 0.08)" : "rgba(0, 0, 0, 0.06)";
+        ctx.beginPath();
+        ctx.roundRect(bugX + 640, bugY + 8, bugW - 648, bugH - 16, [12]);
+        ctx.fill();
+
+        ctx.fillStyle = isClockRunning ? "#38bdf8" : "#f59e0b";
+        ctx.font = "900 24px 'Inter', sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText(formatClock(clockSeconds), bugX + 705, bugY + 28);
+
+        ctx.fillStyle = subTextColor;
+        ctx.font = "800 12px 'Inter', sans-serif";
+        ctx.fillText(getPeriodLabel(period).toUpperCase(), bugX + 705, bugY + 52);
+
+        if (showShotClock) {
+          ctx.fillStyle = shotClock <= 5 ? "#ef4444" : "#eab308";
+          ctx.font = "900 28px 'Inter', sans-serif";
+          ctx.textAlign = "center";
+          ctx.fillText(String(shotClock), bugX + 795, bugY + bugH / 2);
+        }
+      } else {
+        // Top-Left Corner Scorebug
+        const bugW = 420;
+        const bugH = 100;
+        const bugX = 36;
+        const bugY = 58;
+
+        ctx.shadowColor = "rgba(0, 0, 0, 0.45)";
+        ctx.shadowBlur = 14;
+        ctx.shadowOffsetY = 4;
+
+        ctx.fillStyle = bgPrimary;
+        ctx.beginPath();
+        ctx.roundRect(bugX, bugY, bugW, bugH, [16]);
+        ctx.fill();
+
+        ctx.strokeStyle = borderColor;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        ctx.shadowColor = "transparent";
+
+        ctx.fillStyle = awayColor;
+        ctx.beginPath();
+        ctx.roundRect(bugX + 12, bugY + 12, 6, 32, [3]);
+        ctx.fill();
+
+        ctx.fillStyle = textColor;
+        ctx.font = "900 17px 'Inter', sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        ctx.fillText(awayTeamName.slice(0, 14).toUpperCase(), bugX + 28, bugY + 28);
+
+        ctx.font = "900 22px 'Inter', sans-serif";
+        ctx.textAlign = "right";
+        ctx.fillText(String(awayScore), bugX + 250, bugY + 28);
+
+        ctx.fillStyle = homeColor;
+        ctx.beginPath();
+        ctx.roundRect(bugX + 12, bugY + 56, 6, 32, [3]);
+        ctx.fill();
+
+        ctx.fillStyle = textColor;
+        ctx.font = "900 17px 'Inter', sans-serif";
+        ctx.textAlign = "left";
+        ctx.fillText(homeTeamName.slice(0, 14).toUpperCase(), bugX + 28, bugY + 72);
+
+        ctx.font = "900 22px 'Inter', sans-serif";
+        ctx.textAlign = "right";
+        ctx.fillText(String(homeScore), bugX + 250, bugY + 72);
+
+        ctx.fillStyle = isDark ? "rgba(255, 255, 255, 0.08)" : "rgba(0, 0, 0, 0.06)";
+        ctx.beginPath();
+        ctx.roundRect(bugX + 270, bugY + 12, bugW - 282, bugH - 24, [10]);
+        ctx.fill();
+
+        ctx.fillStyle = isClockRunning ? "#38bdf8" : "#f59e0b";
+        ctx.font = "900 20px 'Inter', sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText(formatClock(clockSeconds), bugX + 345, bugY + 36);
+
+        ctx.fillStyle = subTextColor;
+        ctx.font = "800 11px 'Inter', sans-serif";
+        ctx.fillText(getPeriodLabel(period).toUpperCase(), bugX + 345, bugY + 56);
+
+        if (showShotClock) {
+          ctx.fillStyle = shotClock <= 5 ? "#ef4444" : "#eab308";
+          ctx.font = "900 18px 'Inter', sans-serif";
+          ctx.fillText(`SC: ${shotClock}s`, bugX + 345, bugY + 74);
+        }
+      }
+
+      if (showSponsorTag) {
+        ctx.fillStyle = "rgba(15, 23, 42, 0.82)";
+        ctx.beginPath();
+        ctx.roundRect(width - 250, 24, 215, 36, [10]);
+        ctx.fill();
+
+        ctx.fillStyle = "#ffffff";
+        ctx.font = "900 13px 'Inter', sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(`🔴 ${sponsorText}`, width - 142, 42);
+      }
+
+      ctx.restore();
+    },
+    [
+      scorebugTheme,
+      scorebugPosition,
+      awayColor,
+      awayTeamName,
+      awayScore,
+      homeScore,
+      homeTeamName,
+      homeColor,
+      isClockRunning,
+      clockSeconds,
+      period,
+      showShotClock,
+      shotClock,
+      showSponsorTag,
+      sponsorText,
+    ]
+  );
+
+  // Render any StudioScene onto a target Canvas (used for both Left Preview & Right Live Program)
+  const renderSceneToCanvas = useCallback(
+    (
+      ctx: CanvasRenderingContext2D,
+      width: number,
+      height: number,
+      scene: StudioScene | undefined,
+      replayVidEl: HTMLVideoElement | null,
+      drawOverlay: boolean,
+      nowMs: number
+    ) => {
+      ctx.fillStyle = "#090d16";
+      ctx.fillRect(0, 0, width, height);
+
+      if (!scene) return;
+
+      if (scene.kind === "replay_scene" && scene.replayConfig) {
+        // Render Slow-Motion Replay Scene
+        if (replayVidEl && replayVidEl.readyState >= 2) {
+          ctx.drawImage(replayVidEl, 0, 0, width, height);
+        } else {
+          ctx.fillStyle = "#0f172a";
+          ctx.fillRect(0, 0, width, height);
+          ctx.fillStyle = "#f59e0b";
+          ctx.font = "900 28px 'Inter', sans-serif";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(
+            `LOADING REPLAY CLIP: ${scene.replayConfig.videoTitle}`,
+            width / 2,
+            height / 2
+          );
+        }
+
+        // Broadcast Slow-Motion Replay Banner
+        ctx.fillStyle = "rgba(225, 29, 72, 0.92)";
+        ctx.beginPath();
+        ctx.roundRect(36, 24, 380, 44, [10]);
+        ctx.fill();
+
+        ctx.fillStyle = "#ffffff";
+        ctx.font = "900 16px 'Inter', sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        ctx.fillText(
+          `⚡ INSTANT REPLAY (${scene.replayConfig.playbackRate}x SLOW-MO) • ${formatClock(
+            scene.replayConfig.startSec
+          )}-${formatClock(scene.replayConfig.endSec)}`,
+          52,
+          46
+        );
+      } else {
+        // Render Camera / Multi-Camera Scene
+        const cams = scene.cameras;
+        if (cams.length === 0) {
+          ctx.fillStyle = "#64748b";
+          ctx.font = "800 24px 'Inter', sans-serif";
+          ctx.textAlign = "center";
+          ctx.fillText("NO CAMERAS IN THIS SCENE — CLICK '+ ADD CAMERA'", width / 2, height / 2);
+        } else if (scene.layout === "single" || cams.length === 1) {
+          drawCameraSlotRect(ctx, cams[0], 0, 0, 0, width, height, nowMs);
+        } else if (scene.layout === "split_50_50") {
+          const halfW = width / 2;
+          drawCameraSlotRect(ctx, cams[0], 0, 0, 0, halfW - 2, height, nowMs);
+          drawCameraSlotRect(ctx, cams[1] ?? cams[0], 1, halfW + 2, 0, halfW - 2, height, nowMs);
+          // Center divider line
+          ctx.fillStyle = "#e11d48";
+          ctx.fillRect(halfW - 2, 0, 4, height);
+        } else if (
+          scene.layout === "pip_bottom_right" ||
+          scene.layout === "pip_top_right"
+        ) {
+          // Main camera fullscreen
+          drawCameraSlotRect(ctx, cams[0], 0, 0, 0, width, height, nowMs);
+          // Secondary PiP camera box
+          const pipW = Math.round(width * 0.3);
+          const pipH = Math.round(height * 0.3);
+          const pipX = width - pipW - 36;
+          const pipY =
+            scene.layout === "pip_bottom_right" ? height - pipH - 125 : 74;
+
+          ctx.save();
+          ctx.shadowColor = "rgba(0,0,0,0.65)";
+          ctx.shadowBlur = 16;
+          ctx.fillStyle = "#ffffff";
+          ctx.fillRect(pipX - 3, pipY - 3, pipW + 6, pipH + 6);
+          ctx.restore();
+
+          drawCameraSlotRect(
+            ctx,
+            cams[1] ?? cams[0],
+            1,
+            pipX,
+            pipY,
+            pipW,
+            pipH,
+            nowMs
+          );
+        } else if (scene.layout === "quad_grid") {
+          const halfW = width / 2;
+          const halfH = height / 2;
+          const quadrants = [
+            { x: 0, y: 0 },
+            { x: halfW, y: 0 },
+            { x: 0, y: halfH },
+            { x: halfW, y: halfH },
+          ];
+          for (let i = 0; i < 4; i++) {
+            const cam = cams[i] ?? cams[0];
+            drawCameraSlotRect(
+              ctx,
+              cam,
+              i,
+              quadrants[i].x,
+              quadrants[i].y,
+              halfW,
+              halfH,
+              nowMs
+            );
+          }
+          // Grid crossbars
+          ctx.fillStyle = "rgba(255,255,255,0.25)";
+          ctx.fillRect(halfW - 1, 0, 2, height);
+          ctx.fillRect(0, halfH - 1, width, 2);
+        }
+      }
+
+      if (drawOverlay) {
+        drawScorebugOverlay(ctx, width, height);
+      }
+    },
+    [drawCameraSlotRect, drawScorebugOverlay]
+  );
+
+  // Dual-Monitor Continuous Render Loop (Left = Preview Canvas, Right = Live Program Canvas)
+  useEffect(() => {
+    let isRunning = true;
+    let rafId: number;
+
+    const tick = (nowMs: number) => {
+      if (!isRunning) return;
+
+      // 1. Render Left PREVIEW Canvas
+      const pCanvas = previewCanvasRef.current;
+      if (pCanvas) {
+        const pCtx = pCanvas.getContext("2d");
+        if (pCtx) {
+          renderSceneToCanvas(
+            pCtx,
+            pCanvas.width,
+            pCanvas.height,
+            previewScene,
+            previewReplayVideoRef.current,
+            showOverlayInPreview,
+            nowMs
+          );
+        }
+      }
+
+      // 2. Render Right LIVE PROGRAM Canvas
+      const lCanvas = liveCanvasRef.current;
+      if (lCanvas) {
+        const lCtx = lCanvas.getContext("2d");
+        if (lCtx) {
+          renderSceneToCanvas(
+            lCtx,
+            lCanvas.width,
+            lCanvas.height,
+            liveScene,
+            liveReplayVideoRef.current,
+            true,
+            nowMs
+          );
+        }
+      }
+
+      rafId = requestAnimationFrame(tick);
+    };
+
+    rafId = requestAnimationFrame(tick);
+    return () => {
+      isRunning = false;
+      cancelAnimationFrame(rafId);
+    };
+  }, [previewScene, liveScene, showOverlayInPreview, renderSceneToCanvas]);
+
+  // OBS Transition Actions: CUT & FADE
+  const handleCutToLive = () => {
+    setLiveSceneId(previewSceneId);
+  };
+
+  const handleFadeToLive = () => {
+    setIsTransitioning(true);
+    setTimeout(() => {
+      setLiveSceneId(previewSceneId);
+      setIsTransitioning(false);
+    }, 280);
+  };
+
+  const handleSwapPreviewAndLive = () => {
+    const prev = previewSceneId;
+    setPreviewSceneId(liveSceneId);
+    setLiveSceneId(prev);
+  };
+
+  // Scene & Multi-Camera Management Handlers
+  const handleAddScene = () => {
+    const label =
+      newSceneNameInput.trim() || `Scene ${scenes.length + 1}: Custom Camera`;
+    const newScene: StudioScene = {
+      id: `scene-${generateUUID().slice(0, 8)}`,
+      name: label,
+      kind: "camera_scene",
+      layout: "single",
+      cameras: [
+        {
+          id: `cam-${generateUUID().slice(0, 8)}`,
+          label: "Camera 1",
+          sourceType: "camera",
+          deviceId: videoDevices[0]?.deviceId || "",
+          angleName: "CAM 1 • MAIN",
+        },
+      ],
+    };
+    setScenes((prev) => [...prev, newScene]);
+    setPreviewSceneId(newScene.id);
+    setNewSceneNameInput("");
+  };
+
+  const handleDeleteScene = (sceneId: string) => {
+    if (scenes.length <= 1) return;
+    const remaining = scenes.filter((s) => s.id !== sceneId);
+    setScenes(remaining);
+    if (previewSceneId === sceneId) setPreviewSceneId(remaining[0].id);
+    if (liveSceneId === sceneId) setLiveSceneId(remaining[0].id);
+  };
+
+  const handleAddCameraToPreviewScene = () => {
+    if (!previewScene || previewScene.kind !== "camera_scene") return;
+    const nextIdx = previewScene.cameras.length + 1;
+    const newSlot: SceneCameraSlot = {
+      id: `cam-${generateUUID().slice(0, 8)}`,
+      label: `Camera ${nextIdx}`,
+      sourceType: nextIdx === 1 ? "camera" : "court_sim",
+      deviceId: videoDevices[(nextIdx - 1) % Math.max(1, videoDevices.length)]?.deviceId || "",
+      angleName: `CAM ${nextIdx} • ANGLE ${nextIdx}`,
+    };
+
+    setScenes((prev) =>
+      prev.map((s) => {
+        if (s.id !== previewScene.id) return s;
+        const updatedCams = [...s.cameras, newSlot];
+        const autoLayout: SceneLayoutMode =
+          updatedCams.length === 2 && s.layout === "single"
+            ? "split_50_50"
+            : updatedCams.length >= 3 && s.layout === "single"
+            ? "quad_grid"
+            : s.layout;
+        return {
+          ...s,
+          layout: autoLayout,
+          cameras: updatedCams,
+        };
+      })
+    );
+  };
+
+  const handleUpdateCameraSlot = (
+    sceneId: string,
+    slotId: string,
+    patch: Partial<SceneCameraSlot>
+  ) => {
+    setScenes((prev) =>
+      prev.map((s) => {
+        if (s.id !== sceneId) return s;
+        return {
+          ...s,
+          cameras: s.cameras.map((c) => (c.id === slotId ? { ...c, ...patch } : c)),
+        };
+      })
+    );
+  };
+
+  const handleRemoveCameraSlot = (sceneId: string, slotId: string) => {
+    stopCameraSlot(slotId);
+    setScenes((prev) =>
+      prev.map((s) => {
+        if (s.id !== sceneId) return s;
+        return {
+          ...s,
+          cameras: s.cameras.filter((c) => c.id !== slotId),
+        };
+      })
+    );
+  };
+
+  const handleSetSceneLayout = (sceneId: string, layout: SceneLayoutMode) => {
+    setScenes((prev) =>
+      prev.map((s) => (s.id === sceneId ? { ...s, layout } : s))
+    );
+  };
+
+  // Capture a small thumbnail from Live Canvas for the Bottom Camera Timeline
+  const captureLiveTimelineThumbnail = (sec: number): TimelineFrame | null => {
+    const lCanvas = liveCanvasRef.current;
+    if (!lCanvas) return null;
+    try {
+      const thumbCanvas = document.createElement("canvas");
+      thumbCanvas.width = 160;
+      thumbCanvas.height = 90;
+      const tCtx = thumbCanvas.getContext("2d");
+      if (!tCtx) return null;
+      tCtx.drawImage(lCanvas, 0, 0, 160, 90);
+      return {
+        timeSec: sec,
+        dataUrl: thumbCanvas.toDataURL("image/jpeg", 0.6),
+      };
+    } catch {
+      return null;
     }
-
-    ctx.restore();
   };
 
-  // Refresh recorded videos list from IndexedDB
-  const refreshStoredVideos = async () => {
-    const list = await getAllStoredVideos();
-    setStoredVideos(list);
-  };
-
-  // Start Recording from Composite Canvas Stream
+  // Start Live Recording (Records the RIGHT LIVE PROGRAM Canvas + Builds Bottom Camera Timeline!)
   const startRecording = () => {
-    const canvas = canvasCompositeRef.current;
-    if (!canvas) return;
+    const lCanvas = liveCanvasRef.current;
+    if (!lCanvas) return;
 
     try {
-      const canvasStream = canvas.captureStream(30); // 30 FPS broadcast
-      if (currentStreamRef.current) {
-        // Attach audio tracks if available
-        const audioTracks = currentStreamRef.current.getAudioTracks();
-        audioTracks.forEach((t) => canvasStream.addTrack(t));
-      }
+      const canvasStream = lCanvas.captureStream(30);
+      // Attach any active microphone/audio tracks
+      Object.values(streamBySlotRef.current).forEach((st) => {
+        st.getAudioTracks().forEach((track) => {
+          try {
+            canvasStream.addTrack(track);
+          } catch {}
+        });
+      });
 
       const mimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
         ? "video/webm;codecs=vp9"
@@ -617,10 +1216,20 @@ function LiveBroadcastStudioContent() {
 
       const recorder = new MediaRecorder(canvasStream, {
         mimeType,
-        videoBitsPerSecond: 4_500_000, // 4.5 Mbps HD broadcast bitrate
+        videoBitsPerSecond: 4_500_000,
       });
 
       recordedChunksRef.current = [];
+      liveCaptureFramesRef.current = [];
+      setLiveRecordingFrames([]);
+      recordStartTimeRef.current = Date.now();
+
+      // Take initial frame at 0s
+      const firstFrame = captureLiveTimelineThumbnail(0);
+      if (firstFrame) {
+        liveCaptureFramesRef.current = [firstFrame];
+        setLiveRecordingFrames([firstFrame]);
+      }
 
       recorder.ondataavailable = (event) => {
         if (event.data && event.data.size > 0) {
@@ -630,43 +1239,41 @@ function LiveBroadcastStudioContent() {
 
       recorder.onstop = async () => {
         const finalBlob = new Blob(recordedChunksRef.current, { type: mimeType });
+        const elapsedSec = Math.max(
+          2,
+          Math.round((Date.now() - recordStartTimeRef.current) / 1000)
+        );
         const videoId = generateUUID();
-        const duration = recordSeconds;
-
-        // Generate thumbnail
-        let thumbnail = "";
-        try {
-          thumbnail = canvas.toDataURL("image/jpeg", 0.7);
-        } catch {}
+        const frames = [...liveCaptureFramesRef.current];
 
         const newVideo: StoredGameVideo = {
           id: videoId,
           matchId: activeMatch?.id ?? "generic-game",
           gameNumber: activeMatch?.gameNumber ?? 1,
-          title: `Game #${activeMatch?.gameNumber || 1} - ${homeTeamName} vs ${awayTeamName}`,
+          title: `Game #${activeMatch?.gameNumber || 1} (${homeTeamName} vs ${awayTeamName}) - ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`,
           blob: finalBlob,
           mimeType,
           sizeBytes: finalBlob.size,
-          durationSeconds: duration,
+          durationSeconds: elapsedSec,
           createdAt: new Date().toISOString(),
-          thumbnailDataUrl: thumbnail,
+          thumbnailDataUrl: frames[0]?.dataUrl || "",
+          timelineFrames: frames,
           homeScore,
           awayScore,
           homeTeamName,
           awayTeamName,
         };
 
-        if (storageLocation === "browser_indexeddb") {
-          await saveVideoToIndexedDB(newVideo);
-          await refreshStoredVideos();
-        } else if (storageLocation === "local_filesystem" && "showSaveFilePicker" in window) {
-          // Native File System Access API
+        // Always persist in IndexedDB so the Bottom Camera Timeline & Replay Scene Selector can use it immediately
+        await saveVideoToIndexedDB(newVideo);
+
+        if (storageLocation === "local_filesystem" && "showSaveFilePicker" in window) {
           try {
-            const handle = await (window as any).showSaveFilePicker({
+            const handle = await (window as unknown as { showSaveFilePicker: (opts: unknown) => Promise<{ createWritable: () => Promise<{ write: (b: Blob) => Promise<void>; close: () => Promise<void> }> }> }).showSaveFilePicker({
               suggestedName: `Game_${activeMatch?.gameNumber || 1}_${Date.now()}.webm`,
               types: [
                 {
-                  description: "WebM Video",
+                  description: "WebM Broadcast Video",
                   accept: { "video/webm": [".webm"] },
                 },
               ],
@@ -674,45 +1281,53 @@ function LiveBroadcastStudioContent() {
             const writable = await handle.createWritable();
             await writable.write(finalBlob);
             await writable.close();
-            // Also keep an entry in IndexedDB for easy slow-mo replay access
-            await saveVideoToIndexedDB(newVideo);
-            await refreshStoredVideos();
           } catch {
-            // Cancelled or unsupported -> save to IndexedDB as fallback
-            await saveVideoToIndexedDB(newVideo);
-            await refreshStoredVideos();
+            // User cancelled file dialog; clip is still safely in IndexedDB timeline
           }
-        } else {
-          // Download prompt directly
+        } else if (storageLocation === "download_prompt") {
           const url = URL.createObjectURL(finalBlob);
           const a = document.createElement("a");
           a.href = url;
           a.download = `Game_${activeMatch?.gameNumber || 1}_${Date.now()}.webm`;
           a.click();
           URL.revokeObjectURL(url);
-          // Keep copy in app for instant slow motion replay
-          await saveVideoToIndexedDB(newVideo);
-          await refreshStoredVideos();
         }
 
+        const updatedList = await getAllStoredVideos();
+        setStoredVideos(updatedList);
+        setSelectedTimelineVideoId(newVideo.id);
+        setTrimStartSec(Math.max(0, elapsedSec - 6));
+        setTrimEndSec(elapsedSec);
+        setTimelinePlayheadSec(Math.max(0, elapsedSec - 6));
         setIsRecording(false);
         setRecordSeconds(0);
+        setTimelineNotice(
+          `✓ Saved ${elapsedSec}s recording to Camera Timeline! Select an In/Out range below to create a Replay Scene.`
+        );
+        setTimeout(() => setTimelineNotice(null), 6000);
       };
 
-      recorder.start(1000); // 1-second chunks
+      recorder.start(500);
       mediaRecorderRef.current = recorder;
       setIsRecording(true);
       setRecordSeconds(0);
 
       recordIntervalRef.current = setInterval(() => {
-        setRecordSeconds((prev) => prev + 1);
+        setRecordSeconds((prev) => {
+          const next = prev + 1;
+          const snap = captureLiveTimelineThumbnail(next);
+          if (snap) {
+            liveCaptureFramesRef.current = [...liveCaptureFramesRef.current, snap];
+            setLiveRecordingFrames([...liveCaptureFramesRef.current]);
+          }
+          return next;
+        });
       }, 1000);
-    } catch (err: unknown) {
-      alert("Failed to start recording. Please check browser permissions.");
+    } catch {
+      alert("Unable to start recording on this browser.");
     }
   };
 
-  // Stop Recording
   const stopRecording = () => {
     if (mediaRecorderRef.current && isRecording) {
       mediaRecorderRef.current.stop();
@@ -723,102 +1338,129 @@ function LiveBroadcastStudioContent() {
     }
   };
 
-  // Play Replay in Slow Motion
-  const handlePlaySlowMotionReplay = (video: StoredGameVideo) => {
-    setReplayVideo(video);
-    setIsReplayPlaying(true);
-    setIsOverlayingReplayOnLive(true); // Broadcast replay onto live feed
+  // Create a Replay Scene from the selected Timeline In/Out range!
+  const handleCreateReplaySceneFromTimeline = (pushImmediatelyToLive = false) => {
+    if (!selectedTimelineVideo) {
+      alert("Record a game clip first so you can select a replay segment on the timeline.");
+      return;
+    }
 
-    setTimeout(() => {
-      if (replayVideoRef.current) {
-        const url = URL.createObjectURL(video.blob);
-        replayVideoRef.current.src = url;
-        replayVideoRef.current.playbackRate = replaySpeed;
-        replayVideoRef.current.play().catch(() => {});
-      }
-    }, 50);
+    const start = Math.max(0, Math.min(trimStartSec, trimEndSec - 0.5));
+    const end = Math.max(start + 1, Math.min(trimEndSec, selectedTimelineVideo.durationSeconds || 60));
+
+    const customTitle =
+      replayClipLabel.trim() ||
+      `Replay (${formatClock(start)}-${formatClock(end)} @ ${selectedReplaySpeed}x)`;
+
+    const newReplayScene: StudioScene = {
+      id: `scene-replay-${generateUUID().slice(0, 6)}`,
+      name: `🎬 ${customTitle}`,
+      kind: "replay_scene",
+      layout: "single",
+      cameras: [],
+      replayConfig: {
+        videoId: selectedTimelineVideo.id,
+        videoTitle: selectedTimelineVideo.title,
+        startSec: start,
+        endSec: end,
+        playbackRate: selectedReplaySpeed,
+      },
+    };
+
+    setScenes((prev) => [...prev, newReplayScene]);
+    setPreviewSceneId(newReplayScene.id);
+    if (pushImmediatelyToLive) {
+      setLiveSceneId(newReplayScene.id);
+    }
+    setReplayClipLabel("");
+    setTimelineNotice(
+      pushImmediatelyToLive
+        ? `⚡ Replay Scene "${customTitle}" created and pushed LIVE on Program!`
+        : `✓ Replay Scene "${customTitle}" added to Scenes & cued on Left Preview Monitor!`
+    );
+    setTimeout(() => setTimelineNotice(null), 5000);
   };
 
-  // Stop Replay
-  const handleStopReplay = () => {
-    setIsOverlayingReplayOnLive(false);
-    setIsReplayPlaying(false);
-    if (replayVideoRef.current) {
-      replayVideoRef.current.pause();
+  const handleScrubTimeline = (sec: number) => {
+    const maxDur = selectedTimelineVideo?.durationSeconds || 10;
+    const clamped = Math.max(0, Math.min(maxDur, sec));
+    setTimelinePlayheadSec(clamped);
+    if (timelineScrubVideoRef.current) {
+      timelineScrubVideoRef.current.currentTime = clamped;
     }
   };
 
-  // Change Slow Motion Speed
-  const handleSpeedChange = (speed: number) => {
-    setReplaySpeed(speed);
-    if (replayVideoRef.current) {
-      replayVideoRef.current.playbackRate = speed;
+  const handleDeleteStoredVideo = async (videoId: string) => {
+    await deleteStoredVideo(videoId);
+    const list = await getAllStoredVideos();
+    setStoredVideos(list);
+    if (selectedTimelineVideoId === videoId) {
+      setSelectedTimelineVideoId(list[0]?.id || "");
     }
   };
 
-  // Delete video from DB
-  const handleDeleteVideo = async (id: string) => {
-    if (confirm("Delete this recorded game clip from storage?")) {
-      await deleteStoredVideo(id);
-      if (replayVideo?.id === id) {
-        handleStopReplay();
-        setReplayVideo(null);
-      }
-      await refreshStoredVideos();
-    }
-  };
-
-  // Download Video File
   const handleDownloadVideo = (video: StoredGameVideo) => {
     const url = URL.createObjectURL(video.blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${video.title.replace(/\s+/g, "_")}.webm`;
+    a.download = `${video.title.replace(/[^a-zA-Z0-9_-]/g, "_")}.webm`;
     a.click();
     URL.revokeObjectURL(url);
   };
 
-  // Copy helper
-  const handleCopyText = (text: string, id: string) => {
+  const handleCopyText = (text: string, key: string) => {
     navigator.clipboard.writeText(text);
-    setCopiedKey(id);
-    setTimeout(() => setCopiedKey(null), 2500);
+    setCopiedKey(key);
+    setTimeout(() => setCopiedKey(null), 2000);
   };
 
+  const activeTimelineDuration = Math.max(
+    1,
+    isRecording ? Math.max(10, recordSeconds) : selectedTimelineVideo?.durationSeconds || 10
+  );
+  const displayTimelineFrames = isRecording
+    ? liveRecordingFrames
+    : selectedTimelineVideo?.timelineFrames || [];
+
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
-      {/* Top Studio Bar */}
-      <header className="border-b border-slate-800 bg-slate-900/90 px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 sticky top-0 z-30 backdrop-blur-md">
-        <div className="flex items-center gap-4">
+    <div className="min-h-screen bg-[#0b0e14] text-slate-100 flex flex-col font-sans select-none">
+      {/* Hidden Replay & Scrub Video Elements */}
+      <video ref={previewReplayVideoRef} playsInline muted className="hidden" />
+      <video ref={liveReplayVideoRef} playsInline muted className="hidden" />
+      <video ref={timelineScrubVideoRef} playsInline muted className="hidden" />
+
+      {/* =====================================================================
+          1. TOP OBS STUDIO BAR
+         ===================================================================== */}
+      <header className="border-b border-slate-800 bg-[#111622] px-4 py-2 flex flex-wrap items-center justify-between gap-3 sticky top-0 z-30">
+        <div className="flex items-center gap-3">
           <Link
             href="/"
-            className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-black uppercase tracking-wider text-slate-200 hover:bg-slate-700 hover:text-white transition-all cursor-pointer shadow-xs"
-            title="Exit Broadcast Studio to Dashboard"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-black uppercase tracking-wider text-slate-200 hover:bg-slate-700 hover:text-white transition-all cursor-pointer"
           >
-            <ArrowLeft className="h-4 w-4 text-[#8B0D0E]" />
-            <span>Back to Dashboard</span>
+            <ArrowLeft className="h-3.5 w-3.5 text-rose-500" />
+            <span>Back to App</span>
           </Link>
 
           <div className="flex items-center gap-2">
-            <span className="flex h-3 w-3 relative">
-              <span className={`animate-ping absolute inline-flex h-full w-full rounded-full ${cameraActive ? "bg-emerald-400" : "bg-rose-400"} opacity-75`}></span>
-              <span className={`relative inline-flex rounded-full h-3 w-3 ${cameraActive ? "bg-emerald-500" : "bg-rose-500"}`}></span>
+            <span className="flex h-2.5 w-2.5 relative">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75" />
+              <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-rose-500" />
             </span>
-            <h1 className="text-sm sm:text-base font-black uppercase tracking-tight text-white flex items-center gap-2">
+            <h1 className="text-xs sm:text-sm font-black uppercase tracking-wider text-white flex items-center gap-1.5">
               <Radio className="h-4 w-4 text-rose-500" />
-              Box Score OBS Broadcast Studio
+              Box Score OBS Studio Mode
             </h1>
           </div>
         </div>
 
-        {/* League and Game Selector */}
+        {/* Center: Active League & Game Matchup Selector + Real-time Score */}
         <div className="flex flex-wrap items-center gap-2">
-          {/* League Dropdown */}
           <select
-            aria-label="Active League"
+            aria-label="Select League"
             value={selectedLeagueId}
             onChange={(e) => setSelectedLeagueId(e.target.value)}
-            className="rounded-xl border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-bold text-white focus:outline-none focus:border-rose-500 cursor-pointer"
+            className="rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1 text-xs font-bold text-white focus:outline-none focus:border-rose-500 cursor-pointer"
           >
             {leagues.map((l) => (
               <option key={l.id} value={l.id}>
@@ -827,16 +1469,21 @@ function LiveBroadcastStudioContent() {
             ))}
           </select>
 
-          {/* Match Dropdown */}
           <select
-            aria-label="Active Game"
+            aria-label="Select Match"
             value={selectedMatchId}
             onChange={(e) => setSelectedMatchId(e.target.value)}
-            className="rounded-xl border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-bold text-white focus:outline-none focus:border-rose-500 cursor-pointer"
+            className="rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1 text-xs font-bold text-white focus:outline-none focus:border-rose-500 cursor-pointer"
           >
             {matches.map((m) => {
-              const h = teams.find((t) => t.id === m.homeTeamId)?.name || m.homeTeamPlaceholder || "Home";
-              const a = teams.find((t) => t.id === m.awayTeamId)?.name || m.awayTeamPlaceholder || "Away";
+              const h =
+                teams.find((t) => t.id === m.homeTeamId)?.name ||
+                m.homeTeamPlaceholder ||
+                "Home";
+              const a =
+                teams.find((t) => t.id === m.awayTeamId)?.name ||
+                m.awayTeamPlaceholder ||
+                "Away";
               return (
                 <option key={m.id} value={m.id}>
                   Game #{m.gameNumber}: {h} vs {a}
@@ -845,635 +1492,977 @@ function LiveBroadcastStudioContent() {
             })}
           </select>
 
-          {/* Live Score Preview Pill */}
-          <div className="flex items-center gap-2 rounded-xl bg-slate-800/90 border border-slate-700 px-3 py-1 text-xs font-black">
-            <span style={{ color: homeColor }}>{homeTeamName.slice(0, 3)}</span>
-            <span className="text-white text-sm">{homeScore}</span>
-            <span className="text-slate-500">:</span>
+          {/* Live Synced Game Clock & Score Pill */}
+          <div className="flex items-center gap-2 rounded-lg bg-slate-900 border border-slate-700 px-3 py-1 text-xs font-black">
+            <span style={{ color: awayColor }}>{awayTeamName.slice(0, 3).toUpperCase()}</span>
             <span className="text-white text-sm">{awayScore}</span>
-            <span style={{ color: awayColor }}>{awayTeamName.slice(0, 3)}</span>
-            <span className="ml-1 text-[0.65rem] font-bold text-amber-400 bg-amber-400/10 px-1.5 py-0.2 rounded">
-              {formatClock(clockSeconds)}
+            <span className="text-slate-500">-</span>
+            <span className="text-white text-sm">{homeScore}</span>
+            <span style={{ color: homeColor }}>{homeTeamName.slice(0, 3).toUpperCase()}</span>
+            <span className="ml-1 rounded bg-amber-500/20 border border-amber-500/40 px-1.5 py-0.2 text-[0.65rem] font-black text-amber-300">
+              {getPeriodLabel(period)} • {formatClock(clockSeconds)}
             </span>
           </div>
         </div>
+
+        {/* Right: Quick Record & Storage Status */}
+        <div className="flex items-center gap-2">
+          {!isRecording ? (
+            <button
+              type="button"
+              onClick={startRecording}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 px-3.5 py-1.5 text-xs font-black uppercase tracking-wider text-white shadow-sm cursor-pointer"
+            >
+              <Circle className="h-3 w-3 fill-current" />
+              Start Live Record
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={stopRecording}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 px-3.5 py-1.5 text-xs font-black uppercase tracking-wider text-slate-950 shadow-sm cursor-pointer animate-pulse"
+            >
+              <Square className="h-3 w-3 fill-current" />
+              Stop &amp; Save ({formatClock(recordSeconds)})
+            </button>
+          )}
+        </div>
       </header>
 
-      {/* Main Studio Work Area */}
-      <div className="flex-1 flex flex-col lg:flex-row min-w-0">
-        {/* Left: OBS Canvas Preview Screen */}
-        <div className="flex-1 p-4 sm:p-6 flex flex-col items-center justify-center bg-slate-950 relative overflow-hidden">
-          {/* Main 16:9 Canvas Stage */}
-          <div className="relative w-full max-w-5xl aspect-video rounded-2xl overflow-hidden border border-slate-800 bg-black shadow-2xl flex items-center justify-center">
-            {/* The actual canvas that mixes Video + Real-Time Live Game Scorebug */}
+      {/* =====================================================================
+          2. UPPER OBS STUDIO MODE: DUAL MONITORS (PREVIEW ON LEFT | TRANSITION | LIVE ON RIGHT)
+         ===================================================================== */}
+      <section className="grid grid-cols-1 lg:grid-cols-11 gap-3 p-3 sm:p-4 bg-[#0d111a] border-b border-slate-800">
+        {/* LEFT MONITOR: PREVIEW (CUE / EDIT) */}
+        <div className="lg:col-span-5 flex flex-col rounded-xl border border-emerald-500/40 bg-[#131926] overflow-hidden shadow-lg">
+          <div className="flex items-center justify-between px-3 py-2 bg-emerald-950/50 border-b border-emerald-500/30">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="rounded bg-emerald-500 px-2 py-0.5 text-[0.62rem] font-black uppercase text-slate-950">
+                PREVIEW (LEFT)
+              </span>
+              <span className="text-xs font-black uppercase text-emerald-200 truncate">
+                {previewScene?.name}
+              </span>
+            </div>
+            <label className="flex items-center gap-1.5 text-[0.65rem] font-bold text-slate-300 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={showOverlayInPreview}
+                onChange={(e) => setShowOverlayInPreview(e.target.checked)}
+                className="rounded accent-emerald-500"
+              />
+              Show Scorebug
+            </label>
+          </div>
+
+          <div className="relative aspect-video w-full bg-black flex items-center justify-center">
             <canvas
-              ref={canvasCompositeRef}
+              ref={previewCanvasRef}
               width={1920}
               height={1080}
               className="w-full h-full object-contain"
             />
+            <div className="absolute bottom-2 left-2 rounded bg-black/70 px-2 py-0.5 text-[0.62rem] font-bold text-emerald-300 border border-emerald-500/30 pointer-events-none">
+              {previewScene?.kind === "replay_scene"
+                ? `🎬 Replay Scene (${previewScene.replayConfig?.playbackRate}x Slow-Mo)`
+                : `🎥 ${previewScene?.cameras.length || 0} Camera(s) • Layout: ${previewScene?.layout.toUpperCase()}`}
+            </div>
+          </div>
+        </div>
 
-            {/* Hidden Video Source Player for Camera / Screen */}
-            <video
-              ref={videoPreviewRef}
-              playsInline
-              muted
-              autoPlay
-              className="hidden"
-            />
+        {/* CENTER COLUMN: OBS STUDIO MODE TRANSITION BAR */}
+        <div className="lg:col-span-1 flex lg:flex-col items-center justify-center gap-2 p-2 rounded-xl border border-slate-800 bg-[#131926]">
+          <span className="hidden lg:block text-[0.62rem] font-black uppercase tracking-widest text-slate-400 text-center">
+            Transition
+          </span>
 
-            {/* Hidden Replay Video Source for Slow-Mo Compositing */}
-            <video
-              ref={replayVideoRef}
-              playsInline
-              muted={false}
-              loop={replayLoop}
-              onEnded={() => {
-                if (!replayLoop) handleStopReplay();
-              }}
-              className="hidden"
-            />
+          <button
+            type="button"
+            onClick={handleCutToLive}
+            className="w-full rounded-xl bg-rose-600 hover:bg-rose-500 px-3 py-3 text-xs font-black uppercase tracking-wider text-white shadow-md transition-all cursor-pointer flex flex-col items-center gap-1"
+            title="Instant Cut from Left Preview to Right Live Output"
+          >
+            <span className="flex items-center gap-1">
+              <span>CUT</span>
+              <ArrowRight className="h-3.5 w-3.5" />
+            </span>
+            <span className="text-[0.58rem] font-bold text-rose-200">Instant</span>
+          </button>
 
-            {/* Live On-Screen Status Watermark */}
-            <div className="absolute top-4 left-4 flex items-center gap-2 pointer-events-none">
-              <span className="flex items-center gap-1.5 rounded-lg bg-black/60 px-2.5 py-1 text-[0.65rem] font-black uppercase tracking-wider text-white backdrop-blur-md border border-white/10">
-                <span className={`h-2 w-2 rounded-full ${cameraActive ? "bg-emerald-400 animate-pulse" : "bg-slate-500"}`} />
-                {videoSourceType === "camera" ? "CAMERA FEED (1080p)" : "SCREEN/CAPTURE FEED"}
+          <button
+            type="button"
+            onClick={handleFadeToLive}
+            className="w-full rounded-xl bg-amber-500 hover:bg-amber-400 px-3 py-3 text-xs font-black uppercase tracking-wider text-slate-950 shadow-md transition-all cursor-pointer flex flex-col items-center gap-1"
+            title="Smooth 300ms Fade from Preview to Live"
+          >
+            <span className="flex items-center gap-1">
+              <span>FADE</span>
+              <ArrowRight className="h-3.5 w-3.5" />
+            </span>
+            <span className="text-[0.58rem] font-bold text-slate-800">300ms</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleSwapPreviewAndLive}
+            className="w-full rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 px-2.5 py-2 text-[0.68rem] font-black uppercase text-slate-200 cursor-pointer flex items-center justify-center gap-1"
+            title="Swap Preview and Live Scenes"
+          >
+            <ArrowLeftRight className="h-3.5 w-3.5 text-sky-400" />
+            <span>Swap</span>
+          </button>
+        </div>
+
+        {/* RIGHT MONITOR: PROGRAM / LIVE ON AIR */}
+        <div className="lg:col-span-5 flex flex-col rounded-xl border border-rose-500/50 bg-[#131926] overflow-hidden shadow-lg">
+          <div className="flex items-center justify-between px-3 py-2 bg-rose-950/60 border-b border-rose-500/40">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="rounded bg-rose-600 px-2 py-0.5 text-[0.62rem] font-black uppercase text-white flex items-center gap-1">
+                <span className="h-1.5 w-1.5 rounded-full bg-white animate-ping" />
+                PROGRAM / LIVE (RIGHT)
               </span>
-
+              <span className="text-xs font-black uppercase text-rose-200 truncate">
+                {liveScene?.name}
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
               {isRecording && (
-                <span className="flex items-center gap-1.5 rounded-lg bg-rose-600/90 px-2.5 py-1 text-[0.65rem] font-black uppercase tracking-wider text-white shadow-md animate-pulse">
-                  <Circle className="h-2 w-2 fill-current" />
-                  REC {formatClock(recordSeconds)}
+                <span className="rounded bg-rose-600 px-2 py-0.5 text-[0.62rem] font-black uppercase text-white animate-pulse">
+                  ● REC {formatClock(recordSeconds)}
                 </span>
               )}
+              <span className="text-[0.62rem] font-bold text-slate-400">1080p 30fps</span>
+            </div>
+          </div>
 
-              {isOverlayingReplayOnLive && (
-                <span className="flex items-center gap-1.5 rounded-lg bg-amber-500 px-2.5 py-1 text-[0.65rem] font-black uppercase tracking-wider text-slate-950 shadow-md">
-                  ⚡ SLOW-MO REPLAY ACTIVE ({replaySpeed}x)
-                </span>
+          <div
+            className={`relative aspect-video w-full bg-black flex items-center justify-center transition-opacity duration-200 ${
+              isTransitioning ? "opacity-50" : "opacity-100"
+            }`}
+          >
+            <canvas
+              ref={liveCanvasRef}
+              width={1920}
+              height={1080}
+              className="w-full h-full object-contain"
+            />
+            <div className="absolute bottom-2 left-2 rounded bg-rose-950/85 px-2 py-0.5 text-[0.62rem] font-bold text-rose-200 border border-rose-500/40 pointer-events-none">
+              {liveScene?.kind === "replay_scene"
+                ? `⚡ ON AIR: SLOW-MO REPLAY (${liveScene.replayConfig?.playbackRate}x)`
+                : `🔴 ON AIR: ${liveScene?.name}`}
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* =====================================================================
+          3. BOTTOM LIVE RECORD & CAMERA TIMELINE DOCK (CREATE REPLAY SCENES FROM TIMELINE!)
+         ===================================================================== */}
+      <section className="p-3 sm:p-4 bg-[#101520] border-b border-slate-800 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <span className="inline-flex h-6 w-6 items-center justify-center rounded-lg bg-amber-500/20 text-amber-400 border border-amber-500/30">
+              <Film className="h-3.5 w-3.5" />
+            </span>
+            <h2 className="text-xs sm:text-sm font-black uppercase tracking-wider text-white">
+              Live Recording &amp; Camera Timeline (Select Segment to Create Slow-Mo Replay Scene)
+            </h2>
+            {isRecording && (
+              <span className="rounded-md bg-rose-600/20 border border-rose-500/40 px-2 py-0.5 text-[0.65rem] font-black text-rose-300 animate-pulse">
+                Capturing Live Timeline Frames ({recordSeconds}s)...
+              </span>
+            )}
+          </div>
+
+          {/* Saved Recording Picker */}
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="text-[0.68rem] font-black uppercase text-slate-400">
+              Saved Record on Timeline:
+            </label>
+            <select
+              value={selectedTimelineVideoId}
+              onChange={(e) => {
+                const vid = storedVideos.find((v) => v.id === e.target.value);
+                setSelectedTimelineVideoId(e.target.value);
+                if (vid) {
+                  setTrimStartSec(0);
+                  setTrimEndSec(Math.max(2, Math.min(vid.durationSeconds, 8)));
+                  setTimelinePlayheadSec(0);
+                }
+              }}
+              className="rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1 text-xs font-bold text-white focus:outline-none focus:border-amber-400 cursor-pointer"
+            >
+              {storedVideos.length === 0 ? (
+                <option value="">-- No Saved Record Yet (Click Start Live Record) --</option>
+              ) : (
+                storedVideos.map((v) => (
+                  <option key={v.id} value={v.id}>
+                    📹 {v.title} ({v.durationSeconds}s)
+                  </option>
+                ))
               )}
+            </select>
+
+            {selectedTimelineVideo && (
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => handleDownloadVideo(selectedTimelineVideo)}
+                  className="rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 px-2 py-1 text-[0.68rem] font-bold text-slate-200 flex items-center gap-1 cursor-pointer"
+                  title="Download this recorded game file"
+                >
+                  <Download className="h-3 w-3 text-sky-400" />
+                  <span>Save File</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleDeleteStoredVideo(selectedTimelineVideo.id)}
+                  className="rounded-lg border border-rose-900/60 bg-rose-950/40 hover:bg-rose-900/60 px-2 py-1 text-[0.68rem] font-bold text-rose-300 cursor-pointer"
+                  title="Delete recording"
+                >
+                  <Trash2 className="h-3 w-3" />
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {timelineNotice && (
+          <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs font-bold text-amber-300 flex items-center justify-between">
+            <span>{timelineNotice}</span>
+            <button
+              type="button"
+              onClick={() => setTimelineNotice(null)}
+              className="text-amber-200 hover:text-white text-xs font-black cursor-pointer"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
+        {/* VISUAL CAMERA FILMSTRIP TIMELINE TRACK */}
+        <div className="rounded-xl border border-slate-800 bg-[#0b0e15] p-3 space-y-3">
+          {/* Filmstrip Track + Highlighted Trim Overlay */}
+          <div className="relative h-24 w-full rounded-lg overflow-hidden border border-slate-700 bg-slate-900 select-none">
+            {/* Thumbnail Frames along the timeline */}
+            {displayTimelineFrames.length > 0 ? (
+              <div className="flex h-full w-full">
+                {displayTimelineFrames.map((f, idx) => (
+                  <div
+                    key={idx}
+                    onClick={() => handleScrubTimeline(f.timeSec)}
+                    className="relative flex-1 h-full border-r border-slate-800/80 cursor-pointer group overflow-hidden"
+                    title={`Jump to ${formatClock(f.timeSec)}`}
+                  >
+                    <img
+                      src={f.dataUrl}
+                      alt={`Frame ${f.timeSec}s`}
+                      className="h-full w-full object-cover opacity-85 group-hover:opacity-100 transition-opacity"
+                    />
+                    <span className="absolute bottom-1 left-1 rounded bg-black/75 px-1 py-0.2 text-[0.55rem] font-mono text-slate-300">
+                      {formatClock(f.timeSec)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="flex h-full w-full flex-col items-center justify-center text-slate-500 gap-1">
+                <p className="text-xs font-black uppercase tracking-wider text-slate-400">
+                  Camera Timeline Ready
+                </p>
+                <p className="text-[0.68rem] text-slate-500">
+                  Click &quot;Start Live Record&quot; to record the game. Live camera frames will populate along this timeline so you can highlight any play for slow-motion replay!
+                </p>
+              </div>
+            )}
+
+            {/* Selected Replay Trim Window Overlay (IN [ -> OUT ]) */}
+            {selectedTimelineVideo && !isRecording && (
+              <div
+                className="absolute top-0 bottom-0 bg-amber-500/25 border-x-4 border-amber-400 pointer-events-none flex items-start justify-between px-1.5 pt-1"
+                style={{
+                  left: `${Math.min(100, (trimStartSec / activeTimelineDuration) * 100)}%`,
+                  width: `${Math.max(
+                    2,
+                    Math.min(
+                      100,
+                      ((trimEndSec - trimStartSec) / activeTimelineDuration) * 100
+                    )
+                  )}%`,
+                }}
+              >
+                <span className="rounded bg-amber-400 px-1 py-0.2 text-[0.58rem] font-black text-slate-950">
+                  IN [{formatClock(trimStartSec)}
+                </span>
+                <span className="rounded bg-amber-400 px-1 py-0.2 text-[0.58rem] font-black text-slate-950">
+                  {formatClock(trimEndSec)}] OUT
+                </span>
+              </div>
+            )}
+
+            {/* Playhead Indicator Line */}
+            {selectedTimelineVideo && !isRecording && (
+              <div
+                className="absolute top-0 bottom-0 w-0.5 bg-rose-500 pointer-events-none"
+                style={{
+                  left: `${Math.min(100, (timelinePlayheadSec / activeTimelineDuration) * 100)}%`,
+                }}
+              >
+                <div className="h-3 w-3 -ml-1.25 rounded-full bg-rose-500 border border-white shadow" />
+              </div>
+            )}
+          </div>
+
+          {/* Interactive Timeline Sliders (Scrub Playhead, IN Start, OUT End) + Replay Scene Creator */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 items-center pt-1">
+            {/* Left 6 cols: Range Sliders & Quick Trim Presets */}
+            <div className="lg:col-span-6 space-y-2">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                {/* Playhead Scrubber */}
+                <div className="rounded-lg bg-slate-900 border border-slate-800 px-2.5 py-1.5">
+                  <div className="flex justify-between text-[0.65rem] font-black uppercase text-slate-400">
+                    <span>Playhead</span>
+                    <span className="text-rose-400 font-mono">
+                      {formatPreciseTime(timelinePlayheadSec)}
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={activeTimelineDuration}
+                    step={0.1}
+                    value={timelinePlayheadSec}
+                    onChange={(e) => handleScrubTimeline( Number(e.target.value))}
+                    className="w-full accent-rose-500 cursor-pointer"
+                  />
+                </div>
+
+                {/* Trim Start (IN [) */}
+                <div className="rounded-lg bg-slate-900 border border-slate-800 px-2.5 py-1.5">
+                  <div className="flex justify-between text-[0.65rem] font-black uppercase text-amber-400">
+                    <span>[ Replay Start</span>
+                    <span className="font-mono">{formatPreciseTime(trimStartSec)}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={Math.max(0.5, trimEndSec - 0.5)}
+                    step={0.5}
+                    value={trimStartSec}
+                    onChange={(e) => {
+                      const val = Number(e.target.value);
+                      setTrimStartSec(val);
+                      handleScrubTimeline(val);
+                    }}
+                    className="w-full accent-amber-400 cursor-pointer"
+                  />
+                </div>
+
+                {/* Trim End (OUT ]) */}
+                <div className="rounded-lg bg-slate-900 border border-slate-800 px-2.5 py-1.5">
+                  <div className="flex justify-between text-[0.65rem] font-black uppercase text-amber-400">
+                    <span>Replay End ]</span>
+                    <span className="font-mono">{formatPreciseTime(trimEndSec)}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={Math.min(activeTimelineDuration, trimStartSec + 1)}
+                    max={activeTimelineDuration}
+                    step={0.5}
+                    value={trimEndSec}
+                    onChange={(e) => {
+                      const val = Number(e.target.value);
+                      setTrimEndSec(val);
+                      handleScrubTimeline(val);
+                    }}
+                    className="w-full accent-amber-400 cursor-pointer"
+                  />
+                </div>
+              </div>
+
+              {/* Quick Mark In / Out Buttons */}
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setTrimStartSec(Math.min(timelinePlayheadSec, trimEndSec - 1))}
+                  className="rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 px-2.5 py-1 text-[0.65rem] font-black uppercase text-amber-300 cursor-pointer"
+                >
+                  [ Mark In Here
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTrimEndSec(Math.max(timelinePlayheadSec, trimStartSec + 1))}
+                  className="rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 px-2.5 py-1 text-[0.65rem] font-black uppercase text-amber-300 cursor-pointer"
+                >
+                  Mark Out Here ]
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const dur = activeTimelineDuration;
+                    setTrimStartSec(Math.max(0, dur - 5));
+                    setTrimEndSec(dur);
+                  }}
+                  className="rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 px-2.5 py-1 text-[0.65rem] font-bold text-slate-300 cursor-pointer"
+                >
+                  Last 5s
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const dur = activeTimelineDuration;
+                    setTrimStartSec(Math.max(0, dur - 10));
+                    setTrimEndSec(dur);
+                  }}
+                  className="rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 px-2.5 py-1 text-[0.65rem] font-bold text-slate-300 cursor-pointer"
+                >
+                  Last 10s
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTrimStartSec(0);
+                    setTrimEndSec(activeTimelineDuration);
+                  }}
+                  className="rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 px-2.5 py-1 text-[0.65rem] font-bold text-slate-300 cursor-pointer"
+                >
+                  Full Clip
+                </button>
+              </div>
             </div>
 
-            {/* Quick Action Overlay inside Stage */}
-            {isOverlayingReplayOnLive && (
-              <div className="absolute bottom-20 left-1/2 -translate-x-1/2 flex items-center gap-2 rounded-xl bg-slate-900/90 border border-slate-700 p-2 shadow-2xl backdrop-blur-md">
-                <span className="text-xs font-black uppercase text-amber-400 pl-2">
-                  Replay Speed:
+            {/* Right 6 cols: Slow-Mo Speed, Replay Name & Create Replay Scene Buttons */}
+            <div className="lg:col-span-6 flex flex-wrap items-center justify-end gap-2">
+              {/* Slow Motion Speed Selector */}
+              <div className="flex items-center gap-1 rounded-xl bg-slate-900 border border-slate-800 p-1">
+                <span className="text-[0.62rem] font-black uppercase text-slate-400 px-2">
+                  Speed:
                 </span>
                 {[0.25, 0.5, 0.75, 1.0].map((spd) => (
                   <button
                     key={spd}
                     type="button"
-                    onClick={() => handleSpeedChange(spd)}
-                    className={`px-2.5 py-1 rounded-lg text-xs font-black cursor-pointer transition-colors ${
-                      replaySpeed === spd
+                    onClick={() => setSelectedReplaySpeed(spd)}
+                    className={`rounded-lg px-2 py-1 text-xs font-black cursor-pointer transition-colors ${
+                      selectedReplaySpeed === spd
                         ? "bg-amber-400 text-slate-950"
-                        : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+                        : "text-slate-300 hover:bg-slate-800"
                     }`}
                   >
                     {spd}x
                   </button>
                 ))}
-                <button
-                  type="button"
-                  onClick={handleStopReplay}
-                  className="rounded-lg bg-rose-600 px-3 py-1 text-xs font-black uppercase text-white hover:bg-rose-500 cursor-pointer ml-1"
-                >
-                  Exit Replay
-                </button>
               </div>
+
+              <input
+                type="text"
+                value={replayClipLabel}
+                onChange={(e) => setReplayClipLabel(e.target.value)}
+                placeholder="Replay label (e.g. Q4 Clutch 3PT)"
+                className="rounded-xl border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-bold text-white focus:outline-none focus:border-amber-400 w-48"
+              />
+
+              <button
+                type="button"
+                onClick={() => handleCreateReplaySceneFromTimeline(false)}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 px-3.5 py-2 text-xs font-black uppercase tracking-wider text-white shadow-md cursor-pointer"
+                title="Create a selectable Replay Scene from this timeline segment and cue it on Left Preview"
+              >
+                <Scissors className="h-3.5 w-3.5" />
+                <span>Create Replay Scene (Preview)</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleCreateReplaySceneFromTimeline(true)}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 px-3.5 py-2 text-xs font-black uppercase tracking-wider text-slate-950 shadow-md cursor-pointer"
+                title="Create Replay Scene and immediately air it on Right Live Output"
+              >
+                <Zap className="h-3.5 w-3.5" />
+                <span>Instant Replay to Live</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* =====================================================================
+          4. LOWER OBS DOCKS: SCENES | MULTI-CAMERA SOURCES | SCOREBUG | STREAM & STORAGE
+         ===================================================================== */}
+      <section className="flex-1 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 p-3 sm:p-4 bg-[#0b0e14]">
+        {/* DOCK 1: SCENES LIST (Camera Scenes & Created Replay Scenes) */}
+        <div className="flex flex-col rounded-xl border border-slate-800 bg-[#131926] overflow-hidden">
+          <div className="px-3 py-2 bg-slate-900 border-b border-slate-800 flex items-center justify-between">
+            <span className="text-xs font-black uppercase tracking-wider text-white flex items-center gap-1.5">
+              <Layers className="h-3.5 w-3.5 text-amber-400" />
+              1. Scenes ({scenes.length})
+            </span>
+            <span className="text-[0.62rem] font-bold text-slate-400">
+              Click = Preview
+            </span>
+          </div>
+
+          <div className="p-2.5 flex-1 space-y-1.5 overflow-y-auto max-h-72">
+            {scenes.map((scene) => {
+              const isPreview = scene.id === previewSceneId;
+              const isLive = scene.id === liveSceneId;
+              return (
+                <div
+                  key={scene.id}
+                  onClick={() => setPreviewSceneId(scene.id)}
+                  className={`flex items-center justify-between gap-2 rounded-xl px-3 py-2.5 text-xs transition-all cursor-pointer border ${
+                    isPreview
+                      ? "bg-emerald-950/50 border-emerald-500/70 text-white"
+                      : "bg-slate-900/70 border-slate-800 text-slate-300 hover:bg-slate-800/80"
+                  }`}
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-black truncate">{scene.name}</span>
+                    </div>
+                    <div className="text-[0.62rem] text-slate-400 mt-0.5 flex items-center gap-1.5">
+                      {scene.kind === "replay_scene" ? (
+                        <span className="text-amber-300 font-bold">
+                          Slow-Mo {scene.replayConfig?.playbackRate}x ({formatClock(scene.replayConfig?.startSec || 0)}-{formatClock(scene.replayConfig?.endSec || 0)})
+                        </span>
+                      ) : (
+                        <span>
+                          {scene.cameras.length} Camera(s) • {scene.layout.replace(/_/g, " ")}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-1 shrink-0">
+                    {isPreview && (
+                      <span className="rounded bg-emerald-500 px-1.5 py-0.5 text-[0.55rem] font-black uppercase text-slate-950">
+                        PRV
+                      </span>
+                    )}
+                    {isLive && (
+                      <span className="rounded bg-rose-600 px-1.5 py-0.5 text-[0.55rem] font-black uppercase text-white">
+                        LIVE
+                      </span>
+                    )}
+                    {scenes.length > 1 && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDeleteScene(scene.id);
+                        }}
+                        className="p-1 text-slate-500 hover:text-rose-400 cursor-pointer"
+                        title="Remove scene"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Add New Scene Footer */}
+          <div className="p-2.5 border-t border-slate-800 bg-slate-900/60 flex items-center gap-1.5">
+            <input
+              type="text"
+              value={newSceneNameInput}
+              onChange={(e) => setNewSceneNameInput(e.target.value)}
+              placeholder="New scene name..."
+              className="flex-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-emerald-500"
+            />
+            <button
+              type="button"
+              onClick={handleAddScene}
+              className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 px-2.5 py-1.5 text-xs font-black uppercase text-white cursor-pointer"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              Add
+            </button>
+          </div>
+        </div>
+
+        {/* DOCK 2: MULTI-CAMERA SOURCES & LAYOUT (For Selected Preview Scene) */}
+        <div className="flex flex-col rounded-xl border border-slate-800 bg-[#131926] overflow-hidden">
+          <div className="px-3 py-2 bg-slate-900 border-b border-slate-800 flex items-center justify-between">
+            <span className="text-xs font-black uppercase tracking-wider text-white flex items-center gap-1.5">
+              <Camera className="h-3.5 w-3.5 text-sky-400" />
+              2. Cameras in Scene ({previewScene?.cameras.length || 0})
+            </span>
+            {previewScene?.kind === "camera_scene" && (
+              <button
+                type="button"
+                onClick={handleAddCameraToPreviewScene}
+                className="inline-flex items-center gap-1 rounded-lg bg-sky-600 hover:bg-sky-500 px-2 py-0.5 text-[0.65rem] font-black uppercase text-white cursor-pointer"
+              >
+                <Plus className="h-3 w-3" />
+                Add Camera
+              </button>
             )}
           </div>
 
-          {/* Quick Toolbar below video */}
-          <div className="mt-4 flex flex-wrap items-center justify-between w-full max-w-5xl gap-3">
-            <div className="flex items-center gap-2">
-              {!isRecording ? (
-                <button
-                  type="button"
-                  onClick={startRecording}
-                  className="inline-flex items-center gap-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white px-5 py-2.5 text-xs font-black uppercase tracking-wider transition-all shadow-md cursor-pointer"
-                >
-                  <Circle className="h-4 w-4 fill-current" />
-                  Start Recording Game
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={stopRecording}
-                  className="inline-flex items-center gap-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-rose-500 text-rose-400 px-5 py-2.5 text-xs font-black uppercase tracking-wider transition-all shadow-md cursor-pointer animate-pulse"
-                >
-                  <Square className="h-4 w-4 fill-current" />
-                  Stop Recording ({formatClock(recordSeconds)})
-                </button>
-              )}
-
-              {storedVideos.length > 0 && !isOverlayingReplayOnLive && (
-                <button
-                  type="button"
-                  onClick={() => handlePlaySlowMotionReplay(storedVideos[0])}
-                  className="inline-flex items-center gap-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 px-4 py-2.5 text-xs font-black uppercase tracking-wider transition-all shadow-md cursor-pointer"
-                  title="Instant Slow-Mo Replay of latest clip"
-                >
-                  <Repeat className="h-4 w-4" />
-                  Instant Slow-Mo (Last Clip)
-                </button>
-              )}
-            </div>
-
-            {/* Storage Destination Indicator */}
-            <div className="flex items-center gap-2 text-xs text-slate-400 bg-slate-900 border border-slate-800 px-3 py-1.5 rounded-xl">
-              <HardDrive className="h-3.5 w-3.5 text-sky-400" />
-              <span>Save Storage:</span>
-              <span className="font-bold text-slate-200 uppercase">
-                {storageLocation === "browser_indexeddb"
-                  ? "In-App IndexedDB"
-                  : storageLocation === "local_filesystem"
-                  ? "Local Disk Folder"
-                  : "Auto-Download"}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {/* Right: OBS Control Deck (Camera, Scorebug, Replay, Stream Keys) */}
-        <div className="w-full lg:w-96 border-t lg:border-t-0 lg:border-l border-slate-800 bg-slate-900/60 p-4 space-y-4 overflow-y-auto">
-          {/* Deck Tabs */}
-          <div className="grid grid-cols-4 gap-1 p-1 bg-slate-800 rounded-xl">
-            <button
-              type="button"
-              onClick={() => setActiveControlTab("camera")}
-              className={`rounded-lg py-2 text-[0.68rem] font-black uppercase transition-colors cursor-pointer ${
-                activeControlTab === "camera"
-                  ? "bg-rose-600 text-white shadow-xs"
-                  : "text-slate-400 hover:text-white"
-              }`}
-            >
-              Camera
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveControlTab("scorebug")}
-              className={`rounded-lg py-2 text-[0.68rem] font-black uppercase transition-colors cursor-pointer ${
-                activeControlTab === "scorebug"
-                  ? "bg-rose-600 text-white shadow-xs"
-                  : "text-slate-400 hover:text-white"
-              }`}
-            >
-              Overlay
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveControlTab("replays")}
-              className={`rounded-lg py-2 text-[0.68rem] font-black uppercase transition-colors cursor-pointer relative ${
-                activeControlTab === "replays"
-                  ? "bg-rose-600 text-white shadow-xs"
-                  : "text-slate-400 hover:text-white"
-              }`}
-            >
-              Replays
-              {storedVideos.length > 0 && (
-                <span className="ml-1 rounded-full bg-amber-400 text-slate-950 px-1 text-[0.55rem] font-black">
-                  {storedVideos.length}
-                </span>
-              )}
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveControlTab("streaming")}
-              className={`rounded-lg py-2 text-[0.68rem] font-black uppercase transition-colors cursor-pointer ${
-                activeControlTab === "streaming"
-                  ? "bg-rose-600 text-white shadow-xs"
-                  : "text-slate-400 hover:text-white"
-              }`}
-            >
-              Live Set
-            </button>
-          </div>
-
-          {/* TAB 1: CAMERA & VIDEO INPUT SETTINGS */}
-          {activeControlTab === "camera" && (
-            <div className="space-y-4">
-              <div className="space-y-2">
-                <label className="block text-xs font-black uppercase text-slate-300">
-                  Select Video Input Source:
-                </label>
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => startCamera(selectedDeviceId)}
-                    className={`flex items-center justify-center gap-2 rounded-xl p-3 text-xs font-black uppercase transition-all cursor-pointer border ${
-                      videoSourceType === "camera" && cameraActive
-                        ? "bg-[#0B2F5C] border-blue-400 text-white shadow-md"
-                        : "bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700"
-                    }`}
-                  >
-                    <Camera className="h-4 w-4" />
-                    Webcam / Cam
-                  </button>
-                  <button
-                    type="button"
-                    onClick={startScreenShare}
-                    className={`flex items-center justify-center gap-2 rounded-xl p-3 text-xs font-black uppercase transition-all cursor-pointer border ${
-                      videoSourceType === "screen" && cameraActive
-                        ? "bg-[#0B2F5C] border-blue-400 text-white shadow-md"
-                        : "bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700"
-                    }`}
-                  >
-                    <Tv className="h-4 w-4" />
-                    Capture Card / Screen
-                  </button>
-                </div>
-              </div>
-
-              {/* Camera Selector */}
-              {videoDevices.length > 0 && (
-                <div className="space-y-1.5">
-                  <label className="block text-xs font-black uppercase text-slate-400">
-                    Detected Camera Devices:
-                  </label>
-                  <select
-                    value={selectedDeviceId}
-                    onChange={(e) => {
-                      setSelectedDeviceId(e.target.value);
-                      startCamera(e.target.value);
-                    }}
-                    className="w-full rounded-xl border border-slate-700 bg-slate-800 p-2.5 text-xs font-bold text-white focus:outline-none focus:border-rose-500 cursor-pointer"
-                  >
-                    {videoDevices.map((d, i) => (
-                      <option key={d.deviceId || i} value={d.deviceId}>
-                        {d.label || `Camera ${i + 1}`}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
-
-              {/* Action buttons */}
-              <div className="flex gap-2 pt-2">
-                {!cameraActive ? (
-                  <button
-                    type="button"
-                    onClick={() => startCamera(selectedDeviceId)}
-                    className="flex-1 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white py-2.5 text-xs font-black uppercase tracking-wider cursor-pointer shadow-md"
-                  >
-                    Turn On Video Feed
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={stopCamera}
-                    className="flex-1 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 py-2.5 text-xs font-black uppercase tracking-wider cursor-pointer"
-                  >
-                    Turn Off Feed
-                  </button>
-                )}
-              </div>
-
-              {cameraError && (
-                <div className="p-3 rounded-xl bg-rose-950/60 border border-rose-800 text-rose-300 text-xs">
-                  <p className="font-bold">Camera Connection Error:</p>
-                  <p>{cameraError}</p>
-                </div>
-              )}
-
-              {/* Storage Choice */}
-              <div className="pt-4 border-t border-slate-800 space-y-2">
-                <label className="block text-xs font-black uppercase text-slate-300 flex items-center gap-1.5">
-                  <HardDrive className="h-3.5 w-3.5 text-amber-400" />
-                  Recording Storage Destination:
-                </label>
-                <div className="space-y-1.5">
-                  {[
-                    {
-                      id: "browser_indexeddb",
-                      title: "In-App Database (Instant Replay)",
-                      desc: "Saved in BoxScore for instant slow motion playback and highlight review.",
-                    },
-                    {
-                      id: "local_filesystem",
-                      title: "Choose Folder on Computer",
-                      desc: "Directly saves video files to your preferred local hard drive directory.",
-                    },
-                    {
-                      id: "download_prompt",
-                      title: "Standard Download Prompt",
-                      desc: "Prompts browser to download as file at end of recording.",
-                    },
-                  ].map((dest) => (
-                    <label
-                      key={dest.id}
-                      className={`flex items-start gap-2.5 p-2.5 rounded-xl border cursor-pointer transition-colors ${
-                        storageLocation === dest.id
-                          ? "bg-rose-950/30 border-rose-500/60"
-                          : "bg-slate-800/60 border-slate-700/60 hover:bg-slate-800"
-                      }`}
-                    >
-                      <input
-                        type="radio"
-                        name="storage_destination"
-                        value={dest.id}
-                        checked={storageLocation === dest.id}
-                        onChange={() => setStorageLocation(dest.id as StorageLocation)}
-                        className="mt-0.5"
-                      />
-                      <div className="text-left">
-                        <p className="text-xs font-black text-white">{dest.title}</p>
-                        <p className="text-[0.68rem] text-slate-400">{dest.desc}</p>
-                      </div>
-                    </label>
-                  ))}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* TAB 2: SCOREBUG OVERLAY CONTROLS */}
-          {activeControlTab === "scorebug" && (
-            <div className="space-y-4">
-              <div>
-                <label className="block text-xs font-black uppercase text-slate-300 mb-1.5">
-                  Overlay Position:
-                </label>
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setScorebugPosition("bottom_bar")}
-                    className={`p-2.5 rounded-xl text-xs font-black uppercase border cursor-pointer ${
-                      scorebugPosition === "bottom_bar"
-                        ? "bg-rose-600 border-rose-500 text-white"
-                        : "bg-slate-800 border-slate-700 text-slate-400 hover:text-white"
-                    }`}
-                  >
-                    Bottom Center Bar
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setScorebugPosition("top_corner")}
-                    className={`p-2.5 rounded-xl text-xs font-black uppercase border cursor-pointer ${
-                      scorebugPosition === "top_corner"
-                        ? "bg-rose-600 border-rose-500 text-white"
-                        : "bg-slate-800 border-slate-700 text-slate-400 hover:text-white"
-                    }`}
-                  >
-                    Top Left Corner
-                  </button>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-black uppercase text-slate-300 mb-1.5">
-                  Visual Theme:
-                </label>
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setScorebugTheme("broadcast_dark")}
-                    className={`p-2.5 rounded-xl text-xs font-black uppercase border cursor-pointer ${
-                      scorebugTheme === "broadcast_dark"
-                        ? "bg-blue-600 border-blue-500 text-white"
-                        : "bg-slate-800 border-slate-700 text-slate-400"
-                    }`}
-                  >
-                    ESPN Dark Pro
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setScorebugTheme("clean_light")}
-                    className={`p-2.5 rounded-xl text-xs font-black uppercase border cursor-pointer ${
-                      scorebugTheme === "clean_light"
-                        ? "bg-blue-600 border-blue-500 text-white"
-                        : "bg-slate-800 border-slate-700 text-slate-400"
-                    }`}
-                  >
-                    Clean White
-                  </button>
-                </div>
-              </div>
-
-              <div className="space-y-2 pt-2 border-t border-slate-800">
-                <label className="flex items-center justify-between text-xs font-bold text-slate-300 cursor-pointer">
-                  <span>Display 24s Shot Clock</span>
-                  <input
-                    type="checkbox"
-                    checked={showShotClock}
-                    onChange={(e) => setShowShotClock(e.target.checked)}
-                    className="h-4 w-4 rounded accent-rose-600"
-                  />
-                </label>
-
-                <label className="flex items-center justify-between text-xs font-bold text-slate-300 cursor-pointer">
-                  <span>Broadcast Sponsor Tag</span>
-                  <input
-                    type="checkbox"
-                    checked={showSponsorTag}
-                    onChange={(e) => setShowSponsorTag(e.target.checked)}
-                    className="h-4 w-4 rounded accent-rose-600"
-                  />
-                </label>
-              </div>
-
-              {showSponsorTag && (
-                <div>
-                  <label className="block text-xs font-black uppercase text-slate-400 mb-1">
-                    Watermark Text:
-                  </label>
-                  <input
-                    type="text"
-                    value={sponsorText}
-                    onChange={(e) => setSponsorText(e.target.value)}
-                    className="w-full rounded-xl border border-slate-700 bg-slate-800 p-2 text-xs font-bold text-white focus:outline-none"
-                    placeholder="e.g. LIVE ON FACEBOOK"
-                  />
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* TAB 3: SAVED VIDEOS & SLOW MOTION REPLAY */}
-          {activeControlTab === "replays" && (
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <h3 className="text-xs font-black uppercase text-slate-300">
-                  Recorded Game Clips ({storedVideos.length})
-                </h3>
-                <button
-                  type="button"
-                  onClick={refreshStoredVideos}
-                  className="text-xs text-slate-400 hover:text-white"
-                  title="Refresh video list"
-                >
-                  <RefreshCw className="h-3.5 w-3.5" />
-                </button>
-              </div>
-
-              {storedVideos.length === 0 ? (
-                <div className="p-8 text-center border border-dashed border-slate-800 rounded-2xl space-y-2">
-                  <Film className="h-8 w-8 mx-auto text-slate-600" />
-                  <p className="text-xs font-bold text-slate-400">
-                    No Recorded Clips Yet
-                  </p>
-                  <p className="text-[0.68rem] text-slate-500">
-                    Hit &quot;Start Recording Game&quot; to record plays. Recorded videos are saved to your chosen storage and can be replayed in slow motion directly over the live feed!
-                  </p>
-                </div>
-              ) : (
-                <div className="space-y-2.5 max-h-[480px] overflow-y-auto pr-1">
-                  {storedVideos.map((video) => (
-                    <div
-                      key={video.id}
-                      className="p-3 rounded-2xl border border-slate-800 bg-slate-800/50 space-y-2 hover:border-slate-700 transition-colors"
-                    >
-                      <div className="flex items-start gap-3">
-                        {video.thumbnailDataUrl ? (
-                          <img
-                            src={video.thumbnailDataUrl}
-                            alt={video.title}
-                            className="w-20 h-14 rounded-lg object-cover border border-slate-700 shrink-0"
-                          />
-                        ) : (
-                          <div className="w-20 h-14 rounded-lg bg-slate-900 border border-slate-700 flex items-center justify-center shrink-0">
-                            <Film className="h-5 w-5 text-slate-500" />
-                          </div>
-                        )}
-                        <div className="flex-1 min-w-0">
-                          <p className="text-xs font-black text-white truncate">
-                            {video.title}
-                          </p>
-                          <p className="text-[0.65rem] text-slate-400">
-                            Duration: {formatClock(video.durationSeconds)} • {(video.sizeBytes / 1_000_000).toFixed(1)} MB
-                          </p>
-                          <p className="text-[0.65rem] text-slate-500">
-                            {new Date(video.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                          </p>
-                        </div>
-                      </div>
-
-                      {/* Replay Controls */}
-                      <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-700/60">
-                        <div className="flex items-center gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => handlePlaySlowMotionReplay(video)}
-                            className="inline-flex items-center gap-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 px-2.5 py-1 text-[0.68rem] font-black uppercase cursor-pointer"
-                            title="Play Slow-Mo Replay on Live Screen"
-                          >
-                            <Repeat className="h-3 w-3" />
-                            Slow-Mo (0.5x)
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              handlePlaySlowMotionReplay(video);
-                              handleSpeedChange(0.25);
-                            }}
-                            className="rounded-lg bg-slate-700 hover:bg-slate-600 text-white px-2 py-1 text-[0.68rem] font-black cursor-pointer"
-                            title="Super Slow 0.25x"
-                          >
-                            0.25x
-                          </button>
-                        </div>
-
-                        <div className="flex items-center gap-1">
-                          <button
-                            type="button"
-                            onClick={() => handleDownloadVideo(video)}
-                            className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 cursor-pointer"
-                            title="Download video file"
-                          >
-                            <Download className="h-3.5 w-3.5" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleDeleteVideo(video.id)}
-                            className="p-1 rounded-lg text-rose-400 hover:text-rose-300 hover:bg-rose-950/40 cursor-pointer"
-                            title="Delete video"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* TAB 4: FACEBOOK LIVE & YOUTUBE LIVE SETUP GUIDE */}
-          {activeControlTab === "streaming" && (
-            <div className="space-y-4">
-              <div className="p-3.5 rounded-2xl bg-gradient-to-br from-blue-950/60 to-red-950/60 border border-slate-700 space-y-2">
-                <h3 className="text-xs font-black uppercase text-white flex items-center gap-1.5">
-                  <Radio className="h-4 w-4 text-rose-500" />
-                  Stream to Facebook or YouTube
-                </h3>
-                <p className="text-[0.68rem] text-slate-300 leading-relaxed">
-                  You can stream this exact broadcast canvas with scoreboard, camera, and instant slow-mo replays directly to Facebook Live or YouTube Live!
+          <div className="p-2.5 flex-1 space-y-2.5 overflow-y-auto max-h-80">
+            {previewScene?.kind === "replay_scene" ? (
+              <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 space-y-2 text-xs">
+                <p className="font-black text-amber-300 uppercase">
+                  🎬 Replay Scene Selected
                 </p>
-              </div>
-
-              {/* Method 1: Virtual Camera / Direct OBS */}
-              <div className="p-3.5 rounded-2xl bg-slate-800/70 border border-slate-700 space-y-2.5">
-                <h4 className="text-xs font-black uppercase text-amber-400">
-                  Method 1: Direct in OBS Studio (Browser Source)
-                </h4>
-                <p className="text-[0.68rem] text-slate-300">
-                  In OBS Studio, add a <strong>Browser Source</strong> with this page URL or capture this window.
+                <p className="text-slate-300 text-[0.7rem]">
+                  Clip: <strong>{previewScene.replayConfig?.videoTitle}</strong>
                 </p>
-
+                <p className="text-slate-300 text-[0.7rem]">
+                  Window: <strong>{formatClock(previewScene.replayConfig?.startSec || 0)}</strong> to{" "}
+                  <strong>{formatClock(previewScene.replayConfig?.endSec || 0)}</strong> at{" "}
+                  <strong>{previewScene.replayConfig?.playbackRate}x Slow-Mo</strong>
+                </p>
+                <button
+                  type="button"
+                  onClick={handleCutToLive}
+                  className="w-full rounded-lg bg-rose-600 hover:bg-rose-500 py-2 text-xs font-black uppercase text-white cursor-pointer mt-2"
+                >
+                  Push Replay to Live Program →
+                </button>
+              </div>
+            ) : (
+              <>
+                {/* Multi-Cam Layout Mode Picker */}
                 <div className="space-y-1">
-                  <label className="text-[0.65rem] font-bold text-slate-400 uppercase">
-                    Overlay Browser URL for OBS:
+                  <label className="text-[0.62rem] font-black uppercase text-slate-400">
+                    Scene Camera Layout:
                   </label>
-                  <div className="flex items-center gap-1.5">
-                    <input
-                      type="text"
-                      readOnly
-                      value={typeof window !== "undefined" ? `${window.location.origin}/scoreboard?leagueId=${selectedLeagueId}&matchId=${selectedMatchId}` : ""}
-                      className="flex-1 rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-[0.68rem] font-mono text-slate-300"
-                    />
-                    <button
-                      type="button"
-                      onClick={() =>
-                        handleCopyText(
-                          `${window.location.origin}/scoreboard?leagueId=${selectedLeagueId}&matchId=${selectedMatchId}`,
-                          "obs-url"
-                        )
-                      }
-                      className="rounded-lg bg-slate-700 hover:bg-slate-600 px-2 py-1 text-[0.68rem] font-black uppercase cursor-pointer"
-                    >
-                      {copiedKey === "obs-url" ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
-                    </button>
+                  <div className="grid grid-cols-4 gap-1">
+                    {[
+                      { id: "single", label: "1-Cam" },
+                      { id: "split_50_50", label: "2-Split" },
+                      { id: "pip_bottom_right", label: "PiP" },
+                      { id: "quad_grid", label: "4-Quad" },
+                    ].map((ly) => (
+                      <button
+                        key={ly.id}
+                        type="button"
+                        onClick={() =>
+                          previewScene &&
+                          handleSetSceneLayout(
+                            previewScene.id,
+                            ly.id as SceneLayoutMode
+                          )
+                        }
+                        className={`rounded-lg py-1 text-[0.65rem] font-black uppercase border cursor-pointer ${
+                          previewScene?.layout === ly.id
+                            ? "bg-sky-600 border-sky-400 text-white"
+                            : "bg-slate-900 border-slate-700 text-slate-400 hover:text-white"
+                        }`}
+                      >
+                        {ly.label}
+                      </button>
+                    ))}
                   </div>
                 </div>
-              </div>
 
-              {/* Method 2: Facebook / YouTube RTMP Steps */}
-              <div className="p-3.5 rounded-2xl bg-slate-800/70 border border-slate-700 space-y-2.5">
-                <h4 className="text-xs font-black uppercase text-sky-400">
-                  Method 2: One-Click Browser Live Streaming
-                </h4>
-                <ol className="text-[0.68rem] text-slate-300 space-y-1.5 list-decimal list-inside">
-                  <li>
-                    Open <strong>Facebook Live Producer</strong> or <strong>YouTube Live Studio</strong> in another tab.
-                  </li>
-                  <li>
-                    Choose <strong>&quot;Webcam&quot;</strong> or <strong>&quot;Screen Sharing&quot;</strong> as your stream source.
-                  </li>
-                  <li>
-                    Select <strong>This Tab / Window (Box Score Broadcast Studio)</strong>.
-                  </li>
-                  <li>
-                    Click <strong>&quot;Go Live&quot;</strong> on YouTube or Facebook! Your stream will feature full HD camera, live scoreboard, and slow-motion replays.
-                  </li>
-                </ol>
+                {/* Camera Slots List */}
+                <div className="space-y-2">
+                  {previewScene?.cameras.map((slot, idx) => {
+                    const isActive = Boolean(activeSlotIds[slot.id]);
+                    return (
+                      <div
+                        key={slot.id}
+                        className="rounded-xl border border-slate-700/80 bg-slate-900/90 p-2.5 space-y-2"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <input
+                            type="text"
+                            value={slot.angleName}
+                            onChange={(e) =>
+                              handleUpdateCameraSlot(previewScene.id, slot.id, {
+                                angleName: e.target.value,
+                              })
+                            }
+                            className="bg-transparent text-xs font-black text-white focus:outline-none border-b border-transparent focus:border-sky-400 w-40"
+                          />
+                          <div className="flex items-center gap-1">
+                            {!isActive ? (
+                              <button
+                                type="button"
+                                onClick={() => startCameraSlot(slot)}
+                                className="rounded-lg bg-emerald-600 hover:bg-emerald-500 px-2 py-0.5 text-[0.62rem] font-black uppercase text-white cursor-pointer"
+                              >
+                                Activate Cam
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => stopCameraSlot(slot.id)}
+                                className="rounded-lg bg-slate-700 hover:bg-slate-600 px-2 py-0.5 text-[0.62rem] font-black uppercase text-rose-300 cursor-pointer"
+                              >
+                                Stop
+                              </button>
+                            )}
+                            {previewScene.cameras.length > 1 && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleRemoveCameraSlot(previewScene.id, slot.id)
+                                }
+                                className="p-1 text-slate-400 hover:text-rose-400 cursor-pointer"
+                                title="Remove camera from scene"
+                              >
+                                <Trash2 className="h-3 w-3" />
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Source Type & Hardware Device Dropdown */}
+                        <div className="grid grid-cols-2 gap-1.5">
+                          <select
+                            value={slot.sourceType}
+                            onChange={(e) => {
+                              const nextType = e.target.value as SceneCameraSlot["sourceType"];
+                              handleUpdateCameraSlot(previewScene.id, slot.id, {
+                                sourceType: nextType,
+                              });
+                            }}
+                            className="rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-[0.65rem] font-bold text-slate-200"
+                          >
+                            <option value="camera">📷 USB / Webcam</option>
+                            <option value="screen">🖥️ Capture Card / Screen</option>
+                            <option value="court_sim">🏀 Simulated Court Cam #{idx + 1}</option>
+                          </select>
+
+                          {slot.sourceType === "camera" && (
+                            <select
+                              value={slot.deviceId}
+                              onChange={(e) => {
+                                handleUpdateCameraSlot(previewScene.id, slot.id, {
+                                  deviceId: e.target.value,
+                                });
+                                startCameraSlot({
+                                  ...slot,
+                                  deviceId: e.target.value,
+                                });
+                              }}
+                              className="rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-[0.65rem] font-bold text-slate-200"
+                            >
+                              <option value="">Default Camera</option>
+                              {videoDevices.map((d, i) => (
+                                <option key={d.deviceId || i} value={d.deviceId}>
+                                  {d.label || `Camera #${i + 1}`}
+                                </option>
+                              ))}
+                            </select>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {cameraError && (
+                  <p className="text-[0.65rem] font-bold text-rose-400 bg-rose-950/50 border border-rose-800 rounded-lg p-2">
+                    {cameraError}
+                  </p>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+
+        {/* DOCK 3: SCOREBUG OVERLAY & GRAPHICS */}
+        <div className="flex flex-col rounded-xl border border-slate-800 bg-[#131926] overflow-hidden">
+          <div className="px-3 py-2 bg-slate-900 border-b border-slate-800 flex items-center justify-between">
+            <span className="text-xs font-black uppercase tracking-wider text-white flex items-center gap-1.5">
+              <Sliders className="h-3.5 w-3.5 text-emerald-400" />
+              3. Scorebug &amp; Overlay
+            </span>
+          </div>
+
+          <div className="p-3 space-y-3 text-xs">
+            <div className="space-y-1">
+              <label className="text-[0.65rem] font-black uppercase text-slate-400">
+                Scoreboard Position:
+              </label>
+              <div className="grid grid-cols-2 gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setScorebugPosition("bottom_bar")}
+                  className={`rounded-lg py-1.5 text-[0.68rem] font-black uppercase border cursor-pointer ${
+                    scorebugPosition === "bottom_bar"
+                      ? "bg-rose-600 border-rose-500 text-white"
+                      : "bg-slate-900 border-slate-700 text-slate-400"
+                  }`}
+                >
+                  Bottom Center Bar
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setScorebugPosition("top_corner")}
+                  className={`rounded-lg py-1.5 text-[0.68rem] font-black uppercase border cursor-pointer ${
+                    scorebugPosition === "top_corner"
+                      ? "bg-rose-600 border-rose-500 text-white"
+                      : "bg-slate-900 border-slate-700 text-slate-400"
+                  }`}
+                >
+                  Top-Left Bug
+                </button>
               </div>
             </div>
-          )}
+
+            <div className="space-y-1">
+              <label className="text-[0.65rem] font-black uppercase text-slate-400">
+                Broadcast Theme:
+              </label>
+              <div className="grid grid-cols-2 gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setScorebugTheme("broadcast_dark")}
+                  className={`rounded-lg py-1.5 text-[0.68rem] font-black uppercase border cursor-pointer ${
+                    scorebugTheme === "broadcast_dark"
+                      ? "bg-blue-600 border-blue-400 text-white"
+                      : "bg-slate-900 border-slate-700 text-slate-400"
+                  }`}
+                >
+                  ESPN Dark Pro
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setScorebugTheme("clean_light")}
+                  className={`rounded-lg py-1.5 text-[0.68rem] font-black uppercase border cursor-pointer ${
+                    scorebugTheme === "clean_light"
+                      ? "bg-blue-600 border-blue-400 text-white"
+                      : "bg-slate-900 border-slate-700 text-slate-400"
+                  }`}
+                >
+                  Clean White
+                </button>
+              </div>
+            </div>
+
+            <div className="space-y-2 pt-2 border-t border-slate-800">
+              <label className="flex items-center justify-between font-bold text-slate-300 cursor-pointer">
+                <span>Show 24s Shot Clock</span>
+                <input
+                  type="checkbox"
+                  checked={showShotClock}
+                  onChange={(e) => setShowShotClock(e.target.checked)}
+                  className="h-4 w-4 rounded accent-rose-600"
+                />
+              </label>
+
+              <label className="flex items-center justify-between font-bold text-slate-300 cursor-pointer">
+                <span>Show Live Watermark</span>
+                <input
+                  type="checkbox"
+                  checked={showSponsorTag}
+                  onChange={(e) => setShowSponsorTag(e.target.checked)}
+                  className="h-4 w-4 rounded accent-rose-600"
+                />
+              </label>
+
+              {showSponsorTag && (
+                <input
+                  type="text"
+                  value={sponsorText}
+                  onChange={(e) => setSponsorText(e.target.value)}
+                  className="w-full rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-xs font-bold text-white"
+                  placeholder="LIVE ON FACEBOOK / YOUTUBE"
+                />
+              )}
+            </div>
+          </div>
         </div>
-      </div>
+
+        {/* DOCK 4: RECORD STORAGE DESTINATION & FB/YOUTUBE STREAM OUTPUT */}
+        <div className="flex flex-col rounded-xl border border-slate-800 bg-[#131926] overflow-hidden">
+          <div className="px-3 py-2 bg-slate-900 border-b border-slate-800 flex items-center justify-between">
+            <span className="text-xs font-black uppercase tracking-wider text-white flex items-center gap-1.5">
+              <HardDrive className="h-3.5 w-3.5 text-rose-400" />
+              4. Storage &amp; Live Stream
+            </span>
+          </div>
+
+          <div className="p-3 space-y-2.5 text-xs">
+            <label className="block text-[0.65rem] font-black uppercase text-slate-400">
+              Where to Save Recorded Video:
+            </label>
+
+            {[
+              {
+                id: "browser_indexeddb",
+                title: "In-App Timeline DB",
+                desc: "Instant access on bottom timeline for slow-mo replays.",
+              },
+              {
+                id: "local_filesystem",
+                title: "Computer Folder Picker",
+                desc: "Choose any folder/drive on your computer + keep in timeline.",
+              },
+              {
+                id: "download_prompt",
+                title: "Browser Downloads Folder",
+                desc: "Auto-downloads .webm file on stop + keeps in timeline.",
+              },
+            ].map((opt) => (
+              <label
+                key={opt.id}
+                className={`flex items-start gap-2 rounded-xl border p-2 cursor-pointer ${
+                  storageLocation === opt.id
+                    ? "bg-rose-950/30 border-rose-500/60"
+                    : "bg-slate-900 border-slate-800"
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="storage_loc"
+                  checked={storageLocation === opt.id}
+                  onChange={() => setStorageLocation(opt.id as StorageLocation)}
+                  className="mt-0.5 accent-rose-600"
+                />
+                <div>
+                  <p className="text-xs font-black text-white">{opt.title}</p>
+                  <p className="text-[0.62rem] text-slate-400">{opt.desc}</p>
+                </div>
+              </label>
+            ))}
+
+            {/* OBS Browser Source Link for FB / YouTube Live */}
+            <div className="pt-2 border-t border-slate-800 space-y-1">
+              <span className="text-[0.62rem] font-black uppercase text-amber-400">
+                Facebook / YouTube Live URL:
+              </span>
+              <div className="flex items-center gap-1">
+                <input
+                  type="text"
+                  readOnly
+                  value={
+                    typeof window !== "undefined"
+                      ? `${window.location.origin}/scoreboard?leagueId=${selectedLeagueId}&matchId=${selectedMatchId}`
+                      : ""
+                  }
+                  className="flex-1 rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-[0.62rem] font-mono text-slate-300"
+                />
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleCopyText(
+                      `${window.location.origin}/scoreboard?leagueId=${selectedLeagueId}&matchId=${selectedMatchId}`,
+                      "obs-link"
+                    )
+                  }
+                  className="rounded-lg bg-slate-800 hover:bg-slate-700 px-2 py-1 text-xs text-white cursor-pointer"
+                  title="Copy Scoreboard URL"
+                >
+                  {copiedKey === "obs-link" ? (
+                    <Check className="h-3.5 w-3.5 text-emerald-400" />
+                  ) : (
+                    <Copy className="h-3.5 w-3.5" />
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
     </div>
   );
 }
@@ -1485,7 +2474,7 @@ export default function BroadcastStudioPage() {
         <div className="min-h-screen bg-slate-950 text-white flex flex-col items-center justify-center p-6 gap-3">
           <BoxScoreLogo size="md" variant="dark-bg" />
           <p className="text-xs font-black uppercase tracking-widest text-slate-400">
-            Initializing OBS Broadcast Studio...
+            Loading OBS Studio Mode...
           </p>
         </div>
       }

@@ -7,6 +7,11 @@ const DB_NAME = "BoxScoreVideoDB";
 const STORE_NAME = "recorded_videos";
 const DB_VERSION = 1;
 
+export interface TimelineFrame {
+  timeSec: number;
+  dataUrl: string;
+}
+
 export interface StoredGameVideo {
   id: string;
   matchId: string;
@@ -18,6 +23,7 @@ export interface StoredGameVideo {
   durationSeconds: number;
   createdAt: string;
   thumbnailDataUrl?: string;
+  timelineFrames?: TimelineFrame[];
   homeScore?: number;
   awayScore?: number;
   homeTeamName?: string;
