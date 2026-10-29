@@ -24,6 +24,7 @@ import {
   Pause,
   Play,
   Plus,
+  QrCode,
   Radio,
   RefreshCw,
   Repeat,
@@ -33,6 +34,7 @@ import {
   Settings,
   SkipForward,
   Sliders,
+  Smartphone,
   Sparkles,
   Square,
   Tag,
@@ -40,12 +42,14 @@ import {
   Tv,
   User,
   Video,
+  Wifi,
   Zap,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
 import { BoxScoreLogo } from "@/components/brand/BoxScoreLogo";
 import { useBoxScoreStore } from "@/stores/useBoxScoreStore";
+import { supabase } from "@/lib/supabase-client";
 import {
   StoredGameVideo,
   TimelineFrame,
@@ -107,9 +111,11 @@ export type SceneLayoutMode =
 export interface SceneCameraSlot {
   id: string;
   label: string;
-  sourceType: "camera" | "screen" | "court_sim";
+  sourceType: "camera" | "screen" | "court_sim" | "wireless_phone";
   deviceId: string;
   angleName: string;
+  wirelessRoomCode?: string;
+  wirelessIpUrl?: string;
 }
 
 export interface ReplayClipConfig {
@@ -287,6 +293,18 @@ function LiveBroadcastStudioContent() {
   const [cameraError, setCameraError] = useState<string | null>(null);
   const streamBySlotRef = useRef<Record<string, MediaStream>>({});
   const videoElBySlotRef = useRef<Record<string, HTMLVideoElement>>({});
+  const wirelessFrameImgBySlotRef = useRef<Record<string, HTMLImageElement>>({});
+  const wirelessPcBySlotRef = useRef<Record<string, RTCPeerConnection>>({});
+  const wirelessChannelBySlotRef = useRef<
+    Record<string, ReturnType<typeof supabase.channel>>
+  >({});
+  const [wirelessStatusBySlot, setWirelessStatusBySlot] = useState<
+    Record<string, "waiting" | "webrtc" | "relay" | "ip">
+  >({});
+  const [pairingWirelessSlot, setPairingWirelessSlot] = useState<{
+    sceneId: string;
+    slotId: string;
+  } | null>(null);
 
   // Scorebug Overlay Customization
   const [scorebugPosition, setScorebugPosition] = useState<
@@ -744,11 +762,157 @@ function LiveBroadcastStudioContent() {
     return videoElBySlotRef.current[slotId];
   };
 
+  // Connect Wireless Phone Camera (iPhone / Android) via Supabase Realtime + WebRTC / Frame Relay
+  const connectWirelessPhoneSlot = useCallback(
+    (slot: SceneCameraSlot) => {
+      const roomCode = (
+        slot.wirelessRoomCode || `CAM${slot.id.slice(-4).toUpperCase()}`
+      )
+        .trim()
+        .toUpperCase();
+
+      // Clean up existing channel / PeerConnection for this slot
+      if (wirelessPcBySlotRef.current[slot.id]) {
+        wirelessPcBySlotRef.current[slot.id].close();
+        delete wirelessPcBySlotRef.current[slot.id];
+      }
+      if (wirelessChannelBySlotRef.current[slot.id]) {
+        void supabase.removeChannel(wirelessChannelBySlotRef.current[slot.id]);
+        delete wirelessChannelBySlotRef.current[slot.id];
+      }
+
+      // Optional Direct IP Camera MJPEG URL (e.g. Android IP Webcam http://192.168.1.50:8080/video)
+      if (slot.wirelessIpUrl && slot.wirelessIpUrl.trim()) {
+        const ipImg = new Image();
+        ipImg.crossOrigin = "anonymous";
+        ipImg.src = slot.wirelessIpUrl.trim();
+        wirelessFrameImgBySlotRef.current[slot.id] = ipImg;
+        setActiveSlotIds((prev) => ({ ...prev, [slot.id]: true }));
+        setWirelessStatusBySlot((prev) => ({ ...prev, [slot.id]: "ip" }));
+        return;
+      }
+
+      setWirelessStatusBySlot((prev) => ({ ...prev, [slot.id]: "waiting" }));
+      setActiveSlotIds((prev) => ({ ...prev, [slot.id]: true }));
+
+      const ch = supabase.channel(`boxscore-wireless-cam-${roomCode}`, {
+        config: { broadcast: { self: false } },
+      });
+      wirelessChannelBySlotRef.current[slot.id] = ch;
+
+      ch.on("broadcast", { event: "phone_joined" }, () => {
+        void ch.send({
+          type: "broadcast",
+          event: "studio_ready",
+          payload: { roomCode },
+        });
+      })
+        .on("broadcast", { event: "webrtc_offer" }, async ({ payload }) => {
+          try {
+            if (!payload?.sdp) return;
+            if (wirelessPcBySlotRef.current[slot.id]) {
+              wirelessPcBySlotRef.current[slot.id].close();
+            }
+            const pc = new RTCPeerConnection({
+              iceServers: [
+                { urls: "stun:stun.l.google.com:19302" },
+                { urls: "stun:stun1.l.google.com:19302" },
+              ],
+            });
+            wirelessPcBySlotRef.current[slot.id] = pc;
+
+            pc.ontrack = (ev) => {
+              const remoteStream = ev.streams?.[0];
+              if (remoteStream) {
+                streamBySlotRef.current[slot.id] = remoteStream;
+                const vidEl = getOrCreateSlotVideoElement(slot.id);
+                vidEl.srcObject = remoteStream;
+                void vidEl.play().catch(() => {});
+                setActiveSlotIds((prev) => ({ ...prev, [slot.id]: true }));
+                setWirelessStatusBySlot((prev) => ({
+                  ...prev,
+                  [slot.id]: "webrtc",
+                }));
+              }
+            };
+
+            pc.onicecandidate = (ev) => {
+              if (ev.candidate) {
+                void ch.send({
+                  type: "broadcast",
+                  event: "webrtc_ice_from_studio",
+                  payload: {
+                    roomCode,
+                    candidate: ev.candidate.toJSON(),
+                  },
+                });
+              }
+            };
+
+            await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+
+            await ch.send({
+              type: "broadcast",
+              event: "webrtc_answer",
+              payload: {
+                roomCode,
+                sdp: pc.localDescription,
+              },
+            });
+          } catch {
+            // Fallback to frame relay automatically
+          }
+        })
+        .on(
+          "broadcast",
+          { event: "webrtc_ice_from_phone" },
+          async ({ payload }) => {
+            try {
+              const pc = wirelessPcBySlotRef.current[slot.id];
+              if (pc && payload?.candidate) {
+                await pc.addIceCandidate(new RTCIceCandidate(payload.candidate));
+              }
+            } catch {
+              // ignore
+            }
+          }
+        )
+        .on("broadcast", { event: "video_frame" }, ({ payload }) => {
+          if (!payload?.frameDataUrl) return;
+          if (!wirelessFrameImgBySlotRef.current[slot.id]) {
+            wirelessFrameImgBySlotRef.current[slot.id] = new Image();
+          }
+          wirelessFrameImgBySlotRef.current[slot.id].src = payload.frameDataUrl;
+          setActiveSlotIds((prev) => ({ ...prev, [slot.id]: true }));
+          setWirelessStatusBySlot((prev) =>
+            prev[slot.id] === "webrtc" ? prev : { ...prev, [slot.id]: "relay" }
+          );
+        })
+        .subscribe((status) => {
+          if (status === "SUBSCRIBED") {
+            void ch.send({
+              type: "broadcast",
+              event: "studio_ready",
+              payload: { roomCode },
+            });
+          }
+        });
+    },
+    []
+  );
+
   // Start Camera or Screen Stream for a specific Slot
   const startCameraSlot = async (slot: SceneCameraSlot) => {
     setCameraError(null);
     if (slot.sourceType === "court_sim") {
       setActiveSlotIds((prev) => ({ ...prev, [slot.id]: true }));
+      return;
+    }
+
+    if (slot.sourceType === "wireless_phone") {
+      connectWirelessPhoneSlot(slot);
       return;
     }
 
@@ -795,6 +959,15 @@ function LiveBroadcastStudioContent() {
     if (videoElBySlotRef.current[slotId]) {
       videoElBySlotRef.current[slotId].srcObject = null;
     }
+    if (wirelessPcBySlotRef.current[slotId]) {
+      wirelessPcBySlotRef.current[slotId].close();
+      delete wirelessPcBySlotRef.current[slotId];
+    }
+    if (wirelessChannelBySlotRef.current[slotId]) {
+      void supabase.removeChannel(wirelessChannelBySlotRef.current[slotId]);
+      delete wirelessChannelBySlotRef.current[slotId];
+    }
+    delete wirelessFrameImgBySlotRef.current[slotId];
     setActiveSlotIds((prev) => ({ ...prev, [slotId]: false }));
   };
 
@@ -921,14 +1094,21 @@ function LiveBroadcastStudioContent() {
       ctx.clip();
 
       const vidEl = videoElBySlotRef.current[slot.id];
+      const wirelessImgEl = wirelessFrameImgBySlotRef.current[slot.id];
       const isStreamReady =
         slot.sourceType !== "court_sim" &&
         activeSlotIds[slot.id] &&
         vidEl &&
         vidEl.readyState >= 2;
+      const isWirelessImgReady =
+        slot.sourceType === "wireless_phone" &&
+        activeSlotIds[slot.id] &&
+        wirelessImgEl &&
+        wirelessImgEl.complete &&
+        wirelessImgEl.naturalWidth > 0;
 
       if (isStreamReady && vidEl) {
-        // Draw live webcam / capture card stream with object-cover scaling
+        // Draw live webcam / capture card / WebRTC wireless phone stream with object-cover scaling
         const vw = vidEl.videoWidth || 1280;
         const vh = vidEl.videoHeight || 720;
         const scale = Math.max(rw / vw, rh / vh);
@@ -937,6 +1117,48 @@ function LiveBroadcastStudioContent() {
         const dx = rx + (rw - dw) / 2;
         const dy = ry + (rh - dh) / 2;
         ctx.drawImage(vidEl, dx, dy, dw, dh);
+      } else if (isWirelessImgReady && wirelessImgEl) {
+        // Draw wireless phone relay / IP camera frame with object-cover scaling
+        const iw = wirelessImgEl.naturalWidth || 640;
+        const ih = wirelessImgEl.naturalHeight || 360;
+        const scale = Math.max(rw / iw, rh / ih);
+        const dw = iw * scale;
+        const dh = ih * scale;
+        const dx = rx + (rw - dw) / 2;
+        const dy = ry + (rh - dh) / 2;
+        try {
+          ctx.drawImage(wirelessImgEl, dx, dy, dw, dh);
+        } catch {
+          // ignore
+        }
+      } else if (slot.sourceType === "wireless_phone") {
+        // Waiting for iPhone / Android wireless camera pairing
+        ctx.fillStyle = "#090d16";
+        ctx.fillRect(rx, ry, rw, rh);
+        ctx.strokeStyle = "rgba(56, 189, 248, 0.25)";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(rx + 2, ry + 2, rw - 4, rh - 4);
+
+        const roomCode = (
+          slot.wirelessRoomCode || `CAM${slot.id.slice(-4).toUpperCase()}`
+        ).toUpperCase();
+        ctx.fillStyle = "#38bdf8";
+        ctx.font = "900 24px 'Inter', sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(
+          `📱 WIRELESS PHONE CAM (${roomCode})`,
+          rx + rw / 2,
+          ry + rh / 2 - 20
+        );
+
+        ctx.fillStyle = "#94a3b8";
+        ctx.font = "700 15px 'Inter', sans-serif";
+        ctx.fillText(
+          "Click 'Pair QR / Link' in Scene Sources to connect iPhone or Android",
+          rx + rw / 2,
+          ry + rh / 2 + 16
+        );
       } else if (slot.sourceType === "court_sim" || activeSlotIds[slot.id]) {
         // Simulated Dynamic Multi-Cam Court Angle Feed (for testing multi-cam or secondary angles)
         const grad = ctx.createLinearGradient(rx, ry, rx + rw, ry + rh);
@@ -1388,7 +1610,7 @@ function LiveBroadcastStudioContent() {
     ]
   );
 
-  // Helper: Draw On-Court Player Stats Card in the Middle of the Live Feed (Only Non-Zero Stats)
+  // Helper: Draw Compact On-Court Player Stats Lower-Third Card at Center Bottom (Only Non-Zero Stats)
   const drawLivePlayerStatsOverlay = useCallback(
     (ctx: CanvasRenderingContext2D, width: number, height: number) => {
       if (!featuredOnCourtPlayer) return;
@@ -1438,30 +1660,32 @@ function LiveBroadcastStudioContent() {
         nonZeroStats.push({ label: "PF", value: String(featuredOnCourtPlayer.pf) });
       }
 
-      const statBoxW = 104;
-      const statGap = 12;
+      // Compact Lower-Third Dimensions at Center Bottom
+      const statBoxW = 68;
+      const statGap = 8;
       const statsCount = Math.max(1, nonZeroStats.length);
       const statsAreaW =
         nonZeroStats.length > 0
           ? statsCount * statBoxW + (statsCount - 1) * statGap
-          : 230;
-      const cardW = Math.max(660, Math.min(1380, 340 + statsAreaW + 48));
-      const cardH = 168;
-      // Centered in the middle of the Live Feed
+          : 165;
+      const leftInfoAreaW = 282; // Fixed width for accent + avatar + player name column
+      const cardW = leftInfoAreaW + statsAreaW + 22;
+      const cardH = 88;
+      // Positioned at Center Bottom of the 1920x1080 Live Feed
       const cardX = Math.round((width - cardW) / 2);
-      const cardY = Math.round((height - cardH) / 2);
+      const cardY = height - cardH - 28;
 
       ctx.save();
-      ctx.shadowColor = "rgba(0, 0, 0, 0.72)";
-      ctx.shadowBlur = 32;
-      ctx.shadowOffsetY = 12;
+      ctx.shadowColor = "rgba(0, 0, 0, 0.65)";
+      ctx.shadowBlur = 22;
+      ctx.shadowOffsetY = 8;
 
       ctx.fillStyle = "rgba(11, 23, 42, 0.95)";
       ctx.beginPath();
-      ctx.roundRect(cardX, cardY, cardW, cardH, [22]);
+      ctx.roundRect(cardX, cardY, cardW, cardH, [16]);
       ctx.fill();
 
-      ctx.lineWidth = 2.5;
+      ctx.lineWidth = 2;
       ctx.strokeStyle = featuredOnCourtPlayer.teamColor || "#38bdf8";
       ctx.stroke();
 
@@ -1470,12 +1694,12 @@ function LiveBroadcastStudioContent() {
       // Left Team Accent Bar
       ctx.fillStyle = featuredOnCourtPlayer.teamColor || "#38bdf8";
       ctx.beginPath();
-      ctx.roundRect(cardX + 12, cardY + 16, 8, cardH - 32, [4]);
+      ctx.roundRect(cardX + 10, cardY + 12, 6, cardH - 24, [3]);
       ctx.fill();
 
-      // Player Avatar or Jersey Circle
-      const avatarSize = 104;
-      const avatarX = cardX + 34;
+      // Player Avatar or Jersey Circle (Compact 58px)
+      const avatarSize = 58;
+      const avatarX = cardX + 24;
       const avatarY = cardY + Math.round((cardH - avatarSize) / 2);
 
       ctx.save();
@@ -1489,7 +1713,7 @@ function LiveBroadcastStudioContent() {
       );
       ctx.fillStyle = featuredOnCourtPlayer.teamColor || "#1e293b";
       ctx.fill();
-      ctx.lineWidth = 3;
+      ctx.lineWidth = 2;
       ctx.strokeStyle = "rgba(255, 255, 255, 0.45)";
       ctx.stroke();
 
@@ -1503,81 +1727,90 @@ function LiveBroadcastStudioContent() {
         }
       } else {
         ctx.fillStyle = "#ffffff";
-        ctx.font = "900 36px 'Inter', sans-serif";
+        ctx.font = "900 21px 'Inter', sans-serif";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
         ctx.fillText(
           `#${featuredOnCourtPlayer.jerseyNumber}`,
           avatarX + avatarSize / 2,
-          avatarY + avatarSize / 2 + 2
+          avatarY + avatarSize / 2 + 1
         );
       }
       ctx.restore();
 
-      // Player Name, Jersey & Team Badge
-      const infoX = avatarX + avatarSize + 22;
+      // Player Name, Jersey & Team Badge (Strictly bounded so it never overlaps stat boxes)
+      const infoX = avatarX + avatarSize + 14;
+      const maxInfoTextW = leftInfoAreaW - (infoX - cardX) - 10;
+
       ctx.fillStyle = "#38bdf8";
-      ctx.font = "900 13px 'Inter', sans-serif";
+      ctx.font = "900 10.5px 'Inter', sans-serif";
       ctx.textAlign = "left";
       ctx.textBaseline = "middle";
       ctx.fillText(
         `${featuredOnCourtPlayer.teamShortName.toUpperCase()} • #${featuredOnCourtPlayer.jerseyNumber} • ${featuredOnCourtPlayer.position}`,
         infoX,
-        cardY + 46
+        cardY + 25,
+        maxInfoTextW
       );
 
       ctx.fillStyle = "#ffffff";
-      ctx.font = "900 28px 'Inter', sans-serif";
+      ctx.font = "900 17px 'Inter', sans-serif";
       const fullName = `${featuredOnCourtPlayer.firstName} ${featuredOnCourtPlayer.lastName}`.trim();
-      ctx.fillText(fullName.slice(0, 18).toUpperCase(), infoX, cardY + 84);
+      ctx.fillText(fullName.toUpperCase(), infoX, cardY + 46, maxInfoTextW);
 
       ctx.fillStyle = "#4ade80";
-      ctx.font = "800 12px 'Inter', sans-serif";
-      ctx.fillText("● ON THE COURT • LIVE PLAYER TELEMETRY", infoX, cardY + 118);
+      ctx.font = "800 9.5px 'Inter', sans-serif";
+      ctx.fillText("● ON COURT STATS", infoX, cardY + 66, maxInfoTextW);
+
+      // Vertical Divider between Player Info and Stats
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.14)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(cardX + leftInfoAreaW - 4, cardY + 14);
+      ctx.lineTo(cardX + leftInfoAreaW - 4, cardY + cardH - 14);
+      ctx.stroke();
 
       // Right Side: Non-Zero Stats Boxes
-      const statsStartX = cardX + cardW - statsAreaW - 28;
-      const statsY = cardY + 26;
-      const statsH = cardH - 52;
+      const statsStartX = cardX + leftInfoAreaW + 6;
+      const statsY = cardY + 13;
+      const statsH = cardH - 26;
 
       if (nonZeroStats.length === 0) {
         ctx.fillStyle = "rgba(255, 255, 255, 0.07)";
         ctx.beginPath();
-        ctx.roundRect(statsStartX, statsY, 230, statsH, [14]);
+        ctx.roundRect(statsStartX, statsY, 165, statsH, [10]);
         ctx.fill();
 
         ctx.fillStyle = "#94a3b8";
-        ctx.font = "800 14px 'Inter', sans-serif";
+        ctx.font = "800 11px 'Inter', sans-serif";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
-        ctx.fillText("ON THE COURT", statsStartX + 115, statsY + statsH / 2 - 10);
-        ctx.font = "700 11px 'Inter', sans-serif";
-        ctx.fillText("AWAITING FIRST STAT", statsStartX + 115, statsY + statsH / 2 + 12);
+        ctx.fillText("ON THE COURT", statsStartX + 82.5, statsY + statsH / 2);
       } else {
         nonZeroStats.forEach((st, idx) => {
           const bx = statsStartX + idx * (statBoxW + statGap);
           ctx.fillStyle = st.highlight
-            ? "rgba(225, 29, 72, 0.25)"
+            ? "rgba(225, 29, 72, 0.28)"
             : "rgba(255, 255, 255, 0.08)";
           ctx.beginPath();
-          ctx.roundRect(bx, statsY, statBoxW, statsH, [14]);
+          ctx.roundRect(bx, statsY, statBoxW, statsH, [10]);
           ctx.fill();
 
-          ctx.lineWidth = 1.5;
+          ctx.lineWidth = 1.25;
           ctx.strokeStyle = st.highlight
             ? "rgba(251, 113, 133, 0.55)"
             : "rgba(255, 255, 255, 0.14)";
           ctx.stroke();
 
           ctx.fillStyle = st.highlight ? "#fda4af" : "#94a3b8";
-          ctx.font = "900 13px 'Inter', sans-serif";
+          ctx.font = "900 10px 'Inter', sans-serif";
           ctx.textAlign = "center";
           ctx.textBaseline = "middle";
-          ctx.fillText(st.label, bx + statBoxW / 2, statsY + 30);
+          ctx.fillText(st.label, bx + statBoxW / 2, statsY + 18);
 
           ctx.fillStyle = "#ffffff";
-          ctx.font = "900 34px 'Inter', sans-serif";
-          ctx.fillText(st.value, bx + statBoxW / 2, statsY + 78);
+          ctx.font = "900 19px 'Inter', sans-serif";
+          ctx.fillText(st.value, bx + statBoxW / 2, statsY + 42, statBoxW - 8);
         });
       }
 
@@ -1761,11 +1994,18 @@ function LiveBroadcastStudioContent() {
         }
       }
 
-      if (drawOverlay) {
+      // If Scorebug is Bottom-Center ("bottom_bar") and the Live Player Stats Card is active,
+      // automatically hide the Scorebug so they do not overlap at Center Bottom; restore it when hidden.
+      const hideBottomBarForStatsCard =
+        isLiveProgramCanvas &&
+        Boolean(featuredOnCourtPlayer) &&
+        scorebugPosition === "bottom_bar";
+
+      if (drawOverlay && !hideBottomBarForStatsCard) {
         drawScorebugOverlay(ctx, width, height);
       }
 
-      // Render Selected On-Court Player Stats in the Middle of the Live Feed
+      // Render Selected On-Court Player Stats at Center Bottom of the Live Feed
       if (isLiveProgramCanvas && featuredOnCourtPlayer) {
         drawLivePlayerStatsOverlay(ctx, width, height);
       }
@@ -1775,6 +2015,7 @@ function LiveBroadcastStudioContent() {
       drawScorebugOverlay,
       drawLivePlayerStatsOverlay,
       featuredOnCourtPlayer,
+      scorebugPosition,
     ]
   );
 
@@ -1945,6 +2186,44 @@ function LiveBroadcastStudioContent() {
         };
       })
     );
+  };
+
+  // Add an iPhone / Android Wireless Camera Slot to the Preview Scene and open the QR Pairing Modal
+  const handleAddWirelessPhoneCameraToPreviewScene = () => {
+    if (!previewScene || previewScene.kind !== "camera_scene") return;
+    const nextIdx = previewScene.cameras.length + 1;
+    const slotId = `cam-${generateUUID().slice(0, 8)}`;
+    const roomCode = `CAM${Math.floor(100 + Math.random() * 900)}`;
+    const newSlot: SceneCameraSlot = {
+      id: slotId,
+      label: `Phone Cam ${nextIdx}`,
+      sourceType: "wireless_phone",
+      deviceId: "",
+      angleName: `PHONE CAM ${nextIdx}`,
+      wirelessRoomCode: roomCode,
+      wirelessIpUrl: "",
+    };
+
+    setScenes((prev) =>
+      prev.map((s) => {
+        if (s.id !== previewScene.id) return s;
+        const updatedCams = [...s.cameras, newSlot];
+        const autoLayout: SceneLayoutMode =
+          updatedCams.length === 2 && s.layout === "single"
+            ? "split_50_50"
+            : updatedCams.length >= 3 && s.layout === "single"
+            ? "quad_grid"
+            : s.layout;
+        return {
+          ...s,
+          layout: autoLayout,
+          cameras: updatedCams,
+        };
+      })
+    );
+
+    connectWirelessPhoneSlot(newSlot);
+    setPairingWirelessSlot({ sceneId: previewScene.id, slotId });
   };
 
   const handleUpdateCameraSlot = (
@@ -4509,20 +4788,31 @@ function LiveBroadcastStudioContent() {
 
         {/* DOCK 2: MULTI-CAMERA SOURCES & LAYOUT (For Selected Preview Scene) */}
         <div className="flex flex-col rounded-xl border border-slate-800 bg-[#131926] overflow-hidden">
-          <div className="px-3 py-2 bg-slate-900 border-b border-slate-800 flex items-center justify-between">
-            <span className="text-xs font-black uppercase tracking-wider text-white flex items-center gap-1.5">
-              <Camera className="h-3.5 w-3.5 text-sky-400" />
-              2. Scene Sources ({previewScene?.cameras.length || (previewScene?.mediaConfig ? 1 : 0)})
+          <div className="px-3 py-2 bg-slate-900 border-b border-slate-800 flex items-center justify-between gap-1.5">
+            <span className="text-xs font-black uppercase tracking-wider text-white flex items-center gap-1.5 truncate">
+              <Camera className="h-3.5 w-3.5 text-sky-400 shrink-0" />
+              <span>2. Scene Sources ({previewScene?.cameras.length || (previewScene?.mediaConfig ? 1 : 0)})</span>
             </span>
             {previewScene?.kind === "camera_scene" && (
-              <button
-                type="button"
-                onClick={handleAddCameraToPreviewScene}
-                className="inline-flex items-center gap-1 rounded-lg bg-sky-600 hover:bg-sky-500 px-2 py-0.5 text-[0.65rem] font-black uppercase text-white cursor-pointer"
-              >
-                <Plus className="h-3 w-3" />
-                Add Camera
-              </button>
+              <div className="flex items-center gap-1 shrink-0">
+                <button
+                  type="button"
+                  onClick={handleAddWirelessPhoneCameraToPreviewScene}
+                  className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 px-2 py-0.5 text-[0.62rem] font-black uppercase text-white cursor-pointer"
+                  title="Add iPhone or Android Phone as a Wireless Camera"
+                >
+                  <Smartphone className="h-3 w-3" />
+                  <span>+ Phone Cam</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleAddCameraToPreviewScene}
+                  className="inline-flex items-center gap-1 rounded-lg bg-sky-600 hover:bg-sky-500 px-2 py-0.5 text-[0.62rem] font-black uppercase text-white cursor-pointer"
+                >
+                  <Plus className="h-3 w-3" />
+                  <span>+ Cam</span>
+                </button>
+              </div>
             )}
           </div>
 
@@ -4731,19 +5021,41 @@ function LiveBroadcastStudioContent() {
                           </div>
                         </div>
 
-                        {/* Source Type & Hardware Device Dropdown */}
+                        {/* Source Type & Hardware Device / Wireless Phone Dropdown */}
                         <div className="grid grid-cols-2 gap-1.5">
                           <select
                             value={slot.sourceType}
                             onChange={(e) => {
                               const nextType = e.target.value as SceneCameraSlot["sourceType"];
+                              const defaultRoom =
+                                slot.wirelessRoomCode ||
+                                `CAM${Math.floor(100 + Math.random() * 900)}`;
+                              const updatedSlot: SceneCameraSlot = {
+                                ...slot,
+                                sourceType: nextType,
+                                wirelessRoomCode:
+                                  nextType === "wireless_phone"
+                                    ? defaultRoom
+                                    : slot.wirelessRoomCode,
+                              };
                               handleUpdateCameraSlot(previewScene.id, slot.id, {
                                 sourceType: nextType,
+                                wirelessRoomCode: updatedSlot.wirelessRoomCode,
                               });
+                              if (nextType === "wireless_phone") {
+                                connectWirelessPhoneSlot(updatedSlot);
+                                setPairingWirelessSlot({
+                                  sceneId: previewScene.id,
+                                  slotId: slot.id,
+                                });
+                              }
                             }}
                             className="rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-[0.65rem] font-bold text-slate-200"
                           >
                             <option value="camera">📷 USB / Webcam</option>
+                            <option value="wireless_phone">
+                              📱 iPhone / Android Wireless Cam
+                            </option>
                             <option value="screen">🖥️ Capture Card / Screen</option>
                             <option value="court_sim">🏀 Simulated Court Cam #{idx + 1}</option>
                           </select>
@@ -4770,7 +5082,63 @@ function LiveBroadcastStudioContent() {
                               ))}
                             </select>
                           )}
+
+                          {slot.sourceType === "wireless_phone" && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                connectWirelessPhoneSlot(slot);
+                                setPairingWirelessSlot({
+                                  sceneId: previewScene.id,
+                                  slotId: slot.id,
+                                });
+                              }}
+                              className="rounded-lg bg-sky-600/25 hover:bg-sky-600/40 border border-sky-400/50 px-2 py-1 text-[0.62rem] font-black uppercase text-sky-300 flex items-center justify-center gap-1 cursor-pointer"
+                            >
+                              <QrCode className="h-3 w-3" />
+                              <span>
+                                Pair QR ({slot.wirelessRoomCode || "CAM"})
+                              </span>
+                            </button>
+                          )}
                         </div>
+
+                        {slot.sourceType === "wireless_phone" && (
+                          <div className="flex items-center justify-between rounded-lg bg-slate-950/90 border border-slate-800 px-2 py-1 text-[0.6rem]">
+                            <span className="font-bold text-slate-300">
+                              Status:{" "}
+                              {wirelessStatusBySlot[slot.id] === "webrtc" ? (
+                                <strong className="text-emerald-400">
+                                  🟢 Connected (WebRTC HD)
+                                </strong>
+                              ) : wirelessStatusBySlot[slot.id] === "relay" ? (
+                                <strong className="text-emerald-400">
+                                  🟢 Connected (Cloud Stream)
+                                </strong>
+                              ) : wirelessStatusBySlot[slot.id] === "ip" ? (
+                                <strong className="text-emerald-400">
+                                  🟢 Connected (IP Stream)
+                                </strong>
+                              ) : (
+                                <strong className="text-amber-300">
+                                  🟡 Waiting for Phone ({slot.wirelessRoomCode})
+                                </strong>
+                              )}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setPairingWirelessSlot({
+                                  sceneId: previewScene.id,
+                                  slotId: slot.id,
+                                })
+                              }
+                              className="text-sky-400 hover:underline font-black uppercase cursor-pointer"
+                            >
+                              Show QR
+                            </button>
+                          </div>
+                        )}
                       </div>
                     );
                   })}
@@ -5347,6 +5715,167 @@ function LiveBroadcastStudioContent() {
           </div>
         </div>
       )}
+
+      {/* =====================================================================
+          6. PAIR IPHONE / ANDROID WIRELESS CAMERA MODAL (QR + LINK + IP CAM)
+         ===================================================================== */}
+      {pairingWirelessSlot &&
+        (() => {
+          const targetScene = scenes.find(
+            (s) => s.id === pairingWirelessSlot.sceneId
+          );
+          const targetSlot = targetScene?.cameras.find(
+            (c) => c.id === pairingWirelessSlot.slotId
+          );
+          if (!targetScene || !targetSlot) return null;
+
+          const roomCode = (
+            targetSlot.wirelessRoomCode ||
+            `CAM${targetSlot.id.slice(-4).toUpperCase()}`
+          ).toUpperCase();
+          const origin =
+            typeof window !== "undefined" ? window.location.origin : "";
+          const mobileCamUrl = `${origin}/studio/mobile-cam?room=${encodeURIComponent(
+            roomCode
+          )}&name=${encodeURIComponent(targetSlot.angleName || targetSlot.label)}`;
+          const qrImageUrl = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&margin=8&data=${encodeURIComponent(
+            mobileCamUrl
+          )}`;
+          const status = wirelessStatusBySlot[targetSlot.id] || "waiting";
+
+          return (
+            <div
+              className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
+              onClick={() => setPairingWirelessSlot(null)}
+            >
+              <div
+                className="w-full max-w-lg rounded-2xl border border-sky-500/40 bg-[#131926] p-5 shadow-2xl space-y-4 text-slate-100"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                  <div className="flex items-center gap-2.5">
+                    <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-emerald-600/20 border border-emerald-500/40 text-emerald-400">
+                      <Smartphone className="h-5 w-5" />
+                    </span>
+                    <div>
+                      <h2 className="text-sm font-black uppercase tracking-wider text-white">
+                        Connect iPhone or Android as Wireless Camera
+                      </h2>
+                      <p className="text-xs text-slate-400">
+                        Scan QR code with your phone camera — no app install required
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setPairingWirelessSlot(null)}
+                    className="rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 px-2.5 py-1 text-xs font-bold text-slate-300 cursor-pointer"
+                  >
+                    ✕ Close
+                  </button>
+                </div>
+
+                {/* QR Code + Room Code Card */}
+                <div className="grid grid-cols-1 sm:grid-cols-5 gap-4 items-center rounded-xl bg-slate-900/90 border border-slate-800 p-4">
+                  <div className="sm:col-span-2 flex flex-col items-center justify-center">
+                    <div className="rounded-xl bg-white p-2 shadow-lg">
+                      <img
+                        src={qrImageUrl}
+                        alt="Scan QR Code with iPhone or Android"
+                        className="h-40 w-40 object-contain"
+                      />
+                    </div>
+                    <span className="mt-2 text-[0.62rem] font-black uppercase text-amber-300">
+                      Room Code: {roomCode}
+                    </span>
+                  </div>
+
+                  <div className="sm:col-span-3 space-y-2.5 text-xs">
+                    <div className="inline-flex items-center gap-1.5 rounded-lg bg-slate-950 border border-slate-800 px-2.5 py-1">
+                      <Wifi className="h-3.5 w-3.5 text-emerald-400" />
+                      <span className="font-black uppercase text-[0.65rem]">
+                        {status === "webrtc"
+                          ? "🟢 Phone Connected (WebRTC HD)"
+                          : status === "relay"
+                          ? "🟢 Phone Connected (Live Stream)"
+                          : status === "ip"
+                          ? "🟢 Connected via IP Camera URL"
+                          : "🟡 Waiting for Phone to Scan QR..."}
+                      </span>
+                    </div>
+
+                    <ol className="list-decimal list-inside space-y-1.5 text-slate-300 text-[0.7rem] leading-relaxed">
+                      <li>
+                        Open the Camera app on your <strong>iPhone (Safari)</strong> or{" "}
+                        <strong>Android (Chrome)</strong> and scan this QR code.
+                      </li>
+                      <li>
+                        Tap <strong>&ldquo;Start Wireless Camera&rdquo;</strong> on your phone and allow Camera access.
+                      </li>
+                      <li>
+                        Your phone&apos;s live video feed will immediately appear in{" "}
+                        <strong className="text-sky-300">{targetSlot.angleName}</strong>!
+                      </li>
+                    </ol>
+
+                    <div className="pt-1 flex items-center gap-1.5">
+                      <input
+                        type="text"
+                        readOnly
+                        value={mobileCamUrl}
+                        className="flex-1 rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-[0.65rem] font-mono text-slate-300"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => handleCopyText(mobileCamUrl, "wireless_url")}
+                        className="rounded-lg bg-sky-600 hover:bg-sky-500 px-3 py-1.5 text-[0.65rem] font-black uppercase text-white cursor-pointer shrink-0 flex items-center gap-1"
+                      >
+                        {copiedKey === "wireless_url" ? (
+                          <>
+                            <Check className="h-3 w-3" />
+                            <span>Copied</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="h-3 w-3" />
+                            <span>Copy Link</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Optional: Direct IP Webcam MJPEG URL (DroidCam / IP Webcam App) */}
+                <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-3 space-y-2 text-xs">
+                  <label className="block text-[0.62rem] font-black uppercase text-slate-400">
+                    Optional: Or Paste Android/iOS IP Webcam Stream URL (e.g. http://192.168.1.50:8080/video):
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={targetSlot.wirelessIpUrl || ""}
+                      onChange={(e) => {
+                        handleUpdateCameraSlot(targetScene.id, targetSlot.id, {
+                          wirelessIpUrl: e.target.value,
+                        });
+                      }}
+                      placeholder="http://192.168.1.50:8080/video (Leave blank for QR WebRTC)"
+                      className="flex-1 rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-xs font-mono text-white focus:outline-none focus:border-sky-400"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => connectWirelessPhoneSlot(targetSlot)}
+                      className="rounded-lg bg-emerald-600 hover:bg-emerald-500 px-3 py-1.5 text-xs font-black uppercase text-white cursor-pointer shrink-0"
+                    >
+                      Connect
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
     </div>
   );
 }
