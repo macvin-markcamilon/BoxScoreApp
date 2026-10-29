@@ -174,6 +174,7 @@ export function mapDbTeamRow(row: Record<string, unknown>): LeagueTeam {
     categoryName: row.category_name ? String(row.category_name) : undefined,
     createdBy: String(row.created_by),
     name: String(row.name),
+    initials: row.initials ? String(row.initials) : undefined,
     imageUrl: String(row.image_url ?? ""),
     primaryColor: String(row.primary_color ?? "#8B0D0E"),
     secondaryColor: String(row.secondary_color ?? "#0B2F5C"),

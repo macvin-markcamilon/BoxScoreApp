@@ -246,12 +246,13 @@ create policy "Users can unfollow leagues"
   on public.league_follows for delete
   using (auth.uid() = user_id);
 
--- 4. Teams Table (With Primary/Secondary Colors, Coaching Staff Photos, Manager Photo & Roster JSONB)
+-- 4. Teams Table (With Team Initials, Primary/Secondary Colors, Coaching Staff Photos, Manager Photo & Roster JSONB)
 create table if not exists public.teams (
   id uuid primary key default gen_random_uuid(),
   league_id uuid not null references public.leagues(id) on delete cascade,
   created_by uuid not null references auth.users(id) on delete cascade,
   name text not null,
+  initials text not null default '',
   image_url text,
   primary_color text not null default '#8B0D0E',
   secondary_color text not null default '#0B2F5C',
@@ -265,6 +266,8 @@ create table if not exists public.teams (
   roster jsonb not null default '[]'::jsonb,
   created_at timestamptz not null default now()
 );
+
+alter table public.teams add column if not exists initials text not null default '';
 
 alter table public.teams enable row level security;
 

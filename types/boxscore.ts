@@ -277,6 +277,7 @@ export interface LeagueTeam {
   categoryName?: string;
   createdBy: string;
   name: string;
+  initials?: string;
   imageUrl: string;
   primaryColor: string;
   secondaryColor: string;

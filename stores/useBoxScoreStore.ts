@@ -54,6 +54,7 @@ export interface TeamUpsertInput {
   categoryId?: string | null;
   categoryName?: string;
   name: string;
+  initials?: string;
   imageUrl: string;
   primaryColor: string;
   secondaryColor: string;
@@ -1359,8 +1360,16 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
       const mappedFollows = (followsData ?? []).map((r) =>
         String((r as Record<string, unknown>).league_id)
       );
+      const prevLocalTeams = readLocalCache<LeagueTeam[]>(STORAGE_KEYS.TEAMS, get().teams ?? []);
       const mappedTeams = (teamsData ?? [])
-        .map((r) => mapDbTeamRow(r as Record<string, unknown>))
+        .map((r) => {
+          const mapped = mapDbTeamRow(r as Record<string, unknown>);
+          const localMatch = prevLocalTeams.find((lt) => lt.id === mapped.id);
+          if (!mapped.initials && localMatch?.initials) {
+            mapped.initials = localMatch.initials;
+          }
+          return mapped;
+        })
         .map(hydrateTeamImagesFromVault);
 
       // Hydrate cloud-saved tournaments, referees, and game sessions from active leagues only
@@ -2594,6 +2603,8 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
             imageUrl: "",
           }));
 
+    const trimmedInitials = input.initials?.trim().toUpperCase() || "";
+
     let res = await supabase
       .from("teams")
       .insert({
@@ -2602,6 +2613,7 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
         category_name: input.categoryName ?? "",
         created_by: profile.id,
         name: input.name.trim(),
+        initials: trimmedInitials,
         image_url: input.imageUrl,
         primary_color: input.primaryColor,
         secondary_color: input.secondaryColor,
@@ -2617,8 +2629,14 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
       .select("*")
       .single();
 
-    // If Supabase schema lacks the new category_id/category_name columns (PGRST204), retry insert without them
-    if (res.error && (res.error.code === "PGRST204" || res.error.message?.includes("category_id") || res.error.message?.includes("category_name"))) {
+    // If Supabase schema lacks the new category_id/category_name/initials columns (PGRST204), retry insert without them
+    if (
+      res.error &&
+      (res.error.code === "PGRST204" ||
+        res.error.message?.includes("category_id") ||
+        res.error.message?.includes("category_name") ||
+        res.error.message?.includes("initials"))
+    ) {
       res = await supabase
         .from("teams")
         .insert({
@@ -2662,6 +2680,7 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
         categoryName: input.categoryName,
         createdBy: profile.id,
         name: input.name.trim(),
+        initials: trimmedInitials || undefined,
         imageUrl: input.imageUrl,
         primaryColor: input.primaryColor,
         secondaryColor: input.secondaryColor,
@@ -2689,7 +2708,10 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
       return null;
     }
 
-    const createdTeam = mapDbTeamRow(data as Record<string, unknown>);
+    const createdTeam: LeagueTeam = {
+      ...mapDbTeamRow(data as Record<string, unknown>),
+      initials: trimmedInitials || undefined,
+    };
     saveToImageVault(`team:${createdTeam.id}`, input.imageUrl);
     saveToImageVault(`hc:${createdTeam.id}`, input.headCoachImageUrl);
     saveToImageVault(`mgr:${createdTeam.id}`, input.managerImageUrl);
@@ -2741,11 +2763,17 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
       saveToImageVault(`player:${p.id}`, p.imageUrl);
     }
 
+    const trimmedInitials =
+      input.initials !== undefined
+        ? input.initials.trim().toUpperCase()
+        : existing.initials || "";
+
     const updatedTeam: LeagueTeam = {
       ...existing,
       categoryId: input.categoryId !== undefined ? input.categoryId : existing.categoryId,
       categoryName: input.categoryName !== undefined ? input.categoryName : existing.categoryName,
       name: input.name.trim(),
+      initials: trimmedInitials || undefined,
       imageUrl: input.imageUrl,
       primaryColor: input.primaryColor,
       secondaryColor: input.secondaryColor,
@@ -2770,6 +2798,7 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
         .from("teams")
         .update({
           name: updatedTeam.name,
+          initials: trimmedInitials,
           category_id: updatedTeam.categoryId ?? null,
           category_name: updatedTeam.categoryName ?? "",
           image_url: updatedTeam.imageUrl,
@@ -2786,7 +2815,13 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
         })
         .eq("id", teamId);
 
-      if (updateRes.error && (updateRes.error.code === "PGRST204" || updateRes.error.message?.includes("category_id") || updateRes.error.message?.includes("category_name"))) {
+      if (
+        updateRes.error &&
+        (updateRes.error.code === "PGRST204" ||
+          updateRes.error.message?.includes("category_id") ||
+          updateRes.error.message?.includes("category_name") ||
+          updateRes.error.message?.includes("initials"))
+      ) {
         updateRes = await supabase
           .from("teams")
           .update({

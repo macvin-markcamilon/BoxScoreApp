@@ -250,6 +250,7 @@ export function LeagueDashboard() {
 
   // Create / Update Team Form State
   const [teamName, setTeamName] = useState("");
+  const [teamInitials, setTeamInitials] = useState("");
   const [teamImageUrl, setTeamImageUrl] = useState("");
   const [teamCategoryId, setTeamCategoryId] = useState<string>("");
   const [primaryColor, setPrimaryColor] = useState("#8B0D0E");
@@ -347,6 +348,7 @@ export function LeagueDashboard() {
   const resetTeamModalForm = () => {
     setEditingTeamId(null);
     setTeamName("");
+    setTeamInitials("");
     setTeamImageUrl("");
     setTeamCategoryId("");
     setPrimaryColor("#8B0D0E");
@@ -908,6 +910,7 @@ Derrick, White, 9, PG, false, `
     setFormNotice(null);
     setEditingTeamId(team.id);
     setTeamName(team.name);
+    setTeamInitials(team.initials || "");
     setTeamImageUrl(team.imageUrl || "");
     setTeamCategoryId(team.categoryId || "");
     setPrimaryColor(team.primaryColor || "#8B0D0E");
@@ -1275,6 +1278,7 @@ Derrick, White, 9, PG, false, `
       categoryId: teamCategoryId || null,
       categoryName: matchedCategory?.name || undefined,
       name: teamName,
+      initials: teamInitials.trim().toUpperCase(),
       imageUrl: teamImageUrl,
       primaryColor,
       secondaryColor,
@@ -4336,24 +4340,51 @@ create policy "Auth teams delete" on public.teams for delete using (auth.uid() =
           {/* 1. Team Name, Image & Primary/Secondary Colors */}
           <div className="grid grid-cols-1 gap-5 md:grid-cols-12">
             <div className="md:col-span-7 space-y-4">
-              <div>
-                <label
-                  htmlFor="team-name-field"
-                  className="block text-xs font-black uppercase tracking-wider text-slate-800 mb-1.5"
-                >
-                  Team Name *
-                </label>
-                <input
-                  id="team-name-field"
-                  name="team_name"
-                  type="text"
-                  required
-                  value={teamName}
-                  onChange={(e) => setTeamName(e.target.value)}
-                  placeholder="e.g. Barangay San Juan Knights"
-                  className="w-full min-h-[48px] rounded-xl border border-slate-300 bg-slate-50 px-3.5 py-2.5 text-base font-semibold text-slate-900 focus:border-[#0B2F5C] focus:bg-white focus:outline-none"
-                />
+              <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
+                <div className="sm:col-span-8">
+                  <label
+                    htmlFor="team-name-field"
+                    className="block text-xs font-black uppercase tracking-wider text-slate-800 mb-1.5"
+                  >
+                    Team Name *
+                  </label>
+                  <input
+                    id="team-name-field"
+                    name="team_name"
+                    type="text"
+                    required
+                    value={teamName}
+                    onChange={(e) => setTeamName(e.target.value)}
+                    placeholder="e.g. Barangay San Juan Knights"
+                    className="w-full min-h-[48px] rounded-xl border border-slate-300 bg-slate-50 px-3.5 py-2.5 text-base font-semibold text-slate-900 focus:border-[#0B2F5C] focus:bg-white focus:outline-none"
+                  />
+                </div>
+                <div className="sm:col-span-4">
+                  <label
+                    htmlFor="team-initials-field"
+                    className="block text-xs font-black uppercase tracking-wider text-slate-800 mb-1.5"
+                  >
+                    Team Initials (Scorebug)
+                  </label>
+                  <input
+                    id="team-initials-field"
+                    name="team_initials"
+                    type="text"
+                    maxLength={8}
+                    value={teamInitials}
+                    onChange={(e) => setTeamInitials(e.target.value.toUpperCase())}
+                    placeholder={
+                      teamName.trim()
+                        ? `e.g. ${teamName.trim().split(/\s+/)[0].toUpperCase()}`
+                        : "e.g. LAL / STI"
+                    }
+                    className="w-full min-h-[48px] rounded-xl border border-slate-300 bg-slate-50 px-3.5 py-2.5 text-base font-black uppercase text-slate-900 focus:border-[#0B2F5C] focus:bg-white focus:outline-none"
+                  />
+                </div>
               </div>
+              <p className="text-[0.68rem] font-semibold text-slate-500 -mt-2">
+                💡 Scorebug Team Name: Uses <strong>Team Initials</strong> if provided; otherwise defaults to the <strong>first word</strong> of the Team Name ({teamInitials.trim() ? teamInitials.trim().toUpperCase() : teamName.trim() ? teamName.trim().split(/\s+/)[0].toUpperCase() : "FIRST WORD"}).
+              </p>
 
               {/* Division / Category Selector */}
               {selectedLeague && (selectedLeague.categories?.length ?? 0) > 0 && (

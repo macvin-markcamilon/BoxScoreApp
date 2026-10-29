@@ -17,6 +17,7 @@ import {
   Grid,
   GripHorizontal,
   HardDrive,
+  Image as ImageIcon,
   Layers,
   Layout,
   Monitor,
@@ -37,6 +38,7 @@ import {
   Tag,
   Trash2,
   Tv,
+  User,
   Video,
   Zap,
   ZoomIn,
@@ -53,7 +55,7 @@ import {
   deleteStoredVideo,
 } from "@/lib/video-storage";
 import { generateUUID } from "@/lib/uuid";
-import { LiveGameSession } from "@/types/boxscore";
+import { LiveGameSession, PlayerGameStats } from "@/types/boxscore";
 
 function formatClock(seconds: number): string {
   const safe = Math.max(0, Math.floor(seconds));
@@ -118,13 +120,40 @@ export interface ReplayClipConfig {
   playbackRate: number;
 }
 
+export interface SceneMediaConfig {
+  mediaType: "video" | "picture";
+  url: string;
+  fileName: string;
+  loop?: boolean;
+  muted?: boolean;
+  objectFit?: "contain" | "cover";
+}
+
 export interface StudioScene {
   id: string;
   name: string;
-  kind: "camera_scene" | "replay_scene";
+  kind: "camera_scene" | "replay_scene" | "video_scene" | "picture_scene";
   layout: SceneLayoutMode;
   cameras: SceneCameraSlot[];
   replayConfig?: ReplayClipConfig;
+  mediaConfig?: SceneMediaConfig;
+}
+
+/**
+ * Scorebug Team Name Rule:
+ * Use Team Initials if defined on the team; otherwise use ONLY the first word of the team name.
+ */
+function getScorebugTeamDisplay(
+  team: { name?: string; initials?: string } | null | undefined,
+  fallbackFullName: string
+): string {
+  const initials = team?.initials?.trim();
+  if (initials) {
+    return initials.toUpperCase();
+  }
+  const full = (team?.name || fallbackFullName || "TEAM").trim();
+  const firstWord = full.split(/\s+/)[0] || full;
+  return firstWord.toUpperCase();
 }
 
 const DEFAULT_SCENES: StudioScene[] = [
@@ -267,10 +296,19 @@ function LiveBroadcastStudioContent() {
   const [showShotClock, setShowShotClock] = useState<boolean>(true);
   const [showSponsorTag, setShowSponsorTag] = useState<boolean>(true);
   const [sponsorText, setSponsorText] = useState<string>("BOX SCORE LIVE");
+  const [manualHomeTimeouts, setManualHomeTimeouts] = useState<number>(2);
+  const [manualAwayTimeouts, setManualAwayTimeouts] = useState<number>(2);
+  const [manualHomePenaltyOverride, setManualHomePenaltyOverride] = useState<boolean | null>(null);
+  const [manualAwayPenaltyOverride, setManualAwayPenaltyOverride] = useState<boolean | null>(null);
 
-  // Team Logo Image Refs for Canvas Scorebug Rendering
+  // Live On-Court Player Stats Overlay State (Controlled in Live — shows non-zero stats in the middle of the feed)
+  const [liveFeaturedPlayerId, setLiveFeaturedPlayerId] = useState<string | null>(null);
+
+  // Team Logo & Featured Player Image Refs for Canvas Rendering
   const homeLogoImgRef = useRef<HTMLImageElement | null>(null);
   const awayLogoImgRef = useRef<HTMLImageElement | null>(null);
+  const featuredPlayerImgRef = useRef<HTMLImageElement | null>(null);
+  const mediaImageCacheRef = useRef<Record<string, HTMLImageElement>>({});
 
   // Recording & Live Timeline State
   const [isRecording, setIsRecording] = useState<boolean>(false);
@@ -320,6 +358,8 @@ function LiveBroadcastStudioContent() {
   const liveCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const previewReplayVideoRef = useRef<HTMLVideoElement | null>(null);
   const liveReplayVideoRef = useRef<HTMLVideoElement | null>(null);
+  const previewMediaVideoRef = useRef<HTMLVideoElement | null>(null);
+  const liveMediaVideoRef = useRef<HTMLVideoElement | null>(null);
   const timelineScrubVideoRef = useRef<HTMLVideoElement | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<Blob[]>([]);
@@ -452,8 +492,153 @@ function LiveBroadcastStudioContent() {
 
   const homeTeamName = homeTeam?.name ?? activeMatch?.homeTeamPlaceholder ?? "HOME";
   const awayTeamName = awayTeam?.name ?? activeMatch?.awayTeamPlaceholder ?? "AWAY";
+  // Scorebug Team Name: Team Initials if set; otherwise the first word of the team name
+  const homeScorebugName = getScorebugTeamDisplay(homeTeam, homeTeamName);
+  const awayScorebugName = getScorebugTeamDisplay(awayTeam, awayTeamName);
   const homeColor = homeTeam?.primaryColor ?? "#8B0D0E";
   const awayColor = awayTeam?.primaryColor ?? "#0B2F5C";
+
+  // Timeouts & Team Penalty / Bonus Status for Scorebug
+  const currentPeriodIndex = Math.max(0, period - 1);
+  const bonusThreshold = activeLeague?.rulesConfig?.teamFoulBonusThreshold ?? 5;
+  const homePeriodFouls =
+    liveSession?.homeTeamFoulsByPeriod?.[currentPeriodIndex] ?? 0;
+  const awayPeriodFouls =
+    liveSession?.awayTeamFoulsByPeriod?.[currentPeriodIndex] ?? 0;
+  const homeTimeoutsRemaining =
+    liveSession?.homeTimeoutsRemaining ?? manualHomeTimeouts;
+  const awayTimeoutsRemaining =
+    liveSession?.awayTimeoutsRemaining ?? manualAwayTimeouts;
+  const isHomeInPenalty =
+    manualHomePenaltyOverride !== null
+      ? manualHomePenaltyOverride
+      : homePeriodFouls >= bonusThreshold;
+  const isAwayInPenalty =
+    manualAwayPenaltyOverride !== null
+      ? manualAwayPenaltyOverride
+      : awayPeriodFouls >= bonusThreshold;
+
+  // On-Court Players Selection for Live Player Stats Feed Overlay (ONLY players on the court!)
+  const onCourtAwayPlayers: Array<PlayerGameStats & { teamSide: "AWAY"; teamName: string; teamShortName: string; teamColor: string }> = useMemo(() => {
+    if (liveSession?.awayPlayerStats) {
+      const list = Object.values(liveSession.awayPlayerStats).filter((p) => p.isOnCourt);
+      if (list.length > 0) {
+        return list.map((p) => ({
+          ...p,
+          teamSide: "AWAY" as const,
+          teamName: awayTeamName,
+          teamShortName: awayScorebugName,
+          teamColor: awayColor,
+        }));
+      }
+    }
+    return (awayTeam?.roster ?? []).slice(0, 5).map((r) => ({
+      playerId: r.id,
+      firstName: r.firstName,
+      lastName: r.lastName,
+      jerseyNumber: r.jerseyNumber,
+      position: r.position,
+      imageUrl: r.imageUrl,
+      isOnCourt: true,
+      points: 0,
+      fgm: 0,
+      fga: 0,
+      tpm: 0,
+      tpa: 0,
+      ftm: 0,
+      fta: 0,
+      oreb: 0,
+      dreb: 0,
+      ast: 0,
+      stl: 0,
+      blk: 0,
+      tov: 0,
+      pf: 0,
+      techFouls: 0,
+      teamSide: "AWAY" as const,
+      teamName: awayTeamName,
+      teamShortName: awayScorebugName,
+      teamColor: awayColor,
+    }));
+  }, [liveSession?.awayPlayerStats, awayTeam?.roster, awayTeamName, awayScorebugName, awayColor]);
+
+  const onCourtHomePlayers: Array<PlayerGameStats & { teamSide: "HOME"; teamName: string; teamShortName: string; teamColor: string }> = useMemo(() => {
+    if (liveSession?.homePlayerStats) {
+      const list = Object.values(liveSession.homePlayerStats).filter((p) => p.isOnCourt);
+      if (list.length > 0) {
+        return list.map((p) => ({
+          ...p,
+          teamSide: "HOME" as const,
+          teamName: homeTeamName,
+          teamShortName: homeScorebugName,
+          teamColor: homeColor,
+        }));
+      }
+    }
+    return (homeTeam?.roster ?? []).slice(0, 5).map((r) => ({
+      playerId: r.id,
+      firstName: r.firstName,
+      lastName: r.lastName,
+      jerseyNumber: r.jerseyNumber,
+      position: r.position,
+      imageUrl: r.imageUrl,
+      isOnCourt: true,
+      points: 0,
+      fgm: 0,
+      fga: 0,
+      tpm: 0,
+      tpa: 0,
+      ftm: 0,
+      fta: 0,
+      oreb: 0,
+      dreb: 0,
+      ast: 0,
+      stl: 0,
+      blk: 0,
+      tov: 0,
+      pf: 0,
+      techFouls: 0,
+      teamSide: "HOME" as const,
+      teamName: homeTeamName,
+      teamShortName: homeScorebugName,
+      teamColor: homeColor,
+    }));
+  }, [liveSession?.homePlayerStats, homeTeam?.roster, homeTeamName, homeScorebugName, homeColor]);
+
+  const allOnCourtPlayers = useMemo(
+    () => [...onCourtAwayPlayers, ...onCourtHomePlayers],
+    [onCourtAwayPlayers, onCourtHomePlayers]
+  );
+
+  const featuredOnCourtPlayer = useMemo(() => {
+    if (!liveFeaturedPlayerId) return null;
+    return allOnCourtPlayers.find((p) => p.playerId === liveFeaturedPlayerId) ?? null;
+  }, [allOnCourtPlayers, liveFeaturedPlayerId]);
+
+  // If the selected player was subbed off the court, auto-clear the overlay
+  useEffect(() => {
+    if (liveFeaturedPlayerId && !featuredOnCourtPlayer) {
+      setLiveFeaturedPlayerId(null);
+    }
+  }, [liveFeaturedPlayerId, featuredOnCourtPlayer]);
+
+  // Load Featured On-Court Player Image into CORS-safe HTMLImageElement
+  useEffect(() => {
+    const rawUrl = featuredOnCourtPlayer?.imageUrl;
+    if (!rawUrl || !rawUrl.trim()) {
+      featuredPlayerImgRef.current = null;
+      return;
+    }
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    const trimmed = rawUrl.trim();
+    if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+      img.src = `/api/image-proxy?url=${encodeURIComponent(trimmed)}`;
+    } else {
+      img.src = trimmed;
+    }
+    featuredPlayerImgRef.current = img;
+  }, [featuredOnCourtPlayer?.imageUrl]);
 
   // Active Preview & Live Scene objects
   const previewScene = useMemo(
@@ -648,6 +833,44 @@ function LiveBroadcastStudioContent() {
     syncReplayElement(liveScene, liveReplayVideoRef.current);
   }, [previewScene, liveScene, storedVideos]);
 
+  // Sync Uploaded Video Scenes & Picture Scenes for Preview and Live Program
+  useEffect(() => {
+    const syncMediaVideo = (
+      scene: StudioScene | undefined,
+      vidEl: HTMLVideoElement | null
+    ) => {
+      if (!vidEl) return;
+      if (!scene || scene.kind !== "video_scene" || !scene.mediaConfig) {
+        vidEl.pause();
+        return;
+      }
+      const currentSceneId = vidEl.getAttribute("data-media-scene-id");
+      if (currentSceneId !== scene.id || vidEl.src !== scene.mediaConfig.url) {
+        vidEl.src = scene.mediaConfig.url;
+        vidEl.setAttribute("data-media-scene-id", scene.id);
+      }
+      vidEl.loop = true;
+      if (vidEl.paused) {
+        vidEl.play().catch(() => {});
+      }
+    };
+
+    const ensurePictureCached = (scene: StudioScene | undefined) => {
+      if (!scene || scene.kind !== "picture_scene" || !scene.mediaConfig) return;
+      if (!mediaImageCacheRef.current[scene.id]) {
+        const img = new Image();
+        img.crossOrigin = "anonymous";
+        img.src = scene.mediaConfig.url;
+        mediaImageCacheRef.current[scene.id] = img;
+      }
+    };
+
+    syncMediaVideo(previewScene, previewMediaVideoRef.current);
+    syncMediaVideo(liveScene, liveMediaVideoRef.current);
+    ensurePictureCached(previewScene);
+    ensurePictureCached(liveScene);
+  }, [previewScene, liveScene]);
+
   // Enforce Replay Trim Loop (Start -> End) on both Preview and Live replay players
   useEffect(() => {
     const interval = setInterval(() => {
@@ -798,33 +1021,12 @@ function LiveBroadcastStudioContent() {
         );
       }
 
-      // Camera Angle Label Pill in top-left of its viewport
-      ctx.fillStyle = "rgba(15, 23, 42, 0.82)";
-      ctx.beginPath();
-      ctx.roundRect(rx + 16, ry + 16, 220, 32, [8]);
-      ctx.fill();
-
-      ctx.fillStyle = isStreamReady ? "#4ade80" : "#38bdf8";
-      ctx.beginPath();
-      ctx.arc(rx + 30, ry + 32, 5, 0, Math.PI * 2);
-      ctx.fill();
-
-      ctx.fillStyle = "#ffffff";
-      ctx.font = "800 12px 'Inter', sans-serif";
-      ctx.textAlign = "left";
-      ctx.textBaseline = "middle";
-      ctx.fillText(
-        (slot.angleName || slot.label).slice(0, 22).toUpperCase(),
-        rx + 42,
-        ry + 32
-      );
-
       ctx.restore();
     },
     [activeSlotIds, awayTeamName, awayScore, homeScore, homeTeamName, clockSeconds]
   );
 
-  // Helper: Draw Scorebug Overlay (with Team Logos & Bottom-Left / Bottom-Center / Top-Left Support)
+  // Helper: Draw Scorebug Overlay (with Team Logos, Short Name/Initials, Timeout Pips, Penalty Indicator & Clean Shot Clock)
   const drawScorebugOverlay = useCallback(
     (ctx: CanvasRenderingContext2D, width: number, height: number) => {
       const isDark = scorebugTheme !== "clean_light";
@@ -864,10 +1066,57 @@ function LiveBroadcastStudioContent() {
           ctx.textAlign = "center";
           ctx.textBaseline = "middle";
           ctx.fillText(
-            teamNameStr.slice(0, 2).toUpperCase(),
+            teamNameStr.slice(0, 3).toUpperCase(),
             x + size / 2,
             y + size / 2 + 1
           );
+        }
+        ctx.restore();
+      };
+
+      // Helper to render Timeout Pips + PENALTY badge
+      const drawTimeoutAndPenaltyRow = (
+        timeoutsLeft: number,
+        inPenalty: boolean,
+        x: number,
+        y: number,
+        align: "left" | "right" = "left"
+      ) => {
+        ctx.save();
+        const maxPips = 5;
+        const pipW = 10;
+        const pipH = 5;
+        const pipGap = 3;
+        const totalPipsW = maxPips * pipW + (maxPips - 1) * pipGap;
+        const penaltyW = inPenalty ? 52 : 0;
+        const totalW = totalPipsW + (inPenalty ? penaltyW + 6 : 0);
+        const startX = align === "right" ? x - totalW : x;
+
+        for (let i = 0; i < maxPips; i++) {
+          const px = startX + i * (pipW + pipGap);
+          ctx.fillStyle =
+            i < timeoutsLeft
+              ? "#fbbf24"
+              : isDark
+              ? "rgba(255, 255, 255, 0.18)"
+              : "rgba(15, 23, 42, 0.16)";
+          ctx.beginPath();
+          ctx.roundRect(px, y, pipW, pipH, [2]);
+          ctx.fill();
+        }
+
+        if (inPenalty) {
+          const badgeX = startX + totalPipsW + 6;
+          ctx.fillStyle = "#e11d48";
+          ctx.beginPath();
+          ctx.roundRect(badgeX, y - 4, penaltyW, 13, [4]);
+          ctx.fill();
+
+          ctx.fillStyle = "#ffffff";
+          ctx.font = "900 8.5px 'Inter', sans-serif";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText("PENALTY", badgeX + penaltyW / 2, y + 2.5);
         }
         ctx.restore();
       };
@@ -876,7 +1125,7 @@ function LiveBroadcastStudioContent() {
 
       if (scorebugPosition === "bottom_bar") {
         const bugW = 920;
-        const bugH = 76;
+        const bugH = 82;
         const bugX = (width - bugW) / 2;
         const bugY = height - bugH - 28;
 
@@ -895,7 +1144,7 @@ function LiveBroadcastStudioContent() {
 
         ctx.shadowColor = "transparent";
 
-        // Away Team Color Accent + Logo + Name + Score
+        // Away Team Color Accent + Logo + Short Name/Initials + Score + Timeouts/Penalty
         ctx.fillStyle = awayColor;
         ctx.beginPath();
         ctx.roundRect(bugX + 10, bugY + 12, 6, bugH - 24, [3]);
@@ -904,19 +1153,28 @@ function LiveBroadcastStudioContent() {
         drawTeamLogoCrest(
           awayLogoImgRef.current,
           awayColor,
-          awayTeamName,
+          awayScorebugName,
           bugX + 24,
-          bugY + 14,
+          bugY + 17,
           48
         );
 
         ctx.fillStyle = textColor;
-        ctx.font = "900 21px 'Inter', sans-serif";
+        ctx.font = "900 22px 'Inter', sans-serif";
         ctx.textAlign = "left";
         ctx.textBaseline = "middle";
-        ctx.fillText(awayTeamName.slice(0, 11).toUpperCase(), bugX + 82, bugY + bugH / 2);
+        ctx.fillText(awayScorebugName.slice(0, 10).toUpperCase(), bugX + 82, bugY + 32);
 
-        ctx.font = "900 34px 'Inter', sans-serif";
+        drawTimeoutAndPenaltyRow(
+          awayTimeoutsRemaining,
+          isAwayInPenalty,
+          bugX + 82,
+          bugY + 55,
+          "left"
+        );
+
+        ctx.fillStyle = textColor;
+        ctx.font = "900 36px 'Inter', sans-serif";
         ctx.textAlign = "right";
         ctx.fillText(String(awayScore), bugX + 312, bugY + bugH / 2);
 
@@ -927,22 +1185,30 @@ function LiveBroadcastStudioContent() {
         ctx.lineTo(bugX + 332, bugY + bugH - 12);
         ctx.stroke();
 
-        // Home Team Score + Name + Logo + Color Accent
+        // Home Team Score + Short Name/Initials + Timeouts/Penalty + Logo + Color Accent
         ctx.fillStyle = textColor;
-        ctx.font = "900 34px 'Inter', sans-serif";
+        ctx.font = "900 36px 'Inter', sans-serif";
         ctx.textAlign = "left";
         ctx.fillText(String(homeScore), bugX + 352, bugY + bugH / 2);
 
         ctx.fillStyle = textColor;
-        ctx.font = "900 21px 'Inter', sans-serif";
-        ctx.fillText(homeTeamName.slice(0, 11).toUpperCase(), bugX + 420, bugY + bugH / 2);
+        ctx.font = "900 22px 'Inter', sans-serif";
+        ctx.fillText(homeScorebugName.slice(0, 10).toUpperCase(), bugX + 425, bugY + 32);
+
+        drawTimeoutAndPenaltyRow(
+          homeTimeoutsRemaining,
+          isHomeInPenalty,
+          bugX + 425,
+          bugY + 55,
+          "left"
+        );
 
         drawTeamLogoCrest(
           homeLogoImgRef.current,
           homeColor,
-          homeTeamName,
+          homeScorebugName,
           bugX + 610,
-          bugY + 14,
+          bugY + 17,
           48
         );
 
@@ -960,22 +1226,22 @@ function LiveBroadcastStudioContent() {
         ctx.fillStyle = isClockRunning ? "#38bdf8" : "#f59e0b";
         ctx.font = "900 24px 'Inter', sans-serif";
         ctx.textAlign = "center";
-        ctx.fillText(formatClock(clockSeconds), bugX + 755, bugY + 28);
+        ctx.fillText(formatClock(clockSeconds), bugX + 755, bugY + 31);
 
         ctx.fillStyle = subTextColor;
         ctx.font = "800 12px 'Inter', sans-serif";
-        ctx.fillText(getPeriodLabel(period).toUpperCase(), bugX + 755, bugY + 52);
+        ctx.fillText(getPeriodLabel(period).toUpperCase(), bugX + 755, bugY + 55);
 
         if (showShotClock) {
           ctx.fillStyle = shotClock <= 5 ? "#ef4444" : "#eab308";
-          ctx.font = "900 28px 'Inter', sans-serif";
+          ctx.font = "900 30px 'Inter', sans-serif";
           ctx.textAlign = "center";
           ctx.fillText(String(shotClock), bugX + 855, bugY + bugH / 2);
         }
       } else {
         // Compact Corner Bug: Supports BOTH "bottom_left" (Bottom-Left Bug) and "top_corner" (Top-Left Bug)
-        const bugW = 460;
-        const bugH = 104;
+        const bugW = 470;
+        const bugH = 114;
         const bugX = 36;
         const bugY =
           scorebugPosition === "bottom_left" ? height - bugH - 28 : 58;
@@ -998,71 +1264,89 @@ function LiveBroadcastStudioContent() {
         // Away Team Row (Top)
         ctx.fillStyle = awayColor;
         ctx.beginPath();
-        ctx.roundRect(bugX + 10, bugY + 12, 6, 34, [3]);
+        ctx.roundRect(bugX + 10, bugY + 12, 6, 38, [3]);
         ctx.fill();
 
         drawTeamLogoCrest(
           awayLogoImgRef.current,
           awayColor,
-          awayTeamName,
+          awayScorebugName,
           bugX + 22,
-          bugY + 11,
+          bugY + 13,
           36
         );
 
         ctx.fillStyle = textColor;
-        ctx.font = "900 17px 'Inter', sans-serif";
+        ctx.font = "900 18px 'Inter', sans-serif";
         ctx.textAlign = "left";
         ctx.textBaseline = "middle";
-        ctx.fillText(awayTeamName.slice(0, 12).toUpperCase(), bugX + 66, bugY + 29);
+        ctx.fillText(awayScorebugName.slice(0, 10).toUpperCase(), bugX + 66, bugY + 23);
 
-        ctx.font = "900 23px 'Inter', sans-serif";
+        drawTimeoutAndPenaltyRow(
+          awayTimeoutsRemaining,
+          isAwayInPenalty,
+          bugX + 66,
+          bugY + 39,
+          "left"
+        );
+
+        ctx.fillStyle = textColor;
+        ctx.font = "900 25px 'Inter', sans-serif";
         ctx.textAlign = "right";
-        ctx.fillText(String(awayScore), bugX + 292, bugY + 29);
+        ctx.fillText(String(awayScore), bugX + 300, bugY + 31);
 
         // Home Team Row (Bottom)
         ctx.fillStyle = homeColor;
         ctx.beginPath();
-        ctx.roundRect(bugX + 10, bugY + 58, 6, 34, [3]);
+        ctx.roundRect(bugX + 10, bugY + 62, 6, 38, [3]);
         ctx.fill();
 
         drawTeamLogoCrest(
           homeLogoImgRef.current,
           homeColor,
-          homeTeamName,
+          homeScorebugName,
           bugX + 22,
-          bugY + 57,
+          bugY + 63,
           36
         );
 
         ctx.fillStyle = textColor;
-        ctx.font = "900 17px 'Inter', sans-serif";
+        ctx.font = "900 18px 'Inter', sans-serif";
         ctx.textAlign = "left";
-        ctx.fillText(homeTeamName.slice(0, 12).toUpperCase(), bugX + 66, bugY + 75);
+        ctx.fillText(homeScorebugName.slice(0, 10).toUpperCase(), bugX + 66, bugY + 73);
 
-        ctx.font = "900 23px 'Inter', sans-serif";
+        drawTimeoutAndPenaltyRow(
+          homeTimeoutsRemaining,
+          isHomeInPenalty,
+          bugX + 66,
+          bugY + 89,
+          "left"
+        );
+
+        ctx.fillStyle = textColor;
+        ctx.font = "900 25px 'Inter', sans-serif";
         ctx.textAlign = "right";
-        ctx.fillText(String(homeScore), bugX + 292, bugY + 75);
+        ctx.fillText(String(homeScore), bugX + 300, bugY + 81);
 
-        // Right Column: Clock, Quarter & Shot Clock
+        // Right Column: Clock, Quarter & Shot Clock (No 'SC' prefix)
         ctx.fillStyle = isDark ? "rgba(255, 255, 255, 0.08)" : "rgba(0, 0, 0, 0.06)";
         ctx.beginPath();
-        ctx.roundRect(bugX + 308, bugY + 10, bugW - 318, bugH - 20, [10]);
+        ctx.roundRect(bugX + 314, bugY + 10, bugW - 324, bugH - 20, [10]);
         ctx.fill();
 
         ctx.fillStyle = isClockRunning ? "#38bdf8" : "#f59e0b";
-        ctx.font = "900 21px 'Inter', sans-serif";
+        ctx.font = "900 22px 'Inter', sans-serif";
         ctx.textAlign = "center";
-        ctx.fillText(formatClock(clockSeconds), bugX + 380, bugY + 34);
+        ctx.fillText(formatClock(clockSeconds), bugX + 387, bugY + 34);
 
         ctx.fillStyle = subTextColor;
         ctx.font = "800 11px 'Inter', sans-serif";
-        ctx.fillText(getPeriodLabel(period).toUpperCase(), bugX + 380, bugY + 56);
+        ctx.fillText(getPeriodLabel(period).toUpperCase(), bugX + 387, bugY + 57);
 
         if (showShotClock) {
           ctx.fillStyle = shotClock <= 5 ? "#ef4444" : "#eab308";
-          ctx.font = "900 18px 'Inter', sans-serif";
-          ctx.fillText(`SC: ${shotClock}s`, bugX + 380, bugY + 76);
+          ctx.font = "900 24px 'Inter', sans-serif";
+          ctx.fillText(String(shotClock), bugX + 387, bugY + 84);
         }
       }
 
@@ -1085,11 +1369,15 @@ function LiveBroadcastStudioContent() {
       scorebugTheme,
       scorebugPosition,
       awayColor,
-      awayTeamName,
+      awayScorebugName,
       awayScore,
+      awayTimeoutsRemaining,
+      isAwayInPenalty,
       homeScore,
-      homeTeamName,
+      homeScorebugName,
       homeColor,
+      homeTimeoutsRemaining,
+      isHomeInPenalty,
       isClockRunning,
       clockSeconds,
       period,
@@ -1100,6 +1388,204 @@ function LiveBroadcastStudioContent() {
     ]
   );
 
+  // Helper: Draw On-Court Player Stats Card in the Middle of the Live Feed (Only Non-Zero Stats)
+  const drawLivePlayerStatsOverlay = useCallback(
+    (ctx: CanvasRenderingContext2D, width: number, height: number) => {
+      if (!featuredOnCourtPlayer) return;
+
+      const totalReb =
+        (featuredOnCourtPlayer.oreb || 0) + (featuredOnCourtPlayer.dreb || 0);
+      const nonZeroStats: Array<{ label: string; value: string; highlight?: boolean }> = [];
+
+      if (featuredOnCourtPlayer.points > 0) {
+        nonZeroStats.push({
+          label: "PTS",
+          value: String(featuredOnCourtPlayer.points),
+          highlight: true,
+        });
+      }
+      if (totalReb > 0) {
+        nonZeroStats.push({ label: "REB", value: String(totalReb) });
+      }
+      if (featuredOnCourtPlayer.ast > 0) {
+        nonZeroStats.push({ label: "AST", value: String(featuredOnCourtPlayer.ast) });
+      }
+      if (featuredOnCourtPlayer.stl > 0) {
+        nonZeroStats.push({ label: "STL", value: String(featuredOnCourtPlayer.stl) });
+      }
+      if (featuredOnCourtPlayer.blk > 0) {
+        nonZeroStats.push({ label: "BLK", value: String(featuredOnCourtPlayer.blk) });
+      }
+      if (featuredOnCourtPlayer.tpm > 0) {
+        nonZeroStats.push({
+          label: "3PM",
+          value: `${featuredOnCourtPlayer.tpm}/${featuredOnCourtPlayer.tpa}`,
+        });
+      }
+      if (featuredOnCourtPlayer.fgm > 0) {
+        nonZeroStats.push({
+          label: "FG",
+          value: `${featuredOnCourtPlayer.fgm}/${featuredOnCourtPlayer.fga}`,
+        });
+      }
+      if (featuredOnCourtPlayer.ftm > 0) {
+        nonZeroStats.push({
+          label: "FT",
+          value: `${featuredOnCourtPlayer.ftm}/${featuredOnCourtPlayer.fta}`,
+        });
+      }
+      if (featuredOnCourtPlayer.pf > 0) {
+        nonZeroStats.push({ label: "PF", value: String(featuredOnCourtPlayer.pf) });
+      }
+
+      const statBoxW = 104;
+      const statGap = 12;
+      const statsCount = Math.max(1, nonZeroStats.length);
+      const statsAreaW =
+        nonZeroStats.length > 0
+          ? statsCount * statBoxW + (statsCount - 1) * statGap
+          : 230;
+      const cardW = Math.max(660, Math.min(1380, 340 + statsAreaW + 48));
+      const cardH = 168;
+      // Centered in the middle of the Live Feed
+      const cardX = Math.round((width - cardW) / 2);
+      const cardY = Math.round((height - cardH) / 2);
+
+      ctx.save();
+      ctx.shadowColor = "rgba(0, 0, 0, 0.72)";
+      ctx.shadowBlur = 32;
+      ctx.shadowOffsetY = 12;
+
+      ctx.fillStyle = "rgba(11, 23, 42, 0.95)";
+      ctx.beginPath();
+      ctx.roundRect(cardX, cardY, cardW, cardH, [22]);
+      ctx.fill();
+
+      ctx.lineWidth = 2.5;
+      ctx.strokeStyle = featuredOnCourtPlayer.teamColor || "#38bdf8";
+      ctx.stroke();
+
+      ctx.shadowColor = "transparent";
+
+      // Left Team Accent Bar
+      ctx.fillStyle = featuredOnCourtPlayer.teamColor || "#38bdf8";
+      ctx.beginPath();
+      ctx.roundRect(cardX + 12, cardY + 16, 8, cardH - 32, [4]);
+      ctx.fill();
+
+      // Player Avatar or Jersey Circle
+      const avatarSize = 104;
+      const avatarX = cardX + 34;
+      const avatarY = cardY + Math.round((cardH - avatarSize) / 2);
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(
+        avatarX + avatarSize / 2,
+        avatarY + avatarSize / 2,
+        avatarSize / 2,
+        0,
+        Math.PI * 2
+      );
+      ctx.fillStyle = featuredOnCourtPlayer.teamColor || "#1e293b";
+      ctx.fill();
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.45)";
+      ctx.stroke();
+
+      const pImg = featuredPlayerImgRef.current;
+      if (pImg && pImg.complete && pImg.naturalWidth > 0) {
+        ctx.clip();
+        try {
+          ctx.drawImage(pImg, avatarX, avatarY, avatarSize, avatarSize);
+        } catch {
+          // ignore
+        }
+      } else {
+        ctx.fillStyle = "#ffffff";
+        ctx.font = "900 36px 'Inter', sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(
+          `#${featuredOnCourtPlayer.jerseyNumber}`,
+          avatarX + avatarSize / 2,
+          avatarY + avatarSize / 2 + 2
+        );
+      }
+      ctx.restore();
+
+      // Player Name, Jersey & Team Badge
+      const infoX = avatarX + avatarSize + 22;
+      ctx.fillStyle = "#38bdf8";
+      ctx.font = "900 13px 'Inter', sans-serif";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.fillText(
+        `${featuredOnCourtPlayer.teamShortName.toUpperCase()} • #${featuredOnCourtPlayer.jerseyNumber} • ${featuredOnCourtPlayer.position}`,
+        infoX,
+        cardY + 46
+      );
+
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "900 28px 'Inter', sans-serif";
+      const fullName = `${featuredOnCourtPlayer.firstName} ${featuredOnCourtPlayer.lastName}`.trim();
+      ctx.fillText(fullName.slice(0, 18).toUpperCase(), infoX, cardY + 84);
+
+      ctx.fillStyle = "#4ade80";
+      ctx.font = "800 12px 'Inter', sans-serif";
+      ctx.fillText("● ON THE COURT • LIVE PLAYER TELEMETRY", infoX, cardY + 118);
+
+      // Right Side: Non-Zero Stats Boxes
+      const statsStartX = cardX + cardW - statsAreaW - 28;
+      const statsY = cardY + 26;
+      const statsH = cardH - 52;
+
+      if (nonZeroStats.length === 0) {
+        ctx.fillStyle = "rgba(255, 255, 255, 0.07)";
+        ctx.beginPath();
+        ctx.roundRect(statsStartX, statsY, 230, statsH, [14]);
+        ctx.fill();
+
+        ctx.fillStyle = "#94a3b8";
+        ctx.font = "800 14px 'Inter', sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText("ON THE COURT", statsStartX + 115, statsY + statsH / 2 - 10);
+        ctx.font = "700 11px 'Inter', sans-serif";
+        ctx.fillText("AWAITING FIRST STAT", statsStartX + 115, statsY + statsH / 2 + 12);
+      } else {
+        nonZeroStats.forEach((st, idx) => {
+          const bx = statsStartX + idx * (statBoxW + statGap);
+          ctx.fillStyle = st.highlight
+            ? "rgba(225, 29, 72, 0.25)"
+            : "rgba(255, 255, 255, 0.08)";
+          ctx.beginPath();
+          ctx.roundRect(bx, statsY, statBoxW, statsH, [14]);
+          ctx.fill();
+
+          ctx.lineWidth = 1.5;
+          ctx.strokeStyle = st.highlight
+            ? "rgba(251, 113, 133, 0.55)"
+            : "rgba(255, 255, 255, 0.14)";
+          ctx.stroke();
+
+          ctx.fillStyle = st.highlight ? "#fda4af" : "#94a3b8";
+          ctx.font = "900 13px 'Inter', sans-serif";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(st.label, bx + statBoxW / 2, statsY + 30);
+
+          ctx.fillStyle = "#ffffff";
+          ctx.font = "900 34px 'Inter', sans-serif";
+          ctx.fillText(st.value, bx + statBoxW / 2, statsY + 78);
+        });
+      }
+
+      ctx.restore();
+    },
+    [featuredOnCourtPlayer]
+  );
+
   // Render any StudioScene onto a target Canvas (used for both Left Preview & Right Live Program)
   const renderSceneToCanvas = useCallback(
     (
@@ -1108,7 +1594,9 @@ function LiveBroadcastStudioContent() {
       height: number,
       scene: StudioScene | undefined,
       replayVidEl: HTMLVideoElement | null,
+      mediaVidEl: HTMLVideoElement | null,
       drawOverlay: boolean,
+      isLiveProgramCanvas: boolean,
       nowMs: number
     ) => {
       ctx.fillStyle = "#090d16";
@@ -1134,7 +1622,7 @@ function LiveBroadcastStudioContent() {
           );
         }
 
-        // Broadcast Slow-Motion Replay Banner
+        // Broadcast Slow-Motion Instant Replay Banner (No Cam indicator behind it)
         ctx.fillStyle = "rgba(225, 29, 72, 0.92)";
         ctx.beginPath();
         ctx.roundRect(36, 24, 380, 44, [10]);
@@ -1151,6 +1639,52 @@ function LiveBroadcastStudioContent() {
           52,
           46
         );
+      } else if (scene.kind === "video_scene" && scene.mediaConfig) {
+        // Render Uploaded Video Scene
+        if (mediaVidEl && mediaVidEl.readyState >= 2) {
+          ctx.drawImage(mediaVidEl, 0, 0, width, height);
+        } else {
+          ctx.fillStyle = "#0f172a";
+          ctx.fillRect(0, 0, width, height);
+          ctx.fillStyle = "#38bdf8";
+          ctx.font = "900 26px 'Inter', sans-serif";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(
+            `VIDEO SCENE: ${scene.mediaConfig.fileName}`,
+            width / 2,
+            height / 2
+          );
+        }
+      } else if (scene.kind === "picture_scene" && scene.mediaConfig) {
+        // Render Uploaded Picture / Image Graphic Scene
+        const imgEl = mediaImageCacheRef.current[scene.id];
+        if (imgEl && imgEl.complete && imgEl.naturalWidth > 0) {
+          const fit = scene.mediaConfig.objectFit ?? "contain";
+          if (fit === "cover") {
+            const scale = Math.max(width / imgEl.naturalWidth, height / imgEl.naturalHeight);
+            const dw = imgEl.naturalWidth * scale;
+            const dh = imgEl.naturalHeight * scale;
+            ctx.drawImage(imgEl, (width - dw) / 2, (height - dh) / 2, dw, dh);
+          } else {
+            const scale = Math.min(width / imgEl.naturalWidth, height / imgEl.naturalHeight);
+            const dw = imgEl.naturalWidth * scale;
+            const dh = imgEl.naturalHeight * scale;
+            ctx.drawImage(imgEl, (width - dw) / 2, (height - dh) / 2, dw, dh);
+          }
+        } else {
+          ctx.fillStyle = "#0f172a";
+          ctx.fillRect(0, 0, width, height);
+          ctx.fillStyle = "#a855f7";
+          ctx.font = "900 26px 'Inter', sans-serif";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(
+            `PICTURE SCENE: ${scene.mediaConfig.fileName}`,
+            width / 2,
+            height / 2
+          );
+        }
       } else {
         // Render Camera / Multi-Camera Scene
         const cams = scene.cameras;
@@ -1230,8 +1764,18 @@ function LiveBroadcastStudioContent() {
       if (drawOverlay) {
         drawScorebugOverlay(ctx, width, height);
       }
+
+      // Render Selected On-Court Player Stats in the Middle of the Live Feed
+      if (isLiveProgramCanvas && featuredOnCourtPlayer) {
+        drawLivePlayerStatsOverlay(ctx, width, height);
+      }
     },
-    [drawCameraSlotRect, drawScorebugOverlay]
+    [
+      drawCameraSlotRect,
+      drawScorebugOverlay,
+      drawLivePlayerStatsOverlay,
+      featuredOnCourtPlayer,
+    ]
   );
 
   // Dual-Monitor Continuous Render Loop (Left = Preview Canvas, Right = Live Program Canvas)
@@ -1253,7 +1797,9 @@ function LiveBroadcastStudioContent() {
             pCanvas.height,
             previewScene,
             previewReplayVideoRef.current,
+            previewMediaVideoRef.current,
             showOverlayInPreview,
+            false,
             nowMs
           );
         }
@@ -1270,6 +1816,8 @@ function LiveBroadcastStudioContent() {
             lCanvas.height,
             liveScene,
             liveReplayVideoRef.current,
+            liveMediaVideoRef.current,
+            true,
             true,
             nowMs
           );
@@ -1327,6 +1875,38 @@ function LiveBroadcastStudioContent() {
     setScenes((prev) => [...prev, newScene]);
     setPreviewSceneId(newScene.id);
     setNewSceneNameInput("");
+  };
+
+  // Add a Video Scene or Picture Scene from a local media file
+  const handleAddMediaScene = (
+    e: React.ChangeEvent<HTMLInputElement>,
+    mediaType: "video" | "picture"
+  ) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const url = URL.createObjectURL(file);
+    const cleanName = file.name.replace(/\.[^/.]+$/, "");
+    const prefix = mediaType === "video" ? "🎬 Video" : "🖼️ Picture";
+    const label = newSceneNameInput.trim() || `${prefix}: ${cleanName}`;
+    const newScene: StudioScene = {
+      id: `scene-${mediaType}-${generateUUID().slice(0, 8)}`,
+      name: label,
+      kind: mediaType === "video" ? "video_scene" : "picture_scene",
+      layout: "single",
+      cameras: [],
+      mediaConfig: {
+        mediaType,
+        url,
+        fileName: file.name,
+        loop: true,
+        muted: true,
+        objectFit: "contain",
+      },
+    };
+    setScenes((prev) => [...prev, newScene]);
+    setPreviewSceneId(newScene.id);
+    setNewSceneNameInput("");
+    e.target.value = "";
   };
 
   const handleDeleteScene = (sceneId: string) => {
@@ -2471,9 +3051,11 @@ function LiveBroadcastStudioContent() {
 
   return (
     <div className="min-h-screen bg-[#0b0e14] text-slate-100 flex flex-col font-sans select-none">
-      {/* Hidden Replay Video Elements for Preview & Live Program */}
+      {/* Hidden Replay & Media Video Elements for Preview & Live Program */}
       <video ref={previewReplayVideoRef} playsInline muted className="hidden" />
       <video ref={liveReplayVideoRef} playsInline muted className="hidden" />
+      <video ref={previewMediaVideoRef} playsInline muted loop className="hidden" />
+      <video ref={liveMediaVideoRef} playsInline muted loop className="hidden" />
 
       {/* =====================================================================
           1. TOP OBS STUDIO BAR
@@ -2648,6 +3230,10 @@ function LiveBroadcastStudioContent() {
             <div className="absolute bottom-2 left-2 rounded bg-black/70 px-2 py-0.5 text-[0.62rem] font-bold text-emerald-300 border border-emerald-500/30 pointer-events-none">
               {previewScene?.kind === "replay_scene"
                 ? `🎬 Replay Scene (${previewScene.replayConfig?.playbackRate}x Slow-Mo)`
+                : previewScene?.kind === "video_scene"
+                ? `🎬 Video Scene: ${previewScene.mediaConfig?.fileName}`
+                : previewScene?.kind === "picture_scene"
+                ? `🖼️ Picture Scene: ${previewScene.mediaConfig?.fileName}`
                 : `🎥 ${previewScene?.cameras.length || 0} Camera(s) • Layout: ${previewScene?.layout.toUpperCase()}`}
             </div>
           </div>
@@ -2733,6 +3319,91 @@ function LiveBroadcastStudioContent() {
               {liveScene?.kind === "replay_scene"
                 ? `⚡ ON AIR: SLOW-MO REPLAY (${liveScene.replayConfig?.playbackRate}x)`
                 : `🔴 ON AIR: ${liveScene?.name}`}
+            </div>
+          </div>
+
+          {/* LIVE CONTROL: ON-COURT PLAYER STATS OVERLAY (SHOWS NON-ZERO STATS IN MIDDLE OF LIVE FEED) */}
+          <div className="px-3 py-2 bg-[#0e1420] border-t border-rose-500/30 space-y-1.5">
+            <div className="flex flex-wrap items-center justify-between gap-1.5">
+              <div className="flex items-center gap-1.5">
+                <span className="rounded bg-rose-600/20 border border-rose-500/40 px-1.5 py-0.5 text-[0.58rem] font-black uppercase text-rose-300">
+                  🏀 Live On-Court Player Stats Overlay
+                </span>
+                <span className="text-[0.6rem] font-bold text-slate-400">
+                  Click an on-court player to show non-zero stats in middle of Live Feed
+                </span>
+              </div>
+              {featuredOnCourtPlayer && (
+                <button
+                  type="button"
+                  onClick={() => setLiveFeaturedPlayerId("")}
+                  className="rounded-md bg-rose-600 hover:bg-rose-500 px-2 py-0.5 text-[0.6rem] font-black uppercase text-white cursor-pointer"
+                >
+                  ✕ Hide Stats Card
+                </button>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+              {/* Away On-Court Players */}
+              <div className="flex items-center gap-1 overflow-x-auto rounded-lg bg-slate-900/90 border border-slate-800 px-2 py-1">
+                <span
+                  className="text-[0.58rem] font-black uppercase shrink-0 mr-1"
+                  style={{ color: awayColor }}
+                >
+                  {awayScorebugName}:
+                </span>
+                {onCourtAwayPlayers.map((p) => {
+                  const isSelected = liveFeaturedPlayerId === p.playerId;
+                  return (
+                    <button
+                      key={p.playerId}
+                      type="button"
+                      onClick={() =>
+                        setLiveFeaturedPlayerId(isSelected ? "" : p.playerId)
+                      }
+                      className={`shrink-0 rounded-md px-2 py-0.5 text-[0.62rem] font-black transition-all cursor-pointer border ${
+                        isSelected
+                          ? "bg-rose-600 border-rose-400 text-white shadow"
+                          : "bg-slate-800/90 border-slate-700 text-slate-200 hover:border-sky-400"
+                      }`}
+                      title={`Show #${p.jerseyNumber} ${p.firstName} ${p.lastName} stats in middle of Live Feed`}
+                    >
+                      #{p.jerseyNumber} {p.lastName || p.firstName}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Home On-Court Players */}
+              <div className="flex items-center gap-1 overflow-x-auto rounded-lg bg-slate-900/90 border border-slate-800 px-2 py-1">
+                <span
+                  className="text-[0.58rem] font-black uppercase shrink-0 mr-1"
+                  style={{ color: homeColor }}
+                >
+                  {homeScorebugName}:
+                </span>
+                {onCourtHomePlayers.map((p) => {
+                  const isSelected = liveFeaturedPlayerId === p.playerId;
+                  return (
+                    <button
+                      key={p.playerId}
+                      type="button"
+                      onClick={() =>
+                        setLiveFeaturedPlayerId(isSelected ? "" : p.playerId)
+                      }
+                      className={`shrink-0 rounded-md px-2 py-0.5 text-[0.62rem] font-black transition-all cursor-pointer border ${
+                        isSelected
+                          ? "bg-rose-600 border-rose-400 text-white shadow"
+                          : "bg-slate-800/90 border-slate-700 text-slate-200 hover:border-sky-400"
+                      }`}
+                      title={`Show #${p.jerseyNumber} ${p.firstName} ${p.lastName} stats in middle of Live Feed`}
+                    >
+                      #{p.jerseyNumber} {p.lastName || p.firstName}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           </div>
         </div>
@@ -3743,6 +4414,14 @@ function LiveBroadcastStudioContent() {
                         <span className="text-amber-300 font-bold">
                           Slow-Mo {scene.replayConfig?.playbackRate}x ({formatClock(scene.replayConfig?.startSec || 0)}-{formatClock(scene.replayConfig?.endSec || 0)})
                         </span>
+                      ) : scene.kind === "video_scene" ? (
+                        <span className="text-sky-300 font-bold truncate">
+                          🎬 Video • {scene.mediaConfig?.fileName}
+                        </span>
+                      ) : scene.kind === "picture_scene" ? (
+                        <span className="text-purple-300 font-bold truncate">
+                          🖼️ Picture • {scene.mediaConfig?.fileName}
+                        </span>
                       ) : (
                         <span>
                           {scene.cameras.length} Camera(s) • {scene.layout.replace(/_/g, " ")}
@@ -3781,23 +4460,50 @@ function LiveBroadcastStudioContent() {
             })}
           </div>
 
-          {/* Add New Scene Footer */}
-          <div className="p-2.5 border-t border-slate-800 bg-slate-900/60 flex items-center gap-1.5">
-            <input
-              type="text"
-              value={newSceneNameInput}
-              onChange={(e) => setNewSceneNameInput(e.target.value)}
-              placeholder="New scene name..."
-              className="flex-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-emerald-500"
-            />
-            <button
-              type="button"
-              onClick={handleAddScene}
-              className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 px-2.5 py-1.5 text-xs font-black uppercase text-white cursor-pointer"
-            >
-              <Plus className="h-3.5 w-3.5" />
-              Add
-            </button>
+          {/* Add New Scene Footer (Camera Scene + Video Scene + Picture Scene) */}
+          <div className="p-2.5 border-t border-slate-800 bg-slate-900/60 space-y-2">
+            <div className="flex items-center gap-1.5">
+              <input
+                type="text"
+                value={newSceneNameInput}
+                onChange={(e) => setNewSceneNameInput(e.target.value)}
+                placeholder="New scene name..."
+                className="flex-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-emerald-500"
+              />
+              <button
+                type="button"
+                onClick={handleAddScene}
+                className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 px-2.5 py-1.5 text-xs font-black uppercase text-white cursor-pointer"
+                title="Add Camera Scene"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                Cam
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-1.5">
+              <label className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-sky-500/40 bg-sky-600/20 hover:bg-sky-600/30 px-2.5 py-1.5 text-[0.65rem] font-black uppercase text-sky-300 cursor-pointer transition-colors">
+                <Film className="h-3.5 w-3.5" />
+                <span>+ Add Video</span>
+                <input
+                  type="file"
+                  accept="video/*"
+                  onChange={(e) => handleAddMediaScene(e, "video")}
+                  className="hidden"
+                />
+              </label>
+
+              <label className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-purple-500/40 bg-purple-600/20 hover:bg-purple-600/30 px-2.5 py-1.5 text-[0.65rem] font-black uppercase text-purple-300 cursor-pointer transition-colors">
+                <Plus className="h-3.5 w-3.5" />
+                <span>+ Add Picture</span>
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={(e) => handleAddMediaScene(e, "picture")}
+                  className="hidden"
+                />
+              </label>
+            </div>
           </div>
         </div>
 
@@ -3806,7 +4512,7 @@ function LiveBroadcastStudioContent() {
           <div className="px-3 py-2 bg-slate-900 border-b border-slate-800 flex items-center justify-between">
             <span className="text-xs font-black uppercase tracking-wider text-white flex items-center gap-1.5">
               <Camera className="h-3.5 w-3.5 text-sky-400" />
-              2. Cameras in Scene ({previewScene?.cameras.length || 0})
+              2. Scene Sources ({previewScene?.cameras.length || (previewScene?.mediaConfig ? 1 : 0)})
             </span>
             {previewScene?.kind === "camera_scene" && (
               <button
@@ -3840,6 +4546,100 @@ function LiveBroadcastStudioContent() {
                   className="w-full rounded-lg bg-rose-600 hover:bg-rose-500 py-2 text-xs font-black uppercase text-white cursor-pointer mt-2"
                 >
                   Push Replay to Live Program →
+                </button>
+              </div>
+            ) : previewScene?.kind === "video_scene" ||
+              previewScene?.kind === "picture_scene" ? (
+              <div className="p-3.5 rounded-xl bg-slate-900/90 border border-slate-700/80 space-y-3 text-xs">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-black uppercase text-sky-300">
+                    {previewScene.kind === "video_scene"
+                      ? "🎬 Video Media Scene"
+                      : "🖼️ Picture / Graphic Scene"}
+                  </span>
+                  <span className="rounded bg-slate-800 px-2 py-0.5 text-[0.6rem] font-bold text-slate-300 truncate max-w-[140px]">
+                    {previewScene.mediaConfig?.fileName}
+                  </span>
+                </div>
+
+                {previewScene.kind === "picture_scene" && (
+                  <div className="space-y-1">
+                    <label className="text-[0.62rem] font-black uppercase text-slate-400">
+                      Image Fit Mode:
+                    </label>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      {(["contain", "cover"] as const).map((fitMode) => (
+                        <button
+                          key={fitMode}
+                          type="button"
+                          onClick={() =>
+                            setScenes((prev) =>
+                              prev.map((s) =>
+                                s.id === previewScene.id && s.mediaConfig
+                                  ? {
+                                      ...s,
+                                      mediaConfig: {
+                                        ...s.mediaConfig,
+                                        objectFit: fitMode,
+                                      },
+                                    }
+                                  : s
+                              )
+                            )
+                          }
+                          className={`rounded-lg py-1 text-[0.65rem] font-black uppercase border cursor-pointer ${
+                            (previewScene.mediaConfig?.objectFit ?? "contain") ===
+                            fitMode
+                              ? "bg-purple-600 border-purple-400 text-white"
+                              : "bg-slate-800 border-slate-700 text-slate-400"
+                          }`}
+                        >
+                          {fitMode === "contain" ? "Fit Full Image" : "Fill 16:9 Screen"}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <label className="w-full inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 py-1.5 text-[0.65rem] font-black uppercase text-slate-200 cursor-pointer">
+                  <span>
+                    Replace {previewScene.kind === "video_scene" ? "Video" : "Picture"} File
+                  </span>
+                  <input
+                    type="file"
+                    accept={
+                      previewScene.kind === "video_scene" ? "video/*" : "image/*"
+                    }
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (!file) return;
+                      const url = URL.createObjectURL(file);
+                      setScenes((prev) =>
+                        prev.map((s) =>
+                          s.id === previewScene.id && s.mediaConfig
+                            ? {
+                                ...s,
+                                mediaConfig: {
+                                  ...s.mediaConfig,
+                                  url,
+                                  fileName: file.name,
+                                },
+                              }
+                            : s
+                        )
+                      );
+                      e.target.value = "";
+                    }}
+                    className="hidden"
+                  />
+                </label>
+
+                <button
+                  type="button"
+                  onClick={handleCutToLive}
+                  className="w-full rounded-lg bg-rose-600 hover:bg-rose-500 py-2 text-xs font-black uppercase text-white cursor-pointer"
+                >
+                  Put Scene on Live Program →
                 </button>
               </div>
             ) : (
@@ -4037,42 +4837,127 @@ function LiveBroadcastStudioContent() {
               </div>
             </div>
 
-            {/* Active Team Logos Preview Strip */}
-            <div className="rounded-lg border border-slate-800 bg-slate-900/90 px-2.5 py-1.5 flex items-center justify-between gap-2">
-              <div className="flex items-center gap-1.5 min-w-0">
-                {homeTeam?.imageUrl ? (
-                  <img
-                    src={homeTeam.imageUrl}
-                    alt={homeTeam.name}
-                    className="h-5 w-5 rounded-full object-cover border border-rose-500/50 shrink-0"
-                  />
-                ) : (
-                  <span className="h-5 w-5 rounded-full bg-rose-600 text-white text-[0.55rem] font-black flex items-center justify-center shrink-0">
-                    {homeTeamName.slice(0, 2).toUpperCase()}
+            {/* Active Team Logos & Scorebug Initials/First-Word Preview Strip */}
+            <div className="rounded-lg border border-slate-800 bg-slate-900/90 px-2.5 py-2 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 min-w-0">
+                  {homeTeam?.imageUrl ? (
+                    <img
+                      src={homeTeam.imageUrl}
+                      alt={homeTeam.name}
+                      className="h-5 w-5 rounded-full object-cover border border-rose-500/50 shrink-0"
+                    />
+                  ) : (
+                    <span className="h-5 w-5 rounded-full bg-rose-600 text-white text-[0.55rem] font-black flex items-center justify-center shrink-0">
+                      {homeScorebugName.slice(0, 2).toUpperCase()}
+                    </span>
+                  )}
+                  <span className="text-[0.65rem] font-black text-slate-100 truncate">
+                    {homeScorebugName}
                   </span>
-                )}
-                <span className="text-[0.62rem] font-black text-slate-200 truncate">
-                  {homeTeamName}
+                </div>
+                <span className="text-[0.56rem] font-black text-emerald-400 uppercase shrink-0">
+                  Initials / 1st Name
                 </span>
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span className="text-[0.65rem] font-black text-slate-100 truncate">
+                    {awayScorebugName}
+                  </span>
+                  {awayTeam?.imageUrl ? (
+                    <img
+                      src={awayTeam.imageUrl}
+                      alt={awayTeam.name}
+                      className="h-5 w-5 rounded-full object-cover border border-blue-500/50 shrink-0"
+                    />
+                  ) : (
+                    <span className="h-5 w-5 rounded-full bg-blue-600 text-white text-[0.55rem] font-black flex items-center justify-center shrink-0">
+                      {awayScorebugName.slice(0, 2).toUpperCase()}
+                    </span>
+                  )}
+                </div>
               </div>
-              <span className="text-[0.58rem] font-black text-emerald-400 uppercase shrink-0">
-                Logos Active
-              </span>
-              <div className="flex items-center gap-1.5 min-w-0">
-                <span className="text-[0.62rem] font-black text-slate-200 truncate">
-                  {awayTeamName}
-                </span>
-                {awayTeam?.imageUrl ? (
-                  <img
-                    src={awayTeam.imageUrl}
-                    alt={awayTeam.name}
-                    className="h-5 w-5 rounded-full object-cover border border-blue-500/50 shrink-0"
-                  />
-                ) : (
-                  <span className="h-5 w-5 rounded-full bg-blue-600 text-white text-[0.55rem] font-black flex items-center justify-center shrink-0">
-                    {awayTeamName.slice(0, 2).toUpperCase()}
-                  </span>
-                )}
+
+              {/* Timeout & Penalty Controls for Scorebug */}
+              <div className="grid grid-cols-2 gap-1.5 pt-1.5 border-t border-slate-800/80 text-[0.6rem]">
+                {/* Away Team Timeout & Penalty */}
+                <div className="rounded bg-slate-950/80 border border-slate-800 p-1.5 space-y-1">
+                  <div className="flex items-center justify-between">
+                    <span className="font-black text-slate-300 truncate">
+                      {awayScorebugName} TO: {awayTimeoutsRemaining}
+                    </span>
+                    <div className="flex items-center gap-0.5">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setManualAwayTimeouts(Math.max(0, awayTimeoutsRemaining - 1))
+                        }
+                        className="rounded bg-slate-800 hover:bg-slate-700 px-1.5 py-0.5 font-black text-slate-200 cursor-pointer"
+                      >
+                        -
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setManualAwayTimeouts(Math.min(5, awayTimeoutsRemaining + 1))
+                        }
+                        className="rounded bg-slate-800 hover:bg-slate-700 px-1.5 py-0.5 font-black text-slate-200 cursor-pointer"
+                      >
+                        +
+                      </button>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setManualAwayPenaltyOverride(!isAwayInPenalty)}
+                    className={`w-full rounded py-0.5 font-black uppercase border cursor-pointer ${
+                      isAwayInPenalty
+                        ? "bg-rose-600 border-rose-400 text-white"
+                        : "bg-slate-900 border-slate-700 text-slate-400"
+                    }`}
+                  >
+                    {isAwayInPenalty ? "● PENALTY ON" : "Penalty Off"}
+                  </button>
+                </div>
+
+                {/* Home Team Timeout & Penalty */}
+                <div className="rounded bg-slate-950/80 border border-slate-800 p-1.5 space-y-1">
+                  <div className="flex items-center justify-between">
+                    <span className="font-black text-slate-300 truncate">
+                      {homeScorebugName} TO: {homeTimeoutsRemaining}
+                    </span>
+                    <div className="flex items-center gap-0.5">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setManualHomeTimeouts(Math.max(0, homeTimeoutsRemaining - 1))
+                        }
+                        className="rounded bg-slate-800 hover:bg-slate-700 px-1.5 py-0.5 font-black text-slate-200 cursor-pointer"
+                      >
+                        -
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setManualHomeTimeouts(Math.min(5, homeTimeoutsRemaining + 1))
+                        }
+                        className="rounded bg-slate-800 hover:bg-slate-700 px-1.5 py-0.5 font-black text-slate-200 cursor-pointer"
+                      >
+                        +
+                      </button>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setManualHomePenaltyOverride(!isHomeInPenalty)}
+                    className={`w-full rounded py-0.5 font-black uppercase border cursor-pointer ${
+                      isHomeInPenalty
+                        ? "bg-rose-600 border-rose-400 text-white"
+                        : "bg-slate-900 border-slate-700 text-slate-400"
+                    }`}
+                  >
+                    {isHomeInPenalty ? "● PENALTY ON" : "Penalty Off"}
+                  </button>
+                </div>
               </div>
             </div>
 
