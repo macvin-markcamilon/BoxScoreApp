@@ -960,21 +960,34 @@ export function GameDetailsWorkspace({
     });
 
     // 6. PLAYER IMAGE (DRAWN BEFORE BADGE)
-    // Matches Blueprint: Anchored so that player's torso/face center is consistently aligned at ~315px from left edge
-    // Regardless of whether it is an NBA landscape cutout (1040x760, aspect 1.37) or a 1:1 user profile upload (aspect 1.0)
+    // Standardizes all player headshots to 500x500 square aspect ratio (1:1)
+    // Both 1:1 user profile uploads and any wide landscape cutouts are framed as 1:1 squares
+    // anchored at optical center X = 315px, with uniform scale and alignment.
     const playerImgUrl = selectedInfographicPlayer.imageUrl;
     const playerImg = await loadImageAsync(playerImgUrl);
 
     if (playerImg) {
-      // Scale player image while maintaining aspect ratio, anchored to bottom
-      const targetHeight = 880;
-      const aspect = playerImg.width / playerImg.height;
-      const targetWidth = targetHeight * aspect;
-      // Fixed center alignment point at X = 315px ensures both landscape (aspect > 1.2) and square (aspect ~ 1.0)
-      // player portraits occupy the exact same optical horizontal position.
-      const drawX = Math.round(315 - targetWidth / 2);
-      const drawY = 1080 - targetHeight;
-      ctx.drawImage(playerImg, drawX, drawY, targetWidth, targetHeight);
+      // 1:1 square crop source parameters
+      const squareSide = Math.min(playerImg.width, playerImg.height);
+      const srcX = Math.round((playerImg.width - squareSide) / 2);
+      const srcY = Math.round((playerImg.height - squareSide) / 2);
+
+      // Render size: 880x880 square
+      const destSize = 880;
+      const drawX = Math.round(315 - destSize / 2); // Center of square is at X = 315px
+      const drawY = 1080 - destSize; // Anchored to bottom edge
+
+      ctx.drawImage(
+        playerImg,
+        srcX,
+        srcY,
+        squareSide,
+        squareSide,
+        drawX,
+        drawY,
+        destSize,
+        destSize
+      );
     } else {
       // Silhouette placeholder if no photo exists
       const placeholderW = 500;
