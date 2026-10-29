@@ -26,9 +26,11 @@ import {
   Radio,
   RefreshCw,
   Repeat,
+  RotateCcw,
   Scissors,
   Search,
   Settings,
+  SkipForward,
   Sliders,
   Sparkles,
   Square,
@@ -258,11 +260,17 @@ function LiveBroadcastStudioContent() {
   const videoElBySlotRef = useRef<Record<string, HTMLVideoElement>>({});
 
   // Scorebug Overlay Customization
-  const [scorebugPosition, setScorebugPosition] = useState<"bottom_bar" | "top_corner">("bottom_bar");
+  const [scorebugPosition, setScorebugPosition] = useState<
+    "bottom_bar" | "bottom_left" | "top_corner"
+  >("bottom_bar");
   const [scorebugTheme, setScorebugTheme] = useState<"broadcast_dark" | "clean_light">("broadcast_dark");
   const [showShotClock, setShowShotClock] = useState<boolean>(true);
   const [showSponsorTag, setShowSponsorTag] = useState<boolean>(true);
   const [sponsorText, setSponsorText] = useState<string>("BOX SCORE LIVE");
+
+  // Team Logo Image Refs for Canvas Scorebug Rendering
+  const homeLogoImgRef = useRef<HTMLImageElement | null>(null);
+  const awayLogoImgRef = useRef<HTMLImageElement | null>(null);
 
   // Recording & Live Timeline State
   const [isRecording, setIsRecording] = useState<boolean>(false);
@@ -288,6 +296,9 @@ function LiveBroadcastStudioContent() {
   const [replayClipLabel, setReplayClipLabel] = useState<string>("");
   const [timelineNotice, setTimelineNotice] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [isPlayingInspectorReplay, setIsPlayingInspectorReplay] = useState<boolean>(false);
+  const playEventRecSecMapRef = useRef<Record<string, number>>({});
+  const lastSeenPlayEventIdsRef = useRef<Set<string>>(new Set());
 
   // Facebook Page / YouTube Live Direct RTMPS Streaming State
   const [streamPlatform, setStreamPlatform] = useState<StreamPlatform>("facebook");
@@ -487,6 +498,54 @@ function LiveBroadcastStudioContent() {
       awayScore,
     };
   }, [period, clockSeconds, homeScore, awayScore]);
+
+  // Load Home & Away Team Logos into CORS-safe HTMLImageElements for Scorebug Canvas Rendering
+  useEffect(() => {
+    const loadLogoImage = (
+      rawUrl: string | undefined,
+      targetRef: React.MutableRefObject<HTMLImageElement | null>
+    ) => {
+      if (!rawUrl || !rawUrl.trim()) {
+        targetRef.current = null;
+        return;
+      }
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      const trimmed = rawUrl.trim();
+      if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+        img.src = `/api/image-proxy?url=${encodeURIComponent(trimmed)}`;
+      } else {
+        img.src = trimmed;
+      }
+      targetRef.current = img;
+    };
+
+    loadLogoImage(homeTeam?.imageUrl, homeLogoImgRef);
+    loadLogoImage(awayTeam?.imageUrl, awayLogoImgRef);
+  }, [homeTeam?.imageUrl, awayTeam?.imageUrl]);
+
+  // Auto-map incoming Live Play-by-Play events to exact recording second on the Camera Timeline
+  useEffect(() => {
+    const events = liveSession?.playEvents || [];
+    for (const ev of events) {
+      if (!lastSeenPlayEventIdsRef.current.has(ev.id)) {
+        lastSeenPlayEventIdsRef.current.add(ev.id);
+        if (isRecording) {
+          playEventRecSecMapRef.current[ev.id] = recordSeconds;
+          const autoTag: TimelineClockTag = {
+            id: `pbp-${ev.id}`,
+            recTimeSec: recordSeconds,
+            gameClockLabel: `${ev.periodLabel} ${ev.gameClockDisplay}`,
+            scoreLabel: `${ev.awayScoreAfter}-${ev.homeScoreAfter}`,
+            label: `${ev.teamName.slice(0, 3).toUpperCase()}: ${ev.description}`,
+          };
+          const nextTags = [...liveClockTagsRef.current, autoTag];
+          liveClockTagsRef.current = nextTags;
+          setLiveClockTags(nextTags);
+        }
+      }
+    }
+  }, [liveSession?.playEvents, isRecording, recordSeconds]);
 
   // Ensure hidden <video> element exists for each camera slot
   const getOrCreateSlotVideoElement = (slotId: string): HTMLVideoElement => {
@@ -765,7 +824,7 @@ function LiveBroadcastStudioContent() {
     [activeSlotIds, awayTeamName, awayScore, homeScore, homeTeamName, clockSeconds]
   );
 
-  // Helper: Draw Scorebug Overlay
+  // Helper: Draw Scorebug Overlay (with Team Logos & Bottom-Left / Bottom-Center / Top-Left Support)
   const drawScorebugOverlay = useCallback(
     (ctx: CanvasRenderingContext2D, width: number, height: number) => {
       const isDark = scorebugTheme !== "clean_light";
@@ -774,10 +833,49 @@ function LiveBroadcastStudioContent() {
       const subTextColor = isDark ? "#94a3b8" : "#64748b";
       const borderColor = isDark ? "rgba(255, 255, 255, 0.18)" : "rgba(0, 0, 0, 0.14)";
 
+      // Helper to render Team Logo or Monogram Crest Badge
+      const drawTeamLogoCrest = (
+        imgEl: HTMLImageElement | null,
+        teamColor: string,
+        teamNameStr: string,
+        x: number,
+        y: number,
+        size: number
+      ) => {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(x + size / 2, y + size / 2, size / 2, 0, Math.PI * 2);
+        ctx.fillStyle = teamColor;
+        ctx.fill();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.35)";
+        ctx.stroke();
+
+        if (imgEl && imgEl.complete && imgEl.naturalWidth > 0) {
+          ctx.clip();
+          try {
+            ctx.drawImage(imgEl, x, y, size, size);
+          } catch {
+            // Fallback to monogram if image draw fails
+          }
+        } else {
+          ctx.fillStyle = "#ffffff";
+          ctx.font = `900 ${Math.round(size * 0.4)}px 'Inter', sans-serif`;
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(
+            teamNameStr.slice(0, 2).toUpperCase(),
+            x + size / 2,
+            y + size / 2 + 1
+          );
+        }
+        ctx.restore();
+      };
+
       ctx.save();
 
       if (scorebugPosition === "bottom_bar") {
-        const bugW = 860;
+        const bugW = 920;
         const bugH = 76;
         const bugX = (width - bugW) / 2;
         const bugY = height - bugH - 28;
@@ -797,73 +895,93 @@ function LiveBroadcastStudioContent() {
 
         ctx.shadowColor = "transparent";
 
-        // Away Team
+        // Away Team Color Accent + Logo + Name + Score
         ctx.fillStyle = awayColor;
         ctx.beginPath();
-        ctx.roundRect(bugX + 12, bugY + 10, 8, bugH - 20, [4]);
+        ctx.roundRect(bugX + 10, bugY + 12, 6, bugH - 24, [3]);
         ctx.fill();
 
+        drawTeamLogoCrest(
+          awayLogoImgRef.current,
+          awayColor,
+          awayTeamName,
+          bugX + 24,
+          bugY + 14,
+          48
+        );
+
         ctx.fillStyle = textColor;
-        ctx.font = "900 22px 'Inter', sans-serif";
+        ctx.font = "900 21px 'Inter', sans-serif";
         ctx.textAlign = "left";
         ctx.textBaseline = "middle";
-        ctx.fillText(awayTeamName.slice(0, 12).toUpperCase(), bugX + 30, bugY + bugH / 2);
+        ctx.fillText(awayTeamName.slice(0, 11).toUpperCase(), bugX + 82, bugY + bugH / 2);
 
         ctx.font = "900 34px 'Inter', sans-serif";
         ctx.textAlign = "right";
-        ctx.fillText(String(awayScore), bugX + 270, bugY + bugH / 2);
+        ctx.fillText(String(awayScore), bugX + 312, bugY + bugH / 2);
 
-        // Divider
+        // Center Divider
         ctx.strokeStyle = borderColor;
         ctx.beginPath();
-        ctx.moveTo(bugX + 290, bugY + 12);
-        ctx.lineTo(bugX + 290, bugY + bugH - 12);
+        ctx.moveTo(bugX + 332, bugY + 12);
+        ctx.lineTo(bugX + 332, bugY + bugH - 12);
         ctx.stroke();
 
-        // Home Team
+        // Home Team Score + Name + Logo + Color Accent
+        ctx.fillStyle = textColor;
         ctx.font = "900 34px 'Inter', sans-serif";
         ctx.textAlign = "left";
-        ctx.fillText(String(homeScore), bugX + 310, bugY + bugH / 2);
+        ctx.fillText(String(homeScore), bugX + 352, bugY + bugH / 2);
 
         ctx.fillStyle = textColor;
-        ctx.font = "900 22px 'Inter', sans-serif";
-        ctx.fillText(homeTeamName.slice(0, 12).toUpperCase(), bugX + 380, bugY + bugH / 2);
+        ctx.font = "900 21px 'Inter', sans-serif";
+        ctx.fillText(homeTeamName.slice(0, 11).toUpperCase(), bugX + 420, bugY + bugH / 2);
+
+        drawTeamLogoCrest(
+          homeLogoImgRef.current,
+          homeColor,
+          homeTeamName,
+          bugX + 610,
+          bugY + 14,
+          48
+        );
 
         ctx.fillStyle = homeColor;
         ctx.beginPath();
-        ctx.roundRect(bugX + 620, bugY + 10, 8, bugH - 20, [4]);
+        ctx.roundRect(bugX + 666, bugY + 12, 6, bugH - 24, [3]);
         ctx.fill();
 
         // Clock & Period Box
         ctx.fillStyle = isDark ? "rgba(255, 255, 255, 0.08)" : "rgba(0, 0, 0, 0.06)";
         ctx.beginPath();
-        ctx.roundRect(bugX + 640, bugY + 8, bugW - 648, bugH - 16, [12]);
+        ctx.roundRect(bugX + 686, bugY + 8, bugW - 694, bugH - 16, [12]);
         ctx.fill();
 
         ctx.fillStyle = isClockRunning ? "#38bdf8" : "#f59e0b";
         ctx.font = "900 24px 'Inter', sans-serif";
         ctx.textAlign = "center";
-        ctx.fillText(formatClock(clockSeconds), bugX + 705, bugY + 28);
+        ctx.fillText(formatClock(clockSeconds), bugX + 755, bugY + 28);
 
         ctx.fillStyle = subTextColor;
         ctx.font = "800 12px 'Inter', sans-serif";
-        ctx.fillText(getPeriodLabel(period).toUpperCase(), bugX + 705, bugY + 52);
+        ctx.fillText(getPeriodLabel(period).toUpperCase(), bugX + 755, bugY + 52);
 
         if (showShotClock) {
           ctx.fillStyle = shotClock <= 5 ? "#ef4444" : "#eab308";
           ctx.font = "900 28px 'Inter', sans-serif";
           ctx.textAlign = "center";
-          ctx.fillText(String(shotClock), bugX + 795, bugY + bugH / 2);
+          ctx.fillText(String(shotClock), bugX + 855, bugY + bugH / 2);
         }
       } else {
-        // Top-Left Corner Scorebug
-        const bugW = 420;
-        const bugH = 100;
+        // Compact Corner Bug: Supports BOTH "bottom_left" (Bottom-Left Bug) and "top_corner" (Top-Left Bug)
+        const bugW = 460;
+        const bugH = 104;
         const bugX = 36;
-        const bugY = 58;
+        const bugY =
+          scorebugPosition === "bottom_left" ? height - bugH - 28 : 58;
 
-        ctx.shadowColor = "rgba(0, 0, 0, 0.45)";
-        ctx.shadowBlur = 14;
+        ctx.shadowColor = "rgba(0, 0, 0, 0.5)";
+        ctx.shadowBlur = 16;
         ctx.shadowOffsetY = 4;
 
         ctx.fillStyle = bgPrimary;
@@ -877,53 +995,74 @@ function LiveBroadcastStudioContent() {
 
         ctx.shadowColor = "transparent";
 
+        // Away Team Row (Top)
         ctx.fillStyle = awayColor;
         ctx.beginPath();
-        ctx.roundRect(bugX + 12, bugY + 12, 6, 32, [3]);
+        ctx.roundRect(bugX + 10, bugY + 12, 6, 34, [3]);
         ctx.fill();
+
+        drawTeamLogoCrest(
+          awayLogoImgRef.current,
+          awayColor,
+          awayTeamName,
+          bugX + 22,
+          bugY + 11,
+          36
+        );
 
         ctx.fillStyle = textColor;
         ctx.font = "900 17px 'Inter', sans-serif";
         ctx.textAlign = "left";
         ctx.textBaseline = "middle";
-        ctx.fillText(awayTeamName.slice(0, 14).toUpperCase(), bugX + 28, bugY + 28);
+        ctx.fillText(awayTeamName.slice(0, 12).toUpperCase(), bugX + 66, bugY + 29);
 
-        ctx.font = "900 22px 'Inter', sans-serif";
+        ctx.font = "900 23px 'Inter', sans-serif";
         ctx.textAlign = "right";
-        ctx.fillText(String(awayScore), bugX + 250, bugY + 28);
+        ctx.fillText(String(awayScore), bugX + 292, bugY + 29);
 
+        // Home Team Row (Bottom)
         ctx.fillStyle = homeColor;
         ctx.beginPath();
-        ctx.roundRect(bugX + 12, bugY + 56, 6, 32, [3]);
+        ctx.roundRect(bugX + 10, bugY + 58, 6, 34, [3]);
         ctx.fill();
+
+        drawTeamLogoCrest(
+          homeLogoImgRef.current,
+          homeColor,
+          homeTeamName,
+          bugX + 22,
+          bugY + 57,
+          36
+        );
 
         ctx.fillStyle = textColor;
         ctx.font = "900 17px 'Inter', sans-serif";
         ctx.textAlign = "left";
-        ctx.fillText(homeTeamName.slice(0, 14).toUpperCase(), bugX + 28, bugY + 72);
+        ctx.fillText(homeTeamName.slice(0, 12).toUpperCase(), bugX + 66, bugY + 75);
 
-        ctx.font = "900 22px 'Inter', sans-serif";
+        ctx.font = "900 23px 'Inter', sans-serif";
         ctx.textAlign = "right";
-        ctx.fillText(String(homeScore), bugX + 250, bugY + 72);
+        ctx.fillText(String(homeScore), bugX + 292, bugY + 75);
 
+        // Right Column: Clock, Quarter & Shot Clock
         ctx.fillStyle = isDark ? "rgba(255, 255, 255, 0.08)" : "rgba(0, 0, 0, 0.06)";
         ctx.beginPath();
-        ctx.roundRect(bugX + 270, bugY + 12, bugW - 282, bugH - 24, [10]);
+        ctx.roundRect(bugX + 308, bugY + 10, bugW - 318, bugH - 20, [10]);
         ctx.fill();
 
         ctx.fillStyle = isClockRunning ? "#38bdf8" : "#f59e0b";
-        ctx.font = "900 20px 'Inter', sans-serif";
+        ctx.font = "900 21px 'Inter', sans-serif";
         ctx.textAlign = "center";
-        ctx.fillText(formatClock(clockSeconds), bugX + 345, bugY + 36);
+        ctx.fillText(formatClock(clockSeconds), bugX + 380, bugY + 34);
 
         ctx.fillStyle = subTextColor;
         ctx.font = "800 11px 'Inter', sans-serif";
-        ctx.fillText(getPeriodLabel(period).toUpperCase(), bugX + 345, bugY + 56);
+        ctx.fillText(getPeriodLabel(period).toUpperCase(), bugX + 380, bugY + 56);
 
         if (showShotClock) {
           ctx.fillStyle = shotClock <= 5 ? "#ef4444" : "#eab308";
           ctx.font = "900 18px 'Inter', sans-serif";
-          ctx.fillText(`SC: ${shotClock}s`, bugX + 345, bugY + 74);
+          ctx.fillText(`SC: ${shotClock}s`, bugX + 380, bugY + 76);
         }
       }
 
@@ -1435,11 +1574,7 @@ function LiveBroadcastStudioContent() {
             liveCaptureFramesRef.current = [...liveCaptureFramesRef.current, snap];
             setLiveRecordingFrames([...liveCaptureFramesRef.current]);
           }
-          // Auto-scroll timeline track during live recording
-          if (timelineScrollContainerRef.current) {
-            timelineScrollContainerRef.current.scrollLeft =
-              timelineScrollContainerRef.current.scrollWidth;
-          }
+          // Keep timeline & Replay Box steady on screen; operator can click "Jump to Latest Time" anytime
           return next;
         });
       }, 1000);
@@ -1796,15 +1931,47 @@ function LiveBroadcastStudioContent() {
     [displayTimelineFrames, clockSeconds, period]
   );
 
-  // Create a Replay Scene from the selected Timeline In/Out range!
-  const handleCreateReplaySceneFromTimeline = (pushImmediatelyToLive = false) => {
-    if (!selectedTimelineVideo) {
+  // Create a Replay Scene from the selected Timeline In/Out range (works both on saved clips AND during live recording!)
+  const handleCreateReplaySceneFromTimeline = async (pushImmediatelyToLive = false) => {
+    let targetVideo = selectedTimelineVideo;
+
+    // If currently recording and no saved video is selected (or user wants replay from live recording), snapshot recordedChunksRef
+    if (isRecording && recordedChunksRef.current.length > 0) {
+      const snapBlob = new Blob(recordedChunksRef.current, { type: "video/webm" });
+      const elapsedSec = Math.max(2, recordSeconds);
+      const snapId = generateUUID();
+      const snapVideo: StoredGameVideo = {
+        id: snapId,
+        matchId: activeMatch?.id ?? "generic-game",
+        gameNumber: activeMatch?.gameNumber ?? 1,
+        title: `Live Buffer Clip (${homeTeamName} vs ${awayTeamName}) - ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`,
+        blob: snapBlob,
+        mimeType: "video/webm",
+        sizeBytes: snapBlob.size,
+        durationSeconds: elapsedSec,
+        createdAt: new Date().toISOString(),
+        thumbnailDataUrl: liveCaptureFramesRef.current[0]?.dataUrl || "",
+        timelineFrames: [...liveCaptureFramesRef.current],
+        clockTags: [...liveClockTagsRef.current],
+        homeScore,
+        awayScore,
+        homeTeamName,
+        awayTeamName,
+      };
+      await saveVideoToIndexedDB(snapVideo);
+      const list = await getAllStoredVideos();
+      setStoredVideos(list);
+      targetVideo = snapVideo;
+    }
+
+    if (!targetVideo) {
       alert("Record a game clip first so you can select a replay segment on the timeline.");
       return;
     }
 
+    const maxClipDur = Math.max(2, targetVideo.durationSeconds || activeTimelineDuration);
     const start = Math.max(0, Math.min(trimStartSec, trimEndSec - 0.5));
-    const end = Math.max(start + 1, Math.min(trimEndSec, selectedTimelineVideo.durationSeconds || 60));
+    const end = Math.max(start + 1, Math.min(trimEndSec, maxClipDur));
     const startGameClock = getGameClockLabelAtSec(start);
     const endGameClock = getGameClockLabelAtSec(end);
 
@@ -1819,8 +1986,8 @@ function LiveBroadcastStudioContent() {
       layout: "single",
       cameras: [],
       replayConfig: {
-        videoId: selectedTimelineVideo.id,
-        videoTitle: selectedTimelineVideo.title,
+        videoId: targetVideo.id,
+        videoTitle: targetVideo.title,
         startSec: start,
         endSec: end,
         playbackRate: selectedReplaySpeed,
@@ -1848,7 +2015,7 @@ function LiveBroadcastStudioContent() {
         : selectedTimelineVideo?.durationSeconds || 20;
       const clamped = Math.max(0, Math.min(maxDur, Number(sec.toFixed(1))));
       setTimelinePlayheadSec(clamped);
-      if (timelineScrubVideoRef.current && !isRecording) {
+      if (timelineScrubVideoRef.current) {
         try {
           timelineScrubVideoRef.current.currentTime = clamped;
         } catch {}
@@ -1872,7 +2039,34 @@ function LiveBroadcastStudioContent() {
     [timelineZoomPxPerSec]
   );
 
-  // Snap the 10-second (or preset) Replay Selection Box around or ending at target second
+  // Jump Replay Box, Playhead & Timeline Scrollbar to the Latest Recorded Time
+  const handleJumpToLatestTime = useCallback(() => {
+    const latestSec = isRecording
+      ? Math.max(1, recordSeconds)
+      : selectedTimelineVideo?.durationSeconds || activeTimelineDuration;
+    const boxDur = replayBoxDurationPreset || 10;
+    const start = Math.max(0, Number((latestSec - boxDur).toFixed(1)));
+    const end = Number(latestSec.toFixed(1));
+    setTrimStartSec(start);
+    setTrimEndSec(end);
+    handleScrubTimeline(end);
+    scrollTimelineToSec(end);
+    setTimelineNotice(
+      `⏭ Jumped Replay Box & Playhead to Latest Time (${formatClock(end)} • ${getGameClockLabelAtSec(end)})`
+    );
+    setTimeout(() => setTimelineNotice(null), 3500);
+  }, [
+    isRecording,
+    recordSeconds,
+    selectedTimelineVideo,
+    activeTimelineDuration,
+    replayBoxDurationPreset,
+    handleScrubTimeline,
+    scrollTimelineToSec,
+    getGameClockLabelAtSec,
+  ]);
+
+  // Snap the Replay Selection Box around or ending at target second
   const handleSnapBoxToSecond = useCallback(
     (targetSec: number, boxDuration = replayBoxDurationPreset) => {
       const maxDur = activeTimelineDuration;
@@ -1891,6 +2085,155 @@ function LiveBroadcastStudioContent() {
     },
     [activeTimelineDuration, replayBoxDurationPreset, handleScrubTimeline, scrollTimelineToSec]
   );
+
+  // =====================================================================
+  // REPLAY INSPECTOR ENGINE (RUN SLOW-MO REPLAY BEFORE PUTTING IT LIVE!)
+  // =====================================================================
+  const ensureInspectorVideoSource = useCallback(() => {
+    const vidEl = timelineScrubVideoRef.current;
+    if (!vidEl) return false;
+
+    // If currently recording and chunks exist, load live buffer blob into Inspector
+    if (isRecording && recordedChunksRef.current.length > 0) {
+      const liveBlob = new Blob(recordedChunksRef.current, { type: "video/webm" });
+      const url = URL.createObjectURL(liveBlob);
+      vidEl.src = url;
+      vidEl.setAttribute("data-scrub-id", `live-${recordSeconds}`);
+      return true;
+    }
+
+    if (selectedTimelineVideo) {
+      const currentId = vidEl.getAttribute("data-scrub-id");
+      if (currentId !== selectedTimelineVideo.id) {
+        const url = URL.createObjectURL(selectedTimelineVideo.blob);
+        vidEl.src = url;
+        vidEl.setAttribute("data-scrub-id", selectedTimelineVideo.id);
+      }
+      return true;
+    }
+    return false;
+  }, [isRecording, recordSeconds, selectedTimelineVideo]);
+
+  const handleToggleInspectorReplay = () => {
+    const vidEl = timelineScrubVideoRef.current;
+    if (!vidEl) return;
+
+    if (isPlayingInspectorReplay) {
+      vidEl.pause();
+      setIsPlayingInspectorReplay(false);
+      return;
+    }
+
+    const hasSource = ensureInspectorVideoSource();
+    if (!hasSource) {
+      alert("Start recording or select a saved recording first to run a replay in the Replay Inspector.");
+      return;
+    }
+
+    vidEl.playbackRate = selectedReplaySpeed;
+    if (vidEl.currentTime < trimStartSec || vidEl.currentTime >= trimEndSec) {
+      vidEl.currentTime = trimStartSec;
+    }
+    setTimelinePlayheadSec(trimStartSec);
+    setIsPlayingInspectorReplay(true);
+    vidEl.play().catch(() => {
+      setIsPlayingInspectorReplay(false);
+    });
+  };
+
+  const handleRestartInspectorReplay = () => {
+    const vidEl = timelineScrubVideoRef.current;
+    if (!vidEl) return;
+    if (!ensureInspectorVideoSource()) return;
+    vidEl.playbackRate = selectedReplaySpeed;
+    vidEl.currentTime = trimStartSec;
+    setTimelinePlayheadSec(trimStartSec);
+    setIsPlayingInspectorReplay(true);
+    vidEl.play().catch(() => {});
+  };
+
+  // Loop Replay Inspector between trimStartSec and trimEndSec & advance Playhead
+  useEffect(() => {
+    if (!isPlayingInspectorReplay) return;
+    const interval = setInterval(() => {
+      const vidEl = timelineScrubVideoRef.current;
+      if (!vidEl) return;
+      if (vidEl.playbackRate !== selectedReplaySpeed) {
+        vidEl.playbackRate = selectedReplaySpeed;
+      }
+      if (vidEl.currentTime >= trimEndSec || vidEl.ended) {
+        vidEl.currentTime = trimStartSec;
+        vidEl.play().catch(() => {});
+      }
+      setTimelinePlayheadSec(Number(vidEl.currentTime.toFixed(1)));
+    }, 80);
+    return () => clearInterval(interval);
+  }, [isPlayingInspectorReplay, trimStartSec, trimEndSec, selectedReplaySpeed]);
+
+  // Resolve any Play-by-Play Event to its exact Recording Second on the Camera Timeline
+  const resolvePlayEventTimelineSec = useCallback(
+    (playId: string, periodLabel: string, gameClockDisplay: string, createdAtIso?: string): number => {
+      // 1. Direct live map hit
+      if (playEventRecSecMapRef.current[playId] !== undefined) {
+        return playEventRecSecMapRef.current[playId];
+      }
+      // 2. Match against displayClockTags
+      const matchingTag = displayClockTags.find(
+        (t) =>
+          t.id === `pbp-${playId}` ||
+          t.gameClockLabel.toLowerCase() === `${periodLabel} ${gameClockDisplay}`.toLowerCase()
+      );
+      if (matchingTag) return matchingTag.recTimeSec;
+
+      // 3. Match against captured TimelineFrame gameClockLabel
+      const targetClockFull = `${periodLabel} ${gameClockDisplay}`.toLowerCase();
+      const matchingFrame = displayTimelineFrames.find(
+        (f) =>
+          (f.gameClockLabel || "").toLowerCase() === targetClockFull ||
+          (f.gameClockLabel || "").endsWith(gameClockDisplay)
+      );
+      if (matchingFrame) return matchingFrame.timeSec;
+
+      // 4. Match by timestamp offset relative to selectedTimelineVideo.createdAt
+      if (createdAtIso && selectedTimelineVideo?.createdAt) {
+        const videoEndMs = new Date(selectedTimelineVideo.createdAt).getTime();
+        const videoStartMs = videoEndMs - (selectedTimelineVideo.durationSeconds || 20) * 1000;
+        const playMs = new Date(createdAtIso).getTime();
+        if (playMs >= videoStartMs && playMs <= videoEndMs) {
+          return Math.max(0, Math.round((playMs - videoStartMs) / 1000));
+        }
+      }
+
+      return Math.min(activeTimelineDuration, Math.max(0, timelinePlayheadSec));
+    },
+    [displayClockTags, displayTimelineFrames, selectedTimelineVideo, activeTimelineDuration, timelinePlayheadSec]
+  );
+
+  // Click any Play-by-Play item -> Jump to Timeline where captured, snap Replay Box & cue Replay Inspector!
+  const handleJumpToPlayByPlayOnTimeline = (
+    recSec: number,
+    clockLabel: string,
+    playDesc: string
+  ) => {
+    const boxDur = replayBoxDurationPreset || 10;
+    const maxDur = activeTimelineDuration;
+    // Lead-in 70% before the play, 30% after the play so the whole basketball action is inside the box
+    let start = Math.max(0, Number((recSec - boxDur * 0.7).toFixed(1)));
+    let end = Number((start + boxDur).toFixed(1));
+    if (end > maxDur) {
+      end = maxDur;
+      start = Math.max(0, Number((end - boxDur).toFixed(1)));
+    }
+    setTrimStartSec(start);
+    setTrimEndSec(end);
+    handleScrubTimeline(recSec);
+    scrollTimelineToSec(recSec);
+    setReplayClipLabel(`${clockLabel} • ${playDesc}`.slice(0, 42));
+    setTimelineNotice(
+      `🏀 Jumped to Play "${playDesc}" at ${clockLabel} (Rec ${formatClock(recSec)})! Click "▶ Run Replay" in the Replay Inspector to preview.`
+    );
+    setTimeout(() => setTimelineNotice(null), 5000);
+  };
 
   // Change Replay Selection Box Size Preset (e.g. 5s, 10s, 15s, 20s)
   const handleSetReplayBoxPreset = (durationSec: number) => {
@@ -2128,10 +2471,9 @@ function LiveBroadcastStudioContent() {
 
   return (
     <div className="min-h-screen bg-[#0b0e14] text-slate-100 flex flex-col font-sans select-none">
-      {/* Hidden Replay & Scrub Video Elements */}
+      {/* Hidden Replay Video Elements for Preview & Live Program */}
       <video ref={previewReplayVideoRef} playsInline muted className="hidden" />
       <video ref={liveReplayVideoRef} playsInline muted className="hidden" />
-      <video ref={timelineScrubVideoRef} playsInline muted className="hidden" />
 
       {/* =====================================================================
           1. TOP OBS STUDIO BAR
@@ -2397,23 +2739,32 @@ function LiveBroadcastStudioContent() {
       </section>
 
       {/* =====================================================================
-          3. BOTTOM LIVE RECORD & CAMERA TIMELINE DOCK (GAME CLOCK TAGS, 10s REPLAY BOX, PLAYHEAD & ZOOM/SCROLL)
+          3. BOTTOM LIVE RECORD & CAMERA TIMELINE DOCK (STEADY REPLAY BOX, JUMP TO LATEST, REPLAY INSPECTOR & PLAY-BY-PLAY)
          ===================================================================== */}
       <section className="p-3 sm:p-4 bg-[#101520] border-b border-slate-800 space-y-3">
-        {/* TOP TIMELINE HEADER: TITLE, SAVED RECORD PICKER & ZOOM CONTROLS */}
+        {/* TOP TIMELINE HEADER: TITLE, JUMP TO LATEST TIME, SAVED RECORD PICKER & ZOOM CONTROLS */}
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex flex-wrap items-center gap-2">
             <span className="inline-flex h-6 w-6 items-center justify-center rounded-lg bg-amber-500/20 text-amber-400 border border-amber-500/30">
               <Film className="h-3.5 w-3.5" />
             </span>
             <h2 className="text-xs sm:text-sm font-black uppercase tracking-wider text-white">
-              Camera Timeline • Game Clock Tagging &amp; 10s Replay Selector
+              Camera Timeline • Replay Inspector &amp; Live Play-by-Play
             </h2>
             {isRecording && (
               <span className="rounded-md bg-rose-600/20 border border-rose-500/40 px-2 py-0.5 text-[0.65rem] font-black text-rose-300 animate-pulse">
                 ● Live Recording ({recordSeconds}s • {getPeriodLabel(period)} {formatClock(clockSeconds)})
               </span>
             )}
+            <button
+              type="button"
+              onClick={handleJumpToLatestTime}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 px-2.5 py-1 text-[0.68rem] font-black uppercase tracking-wider text-slate-950 shadow cursor-pointer transition-colors"
+              title="Jump Playhead, Replay Box, and Timeline Scrollbar to the latest recorded timestamp"
+            >
+              <SkipForward className="h-3.5 w-3.5" />
+              <span>Jump to Latest Time</span>
+            </button>
           </div>
 
           {/* Right: Saved Recording Picker + Zoom In/Out Controls */}
@@ -2628,35 +2979,68 @@ function LiveBroadcastStudioContent() {
           </div>
         )}
 
-        {/* MAIN TIMELINE WORKSPACE: PLAYHEAD INSPECTOR (LEFT) + UNCOMPRESSED SCROLLABLE TRACK (RIGHT) */}
+        {/* MAIN TIMELINE WORKSPACE: REPLAY INSPECTOR (LEFT) + STEADY UNCOMPRESSED SCROLLABLE TRACK (RIGHT) */}
         <div className="rounded-xl border border-slate-800 bg-[#0b0e15] p-3 space-y-3">
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 items-stretch">
-            {/* LEFT 3 COLS: PLAYHEAD FRAME INSPECTOR & TRANSPORT */}
-            <div className="lg:col-span-3 flex flex-col justify-between rounded-xl border border-slate-800 bg-[#121722] p-2.5 space-y-2">
+            {/* LEFT 3 COLS: REPLAY INSPECTOR (TEST & RUN REPLAY BEFORE PUTTING IT IN LIVE) */}
+            <div className="lg:col-span-3 flex flex-col justify-between rounded-xl border border-amber-500/40 bg-[#121722] p-2.5 space-y-2 shadow-lg">
               <div className="flex items-center justify-between">
-                <span className="text-[0.62rem] font-black uppercase tracking-wider text-rose-400 flex items-center gap-1">
-                  <span className="h-2 w-2 rounded-full bg-rose-500" />
-                  Playhead Inspector
+                <span className="text-[0.65rem] font-black uppercase tracking-wider text-amber-400 flex items-center gap-1.5">
+                  <span
+                    className={`h-2 w-2 rounded-full ${
+                      isPlayingInspectorReplay ? "bg-emerald-400 animate-ping" : "bg-amber-400"
+                    }`}
+                  />
+                  Replay Inspector
                 </span>
-                <span className="rounded bg-amber-500/20 border border-amber-400/40 px-1.5 py-0.5 text-[0.62rem] font-black text-amber-300">
+                <span className="rounded bg-amber-500/20 border border-amber-400/40 px-1.5 py-0.5 text-[0.6rem] font-black text-amber-300">
                   🏀 {getGameClockLabelAtSec(timelinePlayheadSec)}
                 </span>
               </div>
 
-              {/* Mini Frame Monitor at Playhead */}
+              {/* Interactive Replay Inspector Video Monitor */}
               <div className="relative aspect-video w-full rounded-lg overflow-hidden bg-black border border-slate-700 flex items-center justify-center">
-                {activePlayheadFrame ? (
+                <video
+                  ref={timelineScrubVideoRef}
+                  playsInline
+                  muted
+                  className={`w-full h-full object-contain ${
+                    selectedTimelineVideo || isPlayingInspectorReplay ? "block" : "hidden"
+                  }`}
+                />
+                {!isPlayingInspectorReplay && activePlayheadFrame && (
                   <img
                     src={activePlayheadFrame.dataUrl}
-                    alt="Playhead Frame"
-                    className="w-full h-full object-cover"
+                    alt="Replay Inspector Frame"
+                    className="absolute inset-0 w-full h-full object-cover pointer-events-none"
                   />
-                ) : (
-                  <span className="text-[0.65rem] font-bold text-slate-500 text-center px-2">
-                    Record game to inspect frames at Playhead
+                )}
+                {!isPlayingInspectorReplay && !activePlayheadFrame && !selectedTimelineVideo && (
+                  <span className="text-[0.65rem] font-bold text-slate-500 text-center px-3">
+                    Start recording or select a saved clip to test-run replays here before going Live
                   </span>
                 )}
-                <div className="absolute bottom-1 left-1 right-1 flex items-center justify-between rounded bg-black/80 px-1.5 py-0.5 text-[0.58rem] font-mono text-white">
+
+                {/* Top Badge: Inspector Status */}
+                <div className="absolute top-1.5 left-1.5 right-1.5 flex items-center justify-between pointer-events-none">
+                  <span
+                    className={`rounded px-1.5 py-0.5 text-[0.55rem] font-black uppercase tracking-wider ${
+                      isPlayingInspectorReplay
+                        ? "bg-emerald-600/95 text-white"
+                        : "bg-slate-900/90 text-amber-300 border border-amber-500/40"
+                    }`}
+                  >
+                    {isPlayingInspectorReplay
+                      ? `▶ RUNNING REPLAY (${selectedReplaySpeed}x)`
+                      : `⏸ CUED [${formatClock(trimStartSec)}–${formatClock(trimEndSec)}]`}
+                  </span>
+                  <span className="rounded bg-black/80 px-1.5 py-0.5 text-[0.55rem] font-mono text-slate-200">
+                    {(trimEndSec - trimStartSec).toFixed(1)}s Box
+                  </span>
+                </div>
+
+                {/* Bottom Overlay: Playhead Time & Game Clock */}
+                <div className="absolute bottom-1 left-1 right-1 flex items-center justify-between rounded bg-black/85 px-1.5 py-0.5 text-[0.58rem] font-mono text-white pointer-events-none">
                   <span>Rec: {formatPreciseTime(timelinePlayheadSec)}</span>
                   <span className="text-amber-300 font-bold">
                     {getGameClockLabelAtSec(timelinePlayheadSec)}
@@ -2664,64 +3048,120 @@ function LiveBroadcastStudioContent() {
                 </div>
               </div>
 
-              {/* Playhead Step & Snap 10s Box Controls */}
+              {/* Replay Inspector Transport: Run/Pause Replay + Restart [IN] + Speed Selector */}
               <div className="space-y-1.5">
+                <div className="grid grid-cols-3 gap-1">
+                  <button
+                    type="button"
+                    onClick={handleToggleInspectorReplay}
+                    className={`col-span-2 inline-flex items-center justify-center gap-1.5 rounded-lg py-1.5 text-[0.68rem] font-black uppercase tracking-wider cursor-pointer transition-all shadow ${
+                      isPlayingInspectorReplay
+                        ? "bg-rose-600 hover:bg-rose-500 text-white"
+                        : "bg-amber-400 hover:bg-amber-300 text-slate-950"
+                    }`}
+                    title="Run or pause the selected Replay Box right inside the Replay Inspector before pushing to Live"
+                  >
+                    {isPlayingInspectorReplay ? (
+                      <>
+                        <Pause className="h-3.5 w-3.5" />
+                        <span>Pause Replay</span>
+                      </>
+                    ) : (
+                      <>
+                        <Play className="h-3.5 w-3.5 fill-current" />
+                        <span>Run Replay ({selectedReplaySpeed}x)</span>
+                      </>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleRestartInspectorReplay}
+                    className="inline-flex items-center justify-center gap-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 py-1.5 text-[0.62rem] font-black uppercase text-slate-200 cursor-pointer"
+                    title="Restart Replay from [IN] mark"
+                  >
+                    <RotateCcw className="h-3 w-3 text-amber-400" />
+                    <span>Restart</span>
+                  </button>
+                </div>
+
+                {/* Inspector Slow-Mo Speed Pills */}
                 <div className="grid grid-cols-4 gap-1">
-                  {[
-                    { label: "-5s", delta: -5 },
-                    { label: "-1s", delta: -1 },
-                    { label: "+1s", delta: 1 },
-                    { label: "+5s", delta: 5 },
-                  ].map((step) => (
+                  {[0.25, 0.5, 0.75, 1.0].map((spd) => (
                     <button
-                      key={step.label}
+                      key={spd}
                       type="button"
-                      onClick={() => {
-                        const next = Math.max(
-                          0,
-                          Math.min(activeTimelineDuration, timelinePlayheadSec + step.delta)
-                        );
-                        handleScrubTimeline(next);
-                        scrollTimelineToSec(next);
-                      }}
-                      className="rounded bg-slate-800 hover:bg-slate-700 py-1 text-[0.62rem] font-black text-slate-200 cursor-pointer"
+                      onClick={() => setSelectedReplaySpeed(spd)}
+                      className={`rounded py-0.5 text-[0.6rem] font-black cursor-pointer border transition-colors ${
+                        selectedReplaySpeed === spd
+                          ? "bg-amber-500/25 border-amber-400 text-amber-200"
+                          : "bg-slate-900 border-slate-800 text-slate-400 hover:text-white"
+                      }`}
                     >
-                      {step.label}
+                      {spd}x
                     </button>
                   ))}
                 </div>
-                <button
-                  type="button"
-                  onClick={() =>
-                    handleSnapBoxToSecond(timelinePlayheadSec, replayBoxDurationPreset)
-                  }
-                  className="w-full rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/60 py-1.5 text-[0.65rem] font-black uppercase text-amber-300 cursor-pointer"
-                >
-                  📦 Snap {replayBoxDurationPreset}s Box to Playhead
-                </button>
+
+                {/* Add Play Replay to Preview OR Push Directly to Live */}
+                <div className="grid grid-cols-2 gap-1 pt-0.5">
+                  <button
+                    type="button"
+                    onClick={() => handleCreateReplaySceneFromTimeline(false)}
+                    className="inline-flex items-center justify-center gap-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 py-1.5 px-2 text-[0.62rem] font-black uppercase text-white cursor-pointer shadow"
+                    title="Add this inspected replay as a Scene and cue it on Left Preview"
+                  >
+                    <Scissors className="h-3 w-3 shrink-0" />
+                    <span className="truncate">+ Cue in Preview</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleCreateReplaySceneFromTimeline(true)}
+                    className="inline-flex items-center justify-center gap-1 rounded-lg bg-rose-600 hover:bg-rose-500 py-1.5 px-2 text-[0.62rem] font-black uppercase text-white cursor-pointer shadow"
+                    title="Add this inspected replay and immediately air it on Right Live Output"
+                  >
+                    <Zap className="h-3 w-3 shrink-0" />
+                    <span className="truncate">Push to Live</span>
+                  </button>
+                </div>
               </div>
             </div>
 
-            {/* RIGHT 9 COLS: UNCOMPRESSED HORIZONTAL SCROLLABLE MULTI-TRACK TIMELINE */}
+            {/* RIGHT 9 COLS: STEADY UNCOMPRESSED HORIZONTAL SCROLLABLE MULTI-TRACK TIMELINE */}
             <div className="lg:col-span-9 flex flex-col rounded-xl border border-slate-700 bg-[#080b11] overflow-hidden">
               {/* Top Info Strip above Scrollbar Track */}
               <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 bg-slate-900/90 border-b border-slate-800 text-[0.62rem]">
-                <div className="flex items-center gap-3">
+                <div className="flex flex-wrap items-center gap-3">
                   <span className="font-black text-rose-400">
                     ▼ PLAYHEAD: {formatPreciseTime(timelinePlayheadSec)} ({getGameClockLabelAtSec(timelinePlayheadSec)})
                   </span>
                   <span className="font-black text-amber-400">
-                    📦 REPLAY BOX ({(trimEndSec - trimStartSec).toFixed(1)}s): Rec{" "}
+                    📦 STEADY REPLAY BOX ({(trimEndSec - trimStartSec).toFixed(1)}s): Rec{" "}
                     {formatPreciseTime(trimStartSec)} → {formatPreciseTime(trimEndSec)} | 🏀{" "}
                     {getGameClockLabelAtSec(trimStartSec)} → {getGameClockLabelAtSec(trimEndSec)}
                   </span>
                 </div>
-                <span className="text-slate-400 font-bold">
-                  Drag Playhead (Red) or Drag 10s Box (Amber) • Scroll Horizontally Below ↔
-                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handleSnapBoxToSecond(timelinePlayheadSec, replayBoxDurationPreset)
+                    }
+                    className="rounded bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/50 px-2 py-0.5 text-[0.6rem] font-black uppercase text-amber-300 cursor-pointer"
+                  >
+                    📦 Snap Box Here
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleJumpToLatestTime}
+                    className="rounded bg-sky-500/20 hover:bg-sky-500/30 border border-sky-400/50 px-2 py-0.5 text-[0.6rem] font-black uppercase text-sky-300 cursor-pointer flex items-center gap-1"
+                  >
+                    <SkipForward className="h-3 w-3" />
+                    <span>Latest Time ({formatClock(activeTimelineDuration)})</span>
+                  </button>
+                </div>
               </div>
 
-              {/* HORIZONTAL SCROLLABLE CONTAINER (NEVER COMPRESSED IN SCREEN!) */}
+              {/* HORIZONTAL SCROLLABLE CONTAINER (STEADY ON SCREEN — NO AUTO-JUMPING!) */}
               <div
                 ref={timelineScrollContainerRef}
                 className="w-full overflow-x-scroll overflow-y-hidden pb-2 select-none"
@@ -2823,7 +3263,7 @@ function LiveBroadcastStudioContent() {
                   </div>
 
                   {/* =========================================================
-                      TRACK 3: UNCOMPRESSED CAMERA FILMSTRIP + 10-SECOND DRAGGABLE REPLAY BOX
+                      TRACK 3: UNCOMPRESSED CAMERA FILMSTRIP + STEADY 10-SECOND DRAGGABLE REPLAY BOX
                      ========================================================= */}
                   <div
                     className="relative h-28 w-full bg-slate-900/80 overflow-hidden"
@@ -2871,16 +3311,16 @@ function LiveBroadcastStudioContent() {
                     ) : (
                       <div className="sticky left-0 flex h-full w-full max-w-2xl flex-col items-start justify-center px-6 text-slate-400 gap-1 pointer-events-none">
                         <p className="text-xs font-black uppercase tracking-wider text-slate-300">
-                          Uncompressed Camera Timeline Track ({timelineZoomPxPerSec}px / sec)
+                          Steady Camera Timeline Track ({timelineZoomPxPerSec}px / sec)
                         </p>
                         <p className="text-[0.68rem] text-slate-400">
-                          Click &quot;Start Live Record&quot; to record the game with automatic Game Clock tags on every frame, or drag the 10-Second Replay Selection Box &amp; Playhead across the track!
+                          Click &quot;Start Live Record&quot; to record the game with automatic Game Clock tags on every frame. The Replay Selection Box stays steady where you place it—click &quot;Jump to Latest Time&quot; anytime to snap to the live edge!
                         </p>
                       </div>
                     )}
 
                     {/* =======================================================
-                        DRAGGABLE 10-SECOND REPLAY SELECTION BOX OVERLAY
+                        STEADY DRAGGABLE 10-SECOND REPLAY SELECTION BOX OVERLAY
                        ======================================================= */}
                     <div
                       style={{
@@ -2928,9 +3368,9 @@ function LiveBroadcastStudioContent() {
                         className={`w-full bg-amber-400 hover:bg-amber-300 text-slate-950 px-2 py-1 flex items-center justify-between gap-1 shadow-md ${
                           activeDragMode === "box_move" ? "cursor-grabbing" : "cursor-grab"
                         }`}
-                        title="Drag this header bar left or right to slide the 10-second Replay Selection Box across the timeline"
+                        title="Drag this header bar left or right to slide the steady 10-second Replay Selection Box across the timeline"
                       >
-                        <span className="text-[0.58rem] font-black uppercase tracking-wider truncate flex items-center gap-1">
+                        <span className="sticky left-1 text-[0.58rem] font-black uppercase tracking-wider truncate flex items-center gap-1">
                           <GripHorizontal className="h-3 w-3 shrink-0" />
                           <span>
                             {(trimEndSec - trimStartSec).toFixed(1)}s REPLAY BOX •{" "}
@@ -3038,7 +3478,7 @@ function LiveBroadcastStudioContent() {
             </div>
           </div>
 
-          {/* BOTTOM ACTION BAR: REPLAY BOX DURATION PRESETS (5s / 10s / 15s) + SLOW-MO SPEED + CREATE REPLAY SCENE */}
+          {/* BOTTOM ACTION BAR: REPLAY BOX DURATION PRESETS (5s / 10s / 15s) + JUMP TO LATEST + CREATE REPLAY SCENE */}
           <div className="flex flex-wrap items-center justify-between gap-3 pt-1 border-t border-slate-800/80">
             {/* Left: Replay Selection Box Size Presets (Default 10s Box!) */}
             <div className="flex flex-wrap items-center gap-1.5">
@@ -3062,18 +3502,12 @@ function LiveBroadcastStudioContent() {
 
               <button
                 type="button"
-                onClick={() => {
-                  const dur = activeTimelineDuration;
-                  const boxW = replayBoxDurationPreset || 10;
-                  const start = Math.max(0, dur - boxW);
-                  setTrimStartSec(start);
-                  setTrimEndSec(dur);
-                  handleScrubTimeline(start);
-                  scrollTimelineToSec(start);
-                }}
-                className="rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 px-2.5 py-1 text-[0.65rem] font-bold text-slate-200 cursor-pointer"
+                onClick={handleJumpToLatestTime}
+                className="rounded-lg border border-amber-400/50 bg-amber-500/20 hover:bg-amber-500/30 px-2.5 py-1 text-[0.65rem] font-black uppercase text-amber-300 flex items-center gap-1 cursor-pointer"
+                title="Jump the Replay Box and Playhead to the latest recorded timestamp"
               >
-                Last 10s of Rec
+                <SkipForward className="h-3 w-3" />
+                <span>Jump to Latest Time</span>
               </button>
             </div>
 
@@ -3110,12 +3544,22 @@ function LiveBroadcastStudioContent() {
 
               <button
                 type="button"
+                onClick={handleToggleInspectorReplay}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-amber-400/50 px-3 py-2 text-xs font-black uppercase tracking-wider text-amber-300 shadow cursor-pointer"
+                title="Run or pause this replay inside the Replay Inspector before putting it in Live"
+              >
+                <Play className="h-3.5 w-3.5 fill-current" />
+                <span>{isPlayingInspectorReplay ? "Pause Inspector" : "Run in Inspector"}</span>
+              </button>
+
+              <button
+                type="button"
                 onClick={() => handleCreateReplaySceneFromTimeline(false)}
                 className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 px-3.5 py-2 text-xs font-black uppercase tracking-wider text-white shadow-md cursor-pointer"
                 title="Create a selectable Replay Scene from the 10s Box and cue it on Left Preview"
               >
                 <Scissors className="h-3.5 w-3.5" />
-                <span>Create Replay Scene (Preview)</span>
+                <span>Add Replay to Preview</span>
               </button>
 
               <button
@@ -3128,6 +3572,134 @@ function LiveBroadcastStudioContent() {
                 <span>Instant Replay to Live</span>
               </button>
             </div>
+          </div>
+
+          {/* =================================================================
+              LIVE PLAY-BY-PLAY FEED BELOW THE CAMERA TIMELINE
+              (CLICK ANY PLAY TO JUMP TO WHERE IT WAS CAPTURED ON THE TIMELINE!)
+             ================================================================= */}
+          <div className="rounded-xl border border-slate-800 bg-[#0d121d] p-2.5 space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span className="inline-flex h-5 w-5 items-center justify-center rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[0.65rem]">
+                  🏀
+                </span>
+                <span className="text-xs font-black uppercase tracking-wider text-white">
+                  Live Play-by-Play Feed • Click Any Play to Jump to Timeline Capture
+                </span>
+                <span className="rounded-full bg-slate-800 border border-slate-700 px-2 py-0.5 text-[0.6rem] font-bold text-slate-300">
+                  {(liveSession?.playEvents?.length || 0) + displayClockTags.length} Plays
+                </span>
+              </div>
+              <span className="text-[0.62rem] font-bold text-amber-300">
+                💡 Click a play below → Jumps Playhead &amp; {replayBoxDurationPreset}s Replay Box to that moment &amp; loads Replay Inspector
+              </span>
+            </div>
+
+            {(!liveSession?.playEvents || liveSession.playEvents.length === 0) &&
+            displayClockTags.length === 0 ? (
+              <div className="rounded-lg border border-slate-800/80 bg-slate-900/50 px-3 py-2.5 text-xs text-slate-400 flex flex-wrap items-center justify-between gap-2">
+                <span>
+                  No live Play-by-Play events recorded yet. Score plays in the Live Scorebook or click{" "}
+                  <strong className="text-emerald-400">+ 🏀 3PT Shot / + ⚡ Highlight</strong> above to tag plays on the timeline!
+                </span>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2 overflow-x-auto pb-1 pt-0.5">
+                {/* 1. Official Live Scorebook Play-by-Play Events */}
+                {(liveSession?.playEvents || []).slice(0, 40).map((ev) => {
+                  const pLabel = ev.periodLabel || `Q${ev.period}`;
+                  const matchedSec = resolvePlayEventTimelineSec(
+                    ev.id,
+                    pLabel,
+                    ev.gameClockDisplay,
+                    ev.createdAt
+                  );
+                  const clockDisplay = `${pLabel} ${ev.gameClockDisplay}`;
+                  const isHome = ev.teamSide === "HOME";
+                  return (
+                    <button
+                      key={ev.id}
+                      type="button"
+                      onClick={() =>
+                        handleJumpToPlayByPlayOnTimeline(
+                          matchedSec,
+                          clockDisplay,
+                          `${ev.teamName}: ${ev.description}`
+                        )
+                      }
+                      className="shrink-0 group flex flex-col items-start gap-1 rounded-xl border border-slate-700/90 hover:border-amber-400 bg-slate-900/90 hover:bg-slate-800/90 px-3 py-2 text-left transition-all cursor-pointer shadow-sm min-w-[210px] max-w-[260px]"
+                      title={`Click to jump timeline to ${clockDisplay} (Rec ${formatClock(matchedSec)}) and cue in Replay Inspector`}
+                    >
+                      <div className="w-full flex items-center justify-between gap-1.5">
+                        <span className="inline-flex items-center gap-1 rounded bg-amber-500/20 border border-amber-400/40 px-1.5 py-0.5 text-[0.58rem] font-black text-amber-300">
+                          <Clock className="h-2.5 w-2.5" />
+                          <span>{clockDisplay}</span>
+                        </span>
+                        <span className="text-[0.56rem] font-mono font-bold text-sky-400 group-hover:text-amber-300">
+                          Rec {formatClock(matchedSec)} ↗
+                        </span>
+                      </div>
+                      <div className="w-full flex items-center justify-between gap-1">
+                        <span className="text-[0.68rem] font-black text-white truncate">
+                          {ev.playerJersey ? `#${ev.playerJersey} ` : ""}
+                          {ev.description}
+                        </span>
+                        {ev.pointsDelta && ev.pointsDelta > 0 ? (
+                          <span
+                            className={`shrink-0 rounded px-1.5 py-0.2 text-[0.56rem] font-black ${
+                              isHome
+                                ? "bg-rose-600/30 text-rose-300 border border-rose-500/40"
+                                : "bg-blue-600/30 text-blue-300 border border-blue-500/40"
+                            }`}
+                          >
+                            +{ev.pointsDelta}
+                          </span>
+                        ) : null}
+                      </div>
+                      <div className="w-full flex items-center justify-between text-[0.56rem] text-slate-400">
+                        <span className="truncate font-bold">{ev.teamName}</span>
+                        <span className="font-mono text-slate-300">
+                          {ev.homeScoreAfter} - {ev.awayScoreAfter}
+                        </span>
+                      </div>
+                    </button>
+                  );
+                })}
+
+                {/* 2. Timeline Tagged Plays (if not already in playEvents) */}
+                {displayClockTags.map((tag) => (
+                  <button
+                    key={tag.id}
+                    type="button"
+                    onClick={() =>
+                      handleJumpToPlayByPlayOnTimeline(
+                        tag.recTimeSec,
+                        tag.gameClockLabel,
+                        tag.label
+                      )
+                    }
+                    className="shrink-0 group flex flex-col items-start gap-1 rounded-xl border border-emerald-500/40 hover:border-amber-400 bg-emerald-950/30 hover:bg-emerald-900/40 px-3 py-2 text-left transition-all cursor-pointer shadow-sm min-w-[185px]"
+                    title={`Click to jump timeline to ${tag.gameClockLabel} (Rec ${formatClock(tag.recTimeSec)})`}
+                  >
+                    <div className="w-full flex items-center justify-between gap-1.5">
+                      <span className="inline-flex items-center gap-1 rounded bg-emerald-500/20 border border-emerald-400/40 px-1.5 py-0.5 text-[0.58rem] font-black text-emerald-300">
+                        <span>🏀 {tag.gameClockLabel}</span>
+                      </span>
+                      <span className="text-[0.56rem] font-mono font-bold text-emerald-300 group-hover:text-amber-300">
+                        Rec {formatClock(tag.recTimeSec)} ↗
+                      </span>
+                    </div>
+                    <span className="text-[0.68rem] font-black text-white truncate w-full">
+                      {tag.label}
+                    </span>
+                    <span className="text-[0.55rem] font-bold text-slate-400">
+                      Click to inspect &amp; replay
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       </section>
@@ -3426,31 +3998,81 @@ function LiveBroadcastStudioContent() {
           <div className="p-3 space-y-3 text-xs">
             <div className="space-y-1">
               <label className="text-[0.65rem] font-black uppercase text-slate-400">
-                Scoreboard Position:
+                Scoreboard Position (with Team Logos):
               </label>
-              <div className="grid grid-cols-2 gap-1.5">
+              <div className="grid grid-cols-3 gap-1.5">
                 <button
                   type="button"
                   onClick={() => setScorebugPosition("bottom_bar")}
-                  className={`rounded-lg py-1.5 text-[0.68rem] font-black uppercase border cursor-pointer ${
+                  className={`rounded-lg py-1.5 px-1 text-[0.64rem] font-black uppercase border cursor-pointer ${
                     scorebugPosition === "bottom_bar"
                       ? "bg-rose-600 border-rose-500 text-white"
-                      : "bg-slate-900 border-slate-700 text-slate-400"
+                      : "bg-slate-900 border-slate-700 text-slate-400 hover:text-white"
                   }`}
                 >
-                  Bottom Center Bar
+                  Bottom Center
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setScorebugPosition("bottom_left")}
+                  className={`rounded-lg py-1.5 px-1 text-[0.64rem] font-black uppercase border cursor-pointer ${
+                    scorebugPosition === "bottom_left"
+                      ? "bg-rose-600 border-rose-500 text-white"
+                      : "bg-slate-900 border-slate-700 text-slate-400 hover:text-white"
+                  }`}
+                >
+                  Bottom-Left Bug
                 </button>
                 <button
                   type="button"
                   onClick={() => setScorebugPosition("top_corner")}
-                  className={`rounded-lg py-1.5 text-[0.68rem] font-black uppercase border cursor-pointer ${
+                  className={`rounded-lg py-1.5 px-1 text-[0.64rem] font-black uppercase border cursor-pointer ${
                     scorebugPosition === "top_corner"
                       ? "bg-rose-600 border-rose-500 text-white"
-                      : "bg-slate-900 border-slate-700 text-slate-400"
+                      : "bg-slate-900 border-slate-700 text-slate-400 hover:text-white"
                   }`}
                 >
                   Top-Left Bug
                 </button>
+              </div>
+            </div>
+
+            {/* Active Team Logos Preview Strip */}
+            <div className="rounded-lg border border-slate-800 bg-slate-900/90 px-2.5 py-1.5 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 min-w-0">
+                {homeTeam?.imageUrl ? (
+                  <img
+                    src={homeTeam.imageUrl}
+                    alt={homeTeam.name}
+                    className="h-5 w-5 rounded-full object-cover border border-rose-500/50 shrink-0"
+                  />
+                ) : (
+                  <span className="h-5 w-5 rounded-full bg-rose-600 text-white text-[0.55rem] font-black flex items-center justify-center shrink-0">
+                    {homeTeamName.slice(0, 2).toUpperCase()}
+                  </span>
+                )}
+                <span className="text-[0.62rem] font-black text-slate-200 truncate">
+                  {homeTeamName}
+                </span>
+              </div>
+              <span className="text-[0.58rem] font-black text-emerald-400 uppercase shrink-0">
+                Logos Active
+              </span>
+              <div className="flex items-center gap-1.5 min-w-0">
+                <span className="text-[0.62rem] font-black text-slate-200 truncate">
+                  {awayTeamName}
+                </span>
+                {awayTeam?.imageUrl ? (
+                  <img
+                    src={awayTeam.imageUrl}
+                    alt={awayTeam.name}
+                    className="h-5 w-5 rounded-full object-cover border border-blue-500/50 shrink-0"
+                  />
+                ) : (
+                  <span className="h-5 w-5 rounded-full bg-blue-600 text-white text-[0.55rem] font-black flex items-center justify-center shrink-0">
+                    {awayTeamName.slice(0, 2).toUpperCase()}
+                  </span>
+                )}
               </div>
             </div>
 
