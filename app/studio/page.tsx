@@ -432,6 +432,7 @@ function LiveBroadcastStudioContent() {
   // Canvas & Video Refs
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const liveCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const sceneThumbCanvasByIdRef = useRef<Record<string, HTMLCanvasElement | null>>({});
   const previewReplayVideoRef = useRef<HTMLVideoElement | null>(null);
   const liveReplayVideoRef = useRef<HTMLVideoElement | null>(null);
   const previewMediaVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -2458,10 +2459,11 @@ function LiveBroadcastStudioContent() {
     [activeLeague?.name]
   );
 
-  // Dual-Monitor Continuous Render Loop (Left = Preview Canvas, Right = Live Program Canvas)
+  // Dual-Monitor Continuous Render Loop (Left = Preview Canvas, Right = Live Program Canvas, + Bottom Scene Preview Strip)
   useEffect(() => {
     let isRunning = true;
     let rafId: number;
+    let lastThumbRenderMs = 0;
 
     const tick = (nowMs: number) => {
       if (!isRunning) return;
@@ -2520,6 +2522,39 @@ function LiveBroadcastStudioContent() {
         }
       }
 
+      // 3. Render Miniature Scene Preview Thumbnails in the Bottom Strip of Left Preview (10fps)
+      if (nowMs - lastThumbRenderMs >= 100) {
+        lastThumbRenderMs = nowMs;
+        for (const sceneItem of scenes) {
+          const tCanvas = sceneThumbCanvasByIdRef.current[sceneItem.id];
+          if (!tCanvas) continue;
+          const tCtx = tCanvas.getContext("2d");
+          if (!tCtx) continue;
+          tCtx.save();
+          tCtx.scale(tCanvas.width / 1920, tCanvas.height / 1080);
+          renderSceneToCanvas(
+            tCtx,
+            1920,
+            1080,
+            sceneItem,
+            sceneItem.id === previewScene?.id
+              ? previewReplayVideoRef.current
+              : sceneItem.id === liveScene?.id
+                ? liveReplayVideoRef.current
+                : null,
+            sceneItem.id === previewScene?.id
+              ? previewMediaVideoRef.current
+              : sceneItem.id === liveScene?.id
+                ? liveMediaVideoRef.current
+                : null,
+            false,
+            false,
+            nowMs
+          );
+          tCtx.restore();
+        }
+      }
+
       rafId = requestAnimationFrame(tick);
     };
 
@@ -2529,6 +2564,7 @@ function LiveBroadcastStudioContent() {
       cancelAnimationFrame(rafId);
     };
   }, [
+    scenes,
     previewScene,
     liveScene,
     showOverlayInPreview,
@@ -3994,6 +4030,135 @@ function LiveBroadcastStudioContent() {
                 : previewScene?.kind === "picture_scene"
                 ? `🖼️ Picture Scene: ${previewScene.mediaConfig?.fileName}`
                 : `🎥 ${previewScene?.cameras.length || 0} Camera(s) • Layout: ${previewScene?.layout.toUpperCase()}`}
+            </div>
+          </div>
+
+          {/* PREVIEW BOTTOM BAR: HORIZONTALLY SCROLLABLE SCENES PREVIEW STRIP */}
+          <div className="px-3 py-2 bg-[#0e1420] border-t border-emerald-500/30 space-y-1.5">
+            <div className="flex flex-wrap items-center justify-between gap-1.5">
+              <div className="flex items-center gap-1.5">
+                <span className="rounded bg-emerald-500/20 border border-emerald-500/40 px-1.5 py-0.5 text-[0.58rem] font-black uppercase text-emerald-300 flex items-center gap-1">
+                  <Layers className="h-3 w-3" />
+                  <span>Scenes Preview ({scenes.length})</span>
+                </span>
+                <span className="text-[0.6rem] font-bold text-slate-400">
+                  Scroll horizontally &amp; click a scene to load into Preview
+                </span>
+              </div>
+
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={handleAddScene}
+                  className="inline-flex items-center gap-1 rounded-md bg-emerald-600/25 hover:bg-emerald-600/40 border border-emerald-500/40 px-2 py-0.5 text-[0.58rem] font-black uppercase text-emerald-300 cursor-pointer"
+                  title="Add New Camera Scene"
+                >
+                  <Plus className="h-2.5 w-2.5" />
+                  <span>+ Cam Scene</span>
+                </button>
+                <label
+                  className="inline-flex items-center gap-1 rounded-md bg-sky-600/25 hover:bg-sky-600/40 border border-sky-500/40 px-2 py-0.5 text-[0.58rem] font-black uppercase text-sky-300 cursor-pointer"
+                  title="Add Video Scene"
+                >
+                  <Film className="h-2.5 w-2.5" />
+                  <span>+ Video</span>
+                  <input
+                    type="file"
+                    accept="video/*"
+                    onChange={(e) => handleAddMediaScene(e, "video")}
+                    className="hidden"
+                  />
+                </label>
+                <label
+                  className="inline-flex items-center gap-1 rounded-md bg-purple-600/25 hover:bg-purple-600/40 border border-purple-500/40 px-2 py-0.5 text-[0.58rem] font-black uppercase text-purple-300 cursor-pointer"
+                  title="Add Picture Scene"
+                >
+                  <Plus className="h-2.5 w-2.5" />
+                  <span>+ Picture</span>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={(e) => handleAddMediaScene(e, "picture")}
+                    className="hidden"
+                  />
+                </label>
+              </div>
+            </div>
+
+            {/* Horizontally Scrollable Scene Thumbnail Cards */}
+            <div className="flex items-center gap-2 overflow-x-auto pb-1.5 pt-0.5 snap-x snap-mandatory">
+              {scenes.map((sceneItem) => {
+                const isPreview = sceneItem.id === previewSceneId;
+                const isLive = sceneItem.id === liveSceneId;
+                return (
+                  <button
+                    key={sceneItem.id}
+                    type="button"
+                    onClick={() => setPreviewSceneId(sceneItem.id)}
+                    className={`group relative shrink-0 snap-start w-[132px] sm:w-[148px] rounded-xl overflow-hidden border text-left transition-all cursor-pointer ${
+                      isPreview
+                        ? "border-emerald-400 ring-2 ring-emerald-500/40 bg-emerald-950/50 shadow-md"
+                        : isLive
+                          ? "border-rose-500/70 bg-slate-900/90 hover:border-emerald-400"
+                          : "border-slate-800 bg-slate-900/80 hover:border-slate-600"
+                    }`}
+                    title={`Click to preview: ${sceneItem.name}`}
+                  >
+                    {/* Live Miniature 16:9 Scene Preview Canvas */}
+                    <div className="relative aspect-video w-full bg-black overflow-hidden">
+                      <canvas
+                        ref={(el) => {
+                          sceneThumbCanvasByIdRef.current[sceneItem.id] = el;
+                        }}
+                        width={320}
+                        height={180}
+                        className="w-full h-full object-contain"
+                      />
+
+                      {/* Status Badges (PRV / LIVE) */}
+                      <div className="absolute top-1 left-1 right-1 flex items-center justify-between gap-1 pointer-events-none">
+                        <div className="flex items-center gap-1">
+                          {isPreview && (
+                            <span className="rounded bg-emerald-500 px-1.5 py-0.5 text-[0.5rem] font-black uppercase text-slate-950 shadow">
+                              PRV
+                            </span>
+                          )}
+                          {isLive && (
+                            <span className="rounded bg-rose-600 px-1.5 py-0.5 text-[0.5rem] font-black uppercase text-white shadow">
+                              LIVE
+                            </span>
+                          )}
+                        </div>
+                        <span className="rounded bg-black/75 px-1 py-0.5 text-[0.48rem] font-bold uppercase text-slate-300">
+                          {sceneItem.kind === "replay_scene"
+                            ? "Replay"
+                            : sceneItem.kind === "video_scene"
+                              ? "Video"
+                              : sceneItem.kind === "picture_scene"
+                                ? "Pic"
+                                : `${sceneItem.cameras.length} Cam`}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Scene Name & Subtitle */}
+                    <div className="px-2 py-1.5 bg-slate-950/90 border-t border-slate-800/80">
+                      <div className="text-[0.62rem] font-black text-white truncate group-hover:text-emerald-300 transition-colors">
+                        {sceneItem.name}
+                      </div>
+                      <div className="text-[0.52rem] font-bold text-slate-400 truncate">
+                        {sceneItem.kind === "replay_scene"
+                          ? `⚡ ${sceneItem.replayConfig?.playbackRate}x Slow-Mo`
+                          : sceneItem.kind === "video_scene"
+                            ? `🎬 ${sceneItem.mediaConfig?.fileName || "Video"}`
+                            : sceneItem.kind === "picture_scene"
+                              ? `🖼️ ${sceneItem.mediaConfig?.fileName || "Picture"}`
+                              : `🎥 ${sceneItem.layout.replace(/_/g, " ")}`}
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
             </div>
           </div>
         </div>
