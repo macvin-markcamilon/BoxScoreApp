@@ -362,6 +362,8 @@ function hydrateTeamImagesFromVault(team: LeagueTeam): LeagueTeam {
 
   return {
     ...team,
+    initials:
+      team.initials || getFromImageVault(`initials:${team.id}`) || undefined,
     imageUrl: team.imageUrl || getFromImageVault(`team:${team.id}`),
     headCoachImageUrl:
       team.headCoachImageUrl || getFromImageVault(`hc:${team.id}`),
@@ -1395,8 +1397,14 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
 
         if (Array.isArray(rawConfig?._persistedTeams) && rawConfig._persistedTeams.length > 0) {
           for (const pt of rawConfig._persistedTeams) {
-            if (!mappedTeams.some((t) => t.id === pt.id)) {
+            const existingIdx = mappedTeams.findIndex((t) => t.id === pt.id);
+            if (existingIdx === -1) {
               mappedTeams.push(hydrateTeamImagesFromVault(pt));
+            } else if (!mappedTeams[existingIdx].initials && pt.initials) {
+              mappedTeams[existingIdx] = {
+                ...mappedTeams[existingIdx],
+                initials: pt.initials,
+              };
             }
           }
         }
@@ -2712,6 +2720,7 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
       ...mapDbTeamRow(data as Record<string, unknown>),
       initials: trimmedInitials || undefined,
     };
+    saveToImageVault(`initials:${createdTeam.id}`, trimmedInitials);
     saveToImageVault(`team:${createdTeam.id}`, input.imageUrl);
     saveToImageVault(`hc:${createdTeam.id}`, input.headCoachImageUrl);
     saveToImageVault(`mgr:${createdTeam.id}`, input.managerImageUrl);
@@ -2725,6 +2734,7 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
     const nextTeams = [...get().teams, createdTeam];
     writeLocalCache(STORAGE_KEYS.TEAMS, nextTeams);
     set({ teams: nextTeams });
+    void get().persistLeagueGamesToCloud(createdTeam.leagueId);
     return createdTeam;
   },
 
@@ -2753,6 +2763,12 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
             imageUrl: "",
           }));
 
+    const trimmedInitials =
+      input.initials !== undefined
+        ? input.initials.trim().toUpperCase()
+        : existing.initials || "";
+
+    saveToImageVault(`initials:${teamId}`, trimmedInitials);
     saveToImageVault(`team:${teamId}`, input.imageUrl);
     saveToImageVault(`hc:${teamId}`, input.headCoachImageUrl);
     saveToImageVault(`mgr:${teamId}`, input.managerImageUrl);
@@ -2762,11 +2778,6 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
     for (const p of input.roster) {
       saveToImageVault(`player:${p.id}`, p.imageUrl);
     }
-
-    const trimmedInitials =
-      input.initials !== undefined
-        ? input.initials.trim().toUpperCase()
-        : existing.initials || "";
 
     const updatedTeam: LeagueTeam = {
       ...existing,
@@ -2792,6 +2803,7 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
     );
     writeLocalCache(STORAGE_KEYS.TEAMS, nextTeams);
     set({ teams: nextTeams });
+    void get().persistLeagueGamesToCloud(updatedTeam.leagueId);
 
     if (get().schemaStatus === "ready") {
       let updateRes = await supabase

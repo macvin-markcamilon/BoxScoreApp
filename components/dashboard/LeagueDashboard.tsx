@@ -2400,6 +2400,14 @@ create policy "Auth teams delete" on public.teams for delete using (auth.uid() =
                               <h3 className="text-base font-black uppercase tracking-tight text-slate-900 truncate">
                                 {team.name}
                               </h3>
+                              <span
+                                className="rounded bg-[#0B2F5C] text-white px-2 py-0.5 text-[0.62rem] font-black uppercase tracking-wider"
+                                title="Scorebug Team Initials / Short Name"
+                              >
+                                {team.initials?.trim()
+                                  ? team.initials.trim().toUpperCase()
+                                  : team.name.trim().split(/\s+/)[0]?.toUpperCase()}
+                              </span>
                               {team.categoryName && (
                                 <span className="rounded bg-amber-100 text-amber-900 border border-amber-200/80 px-2 py-0.5 text-[0.62rem] font-black uppercase">
                                   {team.categoryName}
@@ -2785,6 +2793,15 @@ create policy "Auth teams delete" on public.teams for delete using (auth.uid() =
                                 </span>
                                 <span className="rounded bg-white/20 px-2 py-0.5 text-[0.65rem] font-black uppercase">
                                   {team.roster.length} Players
+                                </span>
+                                <span
+                                  className="rounded bg-amber-400 text-slate-950 px-2 py-0.5 text-[0.65rem] font-black uppercase tracking-wider"
+                                  title="Scorebug Initials / Short Name"
+                                >
+                                  Scorebug:{" "}
+                                  {team.initials?.trim()
+                                    ? team.initials.trim().toUpperCase()
+                                    : team.name.trim().split(/\s+/)[0]?.toUpperCase()}
                                 </span>
                               </div>
                               <h3 className="mt-1 text-2xl font-black uppercase tracking-tight">

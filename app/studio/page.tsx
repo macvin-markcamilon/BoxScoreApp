@@ -20,7 +20,10 @@ import {
   Image as ImageIcon,
   Layers,
   Layout,
+  Mic,
+  MicOff,
   Monitor,
+  Music,
   Pause,
   Play,
   Plus,
@@ -40,8 +43,11 @@ import {
   Tag,
   Trash2,
   Tv,
+  Upload,
   User,
   Video,
+  Volume2,
+  VolumeX,
   Wifi,
   Zap,
   ZoomIn,
@@ -143,6 +149,19 @@ export interface StudioScene {
   cameras: SceneCameraSlot[];
   replayConfig?: ReplayClipConfig;
   mediaConfig?: SceneMediaConfig;
+}
+
+export interface StudioAudioSource {
+  id: string;
+  name: string;
+  kind: "mic_input" | "audio_file";
+  deviceId?: string;
+  fileUrl?: string;
+  fileName?: string;
+  volume: number; // 0 to 1.5
+  muted: boolean;
+  loop?: boolean;
+  isActive: boolean;
 }
 
 /**
@@ -273,6 +292,7 @@ function LiveBroadcastStudioContent() {
     initializeSession,
     fetchLeaguesAndTeams,
     syncFromLocalStorage,
+    updateTeamInLeague,
   } = useBoxScoreStore();
 
   // Selected League & Match
@@ -286,6 +306,44 @@ function LiveBroadcastStudioContent() {
   const [isTransitioning, setIsTransitioning] = useState<boolean>(false);
   const [showOverlayInPreview, setShowOverlayInPreview] = useState<boolean>(true);
   const [newSceneNameInput, setNewSceneNameInput] = useState<string>("");
+
+  // Custom / League Logo Transition (Stinger Wipe) State & Refs
+  const [customTransitionLogoUrl, setCustomTransitionLogoUrl] = useState<string>("");
+  const transitionLogoImgRef = useRef<HTMLImageElement | null>(null);
+  const stingerStateRef = useRef<{
+    active: boolean;
+    startMs: number;
+    durationMs: number;
+    switchedScene: boolean;
+    targetSceneId: string;
+  }>({
+    active: false,
+    startMs: 0,
+    durationMs: 850,
+    switchedScene: false,
+    targetSceneId: "",
+  });
+
+  // Audio Sources & Mixer State (Microphones + Uploaded Audio Files / BGM / SFX)
+  const [audioDevices, setAudioDevices] = useState<MediaDeviceInfo[]>([]);
+  const [audioSources, setAudioSources] = useState<StudioAudioSource[]>([
+    {
+      id: "audio-mic-main",
+      name: "Mic / Commentator 1",
+      kind: "mic_input",
+      deviceId: "",
+      volume: 1.0,
+      muted: false,
+      isActive: false,
+    },
+  ]);
+  const [audioLevelsById, setAudioLevelsById] = useState<Record<string, number>>({});
+  const audioStreamByIdRef = useRef<Record<string, MediaStream>>({});
+  const audioElByIdRef = useRef<Record<string, HTMLAudioElement>>({});
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const masterAudioDestRef = useRef<MediaStreamAudioDestinationNode | null>(null);
+  const gainNodeByIdRef = useRef<Record<string, GainNode>>({});
+  const analyserByIdRef = useRef<Record<string, AnalyserNode>>({});
 
   // Hardware Video Devices & Active Streams Map (keyed by slot.id)
   const [videoDevices, setVideoDevices] = useState<MediaDeviceInfo[]>([]);
@@ -674,7 +732,7 @@ function LiveBroadcastStudioContent() {
     [storedVideos, selectedTimelineVideoId]
   );
 
-  // Enumerate Camera Devices
+  // Enumerate Camera & Audio Input Devices
   const refreshCameraDevices = useCallback(async () => {
     if (typeof navigator === "undefined" || !navigator.mediaDevices?.enumerateDevices) {
       return;
@@ -682,7 +740,9 @@ function LiveBroadcastStudioContent() {
     try {
       const devices = await navigator.mediaDevices.enumerateDevices();
       const vInputs = devices.filter((d) => d.kind === "videoinput");
+      const aInputs = devices.filter((d) => d.kind === "audioinput");
       setVideoDevices(vInputs);
+      setAudioDevices(aInputs);
     } catch {
       // Ignore before permissions granted
     }
@@ -690,7 +750,260 @@ function LiveBroadcastStudioContent() {
 
   useEffect(() => {
     refreshCameraDevices();
+    if (typeof window !== "undefined") {
+      try {
+        const savedLogo = window.localStorage.getItem(
+          "boxscore_studio_transition_logo"
+        );
+        if (savedLogo) setCustomTransitionLogoUrl(savedLogo);
+      } catch {
+        // ignore
+      }
+    }
   }, [refreshCameraDevices]);
+
+  // Active Transition Logo URL (Uploaded Custom Logo -> Active League Logo)
+  const effectiveTransitionLogoUrl =
+    customTransitionLogoUrl.trim() || activeLeague?.imageUrl?.trim() || "";
+
+  // Load Transition Logo into CORS-safe HTMLImageElement for Stinger Wipe Rendering
+  useEffect(() => {
+    if (!effectiveTransitionLogoUrl) {
+      transitionLogoImgRef.current = null;
+      return;
+    }
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    if (
+      effectiveTransitionLogoUrl.startsWith("http://") ||
+      effectiveTransitionLogoUrl.startsWith("https://")
+    ) {
+      img.src = `/api/image-proxy?url=${encodeURIComponent(
+        effectiveTransitionLogoUrl
+      )}`;
+    } else {
+      img.src = effectiveTransitionLogoUrl;
+    }
+    transitionLogoImgRef.current = img;
+  }, [effectiveTransitionLogoUrl]);
+
+  // Upload Custom Transition Logo (e.g. League Logo)
+  const handleUploadTransitionLogo = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = typeof reader.result === "string" ? reader.result : "";
+      if (dataUrl) {
+        setCustomTransitionLogoUrl(dataUrl);
+        try {
+          window.localStorage.setItem("boxscore_studio_transition_logo", dataUrl);
+        } catch {
+          // ignore if quota exceeded
+        }
+      }
+    };
+    reader.readAsDataURL(file);
+    e.target.value = "";
+  };
+
+  // Web Audio API Master Mixer & Audio Source Handlers
+  const ensureAudioContext = useCallback(() => {
+    if (typeof window === "undefined") return null;
+    if (!audioCtxRef.current) {
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext })
+          .webkitAudioContext;
+      const ctx = new AudioCtx();
+      const dest = ctx.createMediaStreamDestination();
+      audioCtxRef.current = ctx;
+      masterAudioDestRef.current = dest;
+    }
+    if (audioCtxRef.current.state === "suspended") {
+      void audioCtxRef.current.resume().catch(() => {});
+    }
+    return {
+      ctx: audioCtxRef.current,
+      dest: masterAudioDestRef.current!,
+    };
+  }, []);
+
+  const startAudioSource = async (src: StudioAudioSource) => {
+    const audioEnv = ensureAudioContext();
+    if (!audioEnv) return;
+    const { ctx, dest } = audioEnv;
+
+    if (src.kind === "mic_input") {
+      try {
+        if (audioStreamByIdRef.current[src.id]) {
+          audioStreamByIdRef.current[src.id].getTracks().forEach((t) => t.stop());
+        }
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: src.deviceId ? { deviceId: { exact: src.deviceId } } : true,
+          video: false,
+        });
+        audioStreamByIdRef.current[src.id] = stream;
+
+        const mediaSource = ctx.createMediaStreamSource(stream);
+        const gainNode = ctx.createGain();
+        gainNode.gain.value = src.muted ? 0 : src.volume;
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 256;
+
+        mediaSource.connect(gainNode);
+        gainNode.connect(analyser);
+        gainNode.connect(dest);
+
+        gainNodeByIdRef.current[src.id] = gainNode;
+        analyserByIdRef.current[src.id] = analyser;
+
+        setAudioSources((prev) =>
+          prev.map((a) => (a.id === src.id ? { ...a, isActive: true } : a))
+        );
+        await refreshCameraDevices();
+      } catch (err) {
+        const msg =
+          err instanceof Error ? err.message : "Could not access microphone.";
+        setCameraError(`Audio Error: ${msg}`);
+      }
+    } else if (src.kind === "audio_file" && src.fileUrl) {
+      try {
+        let audioEl = audioElByIdRef.current[src.id];
+        if (!audioEl) {
+          audioEl = new Audio(src.fileUrl);
+          audioEl.crossOrigin = "anonymous";
+          audioElByIdRef.current[src.id] = audioEl;
+
+          const mediaSource = ctx.createMediaElementSource(audioEl);
+          const gainNode = ctx.createGain();
+          gainNode.gain.value = src.muted ? 0 : src.volume;
+          const analyser = ctx.createAnalyser();
+          analyser.fftSize = 256;
+
+          mediaSource.connect(gainNode);
+          gainNode.connect(analyser);
+          gainNode.connect(dest);
+          // Also route to local speakers so operator hears the BGM/SFX
+          gainNode.connect(ctx.destination);
+
+          gainNodeByIdRef.current[src.id] = gainNode;
+          analyserByIdRef.current[src.id] = analyser;
+        }
+        audioEl.loop = Boolean(src.loop);
+        await audioEl.play();
+        setAudioSources((prev) =>
+          prev.map((a) => (a.id === src.id ? { ...a, isActive: true } : a))
+        );
+      } catch {
+        // ignore
+      }
+    }
+  };
+
+  const stopAudioSource = (sourceId: string) => {
+    if (audioStreamByIdRef.current[sourceId]) {
+      audioStreamByIdRef.current[sourceId].getTracks().forEach((t) => t.stop());
+      delete audioStreamByIdRef.current[sourceId];
+    }
+    if (audioElByIdRef.current[sourceId]) {
+      audioElByIdRef.current[sourceId].pause();
+    }
+    delete analyserByIdRef.current[sourceId];
+    setAudioLevelsById((prev) => ({ ...prev, [sourceId]: 0 }));
+    setAudioSources((prev) =>
+      prev.map((a) => (a.id === sourceId ? { ...a, isActive: false } : a))
+    );
+  };
+
+  const handleUpdateAudioSource = (
+    sourceId: string,
+    patch: Partial<StudioAudioSource>
+  ) => {
+    setAudioSources((prev) =>
+      prev.map((a) => {
+        if (a.id !== sourceId) return a;
+        const updated = { ...a, ...patch };
+        const gainNode = gainNodeByIdRef.current[sourceId];
+        if (gainNode) {
+          gainNode.gain.value = updated.muted ? 0 : updated.volume;
+        }
+        const audioEl = audioElByIdRef.current[sourceId];
+        if (audioEl && patch.loop !== undefined) {
+          audioEl.loop = Boolean(patch.loop);
+        }
+        return updated;
+      })
+    );
+  };
+
+  const handleAddMicAudioSource = () => {
+    const nextIdx =
+      audioSources.filter((a) => a.kind === "mic_input").length + 1;
+    const newAudio: StudioAudioSource = {
+      id: `audio-mic-${generateUUID().slice(0, 6)}`,
+      name: `Mic / Commentator ${nextIdx}`,
+      kind: "mic_input",
+      deviceId: audioDevices[0]?.deviceId || "",
+      volume: 1.0,
+      muted: false,
+      isActive: false,
+    };
+    setAudioSources((prev) => [...prev, newAudio]);
+  };
+
+  const handleAddFileAudioSource = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const url = URL.createObjectURL(file);
+    const cleanName = file.name.replace(/\.[^/.]+$/, "");
+    const newAudio: StudioAudioSource = {
+      id: `audio-file-${generateUUID().slice(0, 6)}`,
+      name: `🎵 ${cleanName.slice(0, 22)}`,
+      kind: "audio_file",
+      fileUrl: url,
+      fileName: file.name,
+      volume: 0.85,
+      muted: false,
+      loop: true,
+      isActive: false,
+    };
+    setAudioSources((prev) => [...prev, newAudio]);
+    e.target.value = "";
+  };
+
+  const handleRemoveAudioSource = (sourceId: string) => {
+    stopAudioSource(sourceId);
+    if (audioElByIdRef.current[sourceId]) {
+      delete audioElByIdRef.current[sourceId];
+    }
+    setAudioSources((prev) => prev.filter((a) => a.id !== sourceId));
+  };
+
+  // Real-time Audio Level Meter (VU Meter) Polling Loop
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const analysers = analyserByIdRef.current;
+      const ids = Object.keys(analysers);
+      if (ids.length === 0) return;
+
+      const nextLevels: Record<string, number> = {};
+      const dataArray = new Uint8Array(64);
+      for (const id of ids) {
+        const an = analysers[id];
+        if (!an) continue;
+        an.getByteFrequencyData(dataArray);
+        let sum = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+          sum += dataArray[i];
+        }
+        const avg = sum / dataArray.length;
+        nextLevels[id] = Math.min(100, Math.round((avg / 140) * 100));
+      }
+      setAudioLevelsById(nextLevels);
+    }, 100);
+    return () => clearInterval(interval);
+  }, []);
 
   // Keep liveClockStateRef synced with current Game Clock & Score for real-time frame tagging
   useEffect(() => {
@@ -1994,19 +2307,25 @@ function LiveBroadcastStudioContent() {
         }
       }
 
-      // If Scorebug is Bottom-Center ("bottom_bar") and the Live Player Stats Card is active,
-      // automatically hide the Scorebug so they do not overlap at Center Bottom; restore it when hidden.
+      // 1. If the scene is a Picture or Video scene, disable both Scorebug and Player Stats card.
+      // 2. If Scorebug is Bottom-Center ("bottom_bar") and Player Stats card is active, hide Scorebug.
+      const isPictureOrVideoScene =
+        scene.kind === "video_scene" || scene.kind === "picture_scene";
       const hideBottomBarForStatsCard =
         isLiveProgramCanvas &&
         Boolean(featuredOnCourtPlayer) &&
         scorebugPosition === "bottom_bar";
 
-      if (drawOverlay && !hideBottomBarForStatsCard) {
+      if (drawOverlay && !isPictureOrVideoScene && !hideBottomBarForStatsCard) {
         drawScorebugOverlay(ctx, width, height);
       }
 
-      // Render Selected On-Court Player Stats at Center Bottom of the Live Feed
-      if (isLiveProgramCanvas && featuredOnCourtPlayer) {
+      // Render Selected On-Court Player Stats at Center Bottom of the Live Feed (disabled on Picture/Video scenes)
+      if (
+        isLiveProgramCanvas &&
+        featuredOnCourtPlayer &&
+        !isPictureOrVideoScene
+      ) {
         drawLivePlayerStatsOverlay(ctx, width, height);
       }
     },
@@ -2017,6 +2336,126 @@ function LiveBroadcastStudioContent() {
       featuredOnCourtPlayer,
       scorebugPosition,
     ]
+  );
+
+  // Helper: Draw Broadcast Logo Stinger Wipe Transition on Live Program Canvas
+  const drawLogoStingerOverlay = useCallback(
+    (
+      ctx: CanvasRenderingContext2D,
+      width: number,
+      height: number,
+      progress: number
+    ) => {
+      // progress goes from 0 -> 1 over ~850ms
+      // Smooth ease-in-out
+      const ease =
+        progress < 0.5
+          ? 2 * progress * progress
+          : 1 - Math.pow(-2 * progress + 2, 2) / 2;
+
+      const slant = 220;
+      const totalSpan = width + slant * 2 + 400;
+      // Sweep from left (-totalSpan/2) across center (0) to right (+totalSpan/2)
+      const centerOffset = (ease - 0.5) * totalSpan;
+
+      ctx.save();
+
+      // Secondary Crimson & Gold Leading/Trailing Ribbons
+      const drawAngledBand = (
+        offsetX: number,
+        bandWidth: number,
+        color: string
+      ) => {
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.moveTo(offsetX - bandWidth / 2 + slant, 0);
+        ctx.lineTo(offsetX + bandWidth / 2 + slant, 0);
+        ctx.lineTo(offsetX + bandWidth / 2 - slant, height);
+        ctx.lineTo(offsetX - bandWidth / 2 - slant, height);
+        ctx.closePath();
+        ctx.fill();
+      };
+
+      const midX = width / 2 + centerOffset;
+      drawAngledBand(midX - 520, 260, "#e11d48");
+      drawAngledBand(midX + 520, 260, "#f59e0b");
+      drawAngledBand(midX, width + 320, "#0b172a");
+
+      // Subtle inner diagonal accent lines
+      ctx.strokeStyle = "rgba(56, 189, 248, 0.25)";
+      ctx.lineWidth = 6;
+      ctx.beginPath();
+      ctx.moveTo(midX - 380 + slant, 0);
+      ctx.lineTo(midX - 380 - slant, height);
+      ctx.moveTo(midX + 380 + slant, 0);
+      ctx.lineTo(midX + 380 - slant, height);
+      ctx.stroke();
+
+      // Center Logo Medallion (scales up in the middle of the transition)
+      const logoVisibility = Math.max(
+        0,
+        1 - Math.abs(progress - 0.5) * 2.5
+      );
+      if (logoVisibility > 0.02) {
+        const scale = 0.75 + 0.35 * Math.sin(logoVisibility * Math.PI);
+        const logoSize = Math.round(250 * scale);
+        const cx = width / 2;
+        const cy = height / 2;
+
+        ctx.save();
+        ctx.globalAlpha = Math.min(1, logoVisibility * 1.35);
+
+        // Glowing backdrop circle
+        ctx.shadowColor = "rgba(225, 29, 72, 0.65)";
+        ctx.shadowBlur = 45;
+        ctx.fillStyle = "#0f172a";
+        ctx.beginPath();
+        ctx.arc(cx, cy, logoSize / 2 + 24, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.lineWidth = 5;
+        ctx.strokeStyle = "#f59e0b";
+        ctx.stroke();
+        ctx.shadowColor = "transparent";
+
+        const logoImg = transitionLogoImgRef.current;
+        if (logoImg && logoImg.complete && logoImg.naturalWidth > 0) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(cx, cy, logoSize / 2 + 8, 0, Math.PI * 2);
+          ctx.clip();
+          const aspect = logoImg.naturalWidth / logoImg.naturalHeight;
+          let dw = logoSize;
+          let dh = logoSize;
+          if (aspect > 1) {
+            dh = logoSize / aspect;
+          } else {
+            dw = logoSize * aspect;
+          }
+          ctx.drawImage(logoImg, cx - dw / 2, cy - dh / 2, dw, dh);
+          ctx.restore();
+        } else {
+          // Fallback League / Box Score Broadcast Emblem
+          ctx.fillStyle = "#ffffff";
+          ctx.font = "900 42px 'Inter', sans-serif";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(
+            (activeLeague?.name || "BOX SCORE").slice(0, 12).toUpperCase(),
+            cx,
+            cy - 8
+          );
+          ctx.fillStyle = "#f59e0b";
+          ctx.font = "800 18px 'Inter', sans-serif";
+          ctx.fillText("OFFICIAL BROADCAST", cx, cy + 34);
+        }
+
+        ctx.restore();
+      }
+
+      ctx.restore();
+    },
+    [activeLeague?.name]
   );
 
   // Dual-Monitor Continuous Render Loop (Left = Preview Canvas, Right = Live Program Canvas)
@@ -2062,6 +2501,22 @@ function LiveBroadcastStudioContent() {
             true,
             nowMs
           );
+
+          // Check if Logo Stinger Wipe Transition is active
+          const stinger = stingerStateRef.current;
+          if (stinger.active) {
+            const elapsed = nowMs - stinger.startMs;
+            const progress = Math.min(1, Math.max(0, elapsed / stinger.durationMs));
+            if (progress >= 0.48 && !stinger.switchedScene) {
+              stinger.switchedScene = true;
+              setLiveSceneId(stinger.targetSceneId);
+            }
+            drawLogoStingerOverlay(lCtx, lCanvas.width, lCanvas.height, progress);
+            if (progress >= 1) {
+              stinger.active = false;
+              setIsTransitioning(false);
+            }
+          }
         }
       }
 
@@ -2073,11 +2528,28 @@ function LiveBroadcastStudioContent() {
       isRunning = false;
       cancelAnimationFrame(rafId);
     };
-  }, [previewScene, liveScene, showOverlayInPreview, renderSceneToCanvas]);
+  }, [
+    previewScene,
+    liveScene,
+    showOverlayInPreview,
+    renderSceneToCanvas,
+    drawLogoStingerOverlay,
+  ]);
 
-  // OBS Transition Actions: CUT & FADE
+  // OBS Transition Actions: CUT, FADE & LOGO WIPE STINGER
   const handleCutToLive = () => {
     setLiveSceneId(previewSceneId);
+  };
+
+  const handleLogoTransitionToLive = () => {
+    stingerStateRef.current = {
+      active: true,
+      startMs: performance.now(),
+      durationMs: 850,
+      switchedScene: false,
+      targetSceneId: previewSceneId,
+    };
+    setIsTransitioning(true);
   };
 
   const handleFadeToLive = () => {
@@ -2295,7 +2767,15 @@ function LiveBroadcastStudioContent() {
 
     try {
       const canvasStream = lCanvas.captureStream(30);
-      // Attach any active microphone/audio tracks
+      // Attach Web Audio API Master Mixer tracks (Microphones + BGM/SFX audio files)
+      if (masterAudioDestRef.current) {
+        masterAudioDestRef.current.stream.getAudioTracks().forEach((track) => {
+          try {
+            canvasStream.addTrack(track);
+          } catch {}
+        });
+      }
+      // Attach any direct camera/microphone audio tracks as fallback
       Object.values(streamBySlotRef.current).forEach((st) => {
         st.getAudioTracks().forEach((track) => {
           try {
@@ -3518,8 +3998,8 @@ function LiveBroadcastStudioContent() {
           </div>
         </div>
 
-        {/* CENTER COLUMN: OBS STUDIO MODE TRANSITION BAR */}
-        <div className="lg:col-span-1 flex lg:flex-col items-center justify-center gap-2 p-2 rounded-xl border border-slate-800 bg-[#131926]">
+        {/* CENTER COLUMN: OBS STUDIO MODE TRANSITION BAR (WITH LOGO WIPE & UPLOAD) */}
+        <div className="lg:col-span-1 flex flex-wrap lg:flex-col items-center justify-center gap-2 p-2 rounded-xl border border-slate-800 bg-[#131926]">
           <span className="hidden lg:block text-[0.62rem] font-black uppercase tracking-widest text-slate-400 text-center">
             Transition
           </span>
@@ -3527,36 +4007,78 @@ function LiveBroadcastStudioContent() {
           <button
             type="button"
             onClick={handleCutToLive}
-            className="w-full rounded-xl bg-rose-600 hover:bg-rose-500 px-3 py-3 text-xs font-black uppercase tracking-wider text-white shadow-md transition-all cursor-pointer flex flex-col items-center gap-1"
+            className="w-full rounded-xl bg-rose-600 hover:bg-rose-500 px-2.5 py-2.5 text-xs font-black uppercase tracking-wider text-white shadow-md transition-all cursor-pointer flex flex-col items-center gap-0.5"
             title="Instant Cut from Left Preview to Right Live Output"
           >
             <span className="flex items-center gap-1">
               <span>CUT</span>
               <ArrowRight className="h-3.5 w-3.5" />
             </span>
-            <span className="text-[0.58rem] font-bold text-rose-200">Instant</span>
+            <span className="text-[0.55rem] font-bold text-rose-200">Instant</span>
           </button>
+
+          {/* LOGO STINGER WIPE TRANSITION */}
+          <button
+            type="button"
+            onClick={handleLogoTransitionToLive}
+            className="w-full rounded-xl bg-gradient-to-r from-indigo-600 to-sky-600 hover:from-indigo-500 hover:to-sky-500 border border-sky-400/40 px-2.5 py-2.5 text-xs font-black uppercase tracking-wider text-white shadow-md transition-all cursor-pointer flex flex-col items-center gap-0.5"
+            title="Broadcast Logo Wipe Transition using your League or Uploaded Logo"
+          >
+            <span className="flex items-center gap-1">
+              <Sparkles className="h-3.5 w-3.5 text-amber-300" />
+              <span>LOGO</span>
+            </span>
+            <span className="text-[0.55rem] font-bold text-sky-100">Logo Wipe</span>
+          </button>
+
+          {/* UPLOAD TRANSITION LOGO (E.G. LEAGUE LOGO) */}
+          <div className="w-full rounded-xl border border-slate-700/80 bg-slate-900/90 p-1.5 flex flex-col items-center gap-1">
+            {effectiveTransitionLogoUrl ? (
+              <img
+                src={effectiveTransitionLogoUrl}
+                alt="Transition Logo"
+                className="h-7 w-7 rounded-full object-cover border border-amber-400/60"
+              />
+            ) : (
+              <span className="text-[0.52rem] font-bold text-slate-400 text-center">
+                No Logo
+              </span>
+            )}
+            <label
+              className="w-full rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 py-1 px-1.5 text-[0.55rem] font-black uppercase text-amber-300 text-center cursor-pointer flex items-center justify-center gap-1"
+              title="Upload League Logo or Custom Stinger Logo for Transitions"
+            >
+              <Upload className="h-2.5 w-2.5 shrink-0" />
+              <span>Logo</span>
+              <input
+                type="file"
+                accept="image/*"
+                onChange={handleUploadTransitionLogo}
+                className="hidden"
+              />
+            </label>
+          </div>
 
           <button
             type="button"
             onClick={handleFadeToLive}
-            className="w-full rounded-xl bg-amber-500 hover:bg-amber-400 px-3 py-3 text-xs font-black uppercase tracking-wider text-slate-950 shadow-md transition-all cursor-pointer flex flex-col items-center gap-1"
+            className="w-full rounded-xl bg-amber-500 hover:bg-amber-400 px-2.5 py-2 text-xs font-black uppercase tracking-wider text-slate-950 shadow-md transition-all cursor-pointer flex flex-col items-center gap-0.5"
             title="Smooth 300ms Fade from Preview to Live"
           >
             <span className="flex items-center gap-1">
               <span>FADE</span>
               <ArrowRight className="h-3.5 w-3.5" />
             </span>
-            <span className="text-[0.58rem] font-bold text-slate-800">300ms</span>
+            <span className="text-[0.55rem] font-bold text-slate-800">300ms</span>
           </button>
 
           <button
             type="button"
             onClick={handleSwapPreviewAndLive}
-            className="w-full rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 px-2.5 py-2 text-[0.68rem] font-black uppercase text-slate-200 cursor-pointer flex items-center justify-center gap-1"
+            className="w-full rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 px-2.5 py-1.5 text-[0.65rem] font-black uppercase text-slate-200 cursor-pointer flex items-center justify-center gap-1"
             title="Swap Preview and Live Scenes"
           >
-            <ArrowLeftRight className="h-3.5 w-3.5 text-sky-400" />
+            <ArrowLeftRight className="h-3 w-3 text-sky-400" />
             <span>Swap</span>
           </button>
         </div>
@@ -4786,12 +5308,14 @@ function LiveBroadcastStudioContent() {
           </div>
         </div>
 
-        {/* DOCK 2: MULTI-CAMERA SOURCES & LAYOUT (For Selected Preview Scene) */}
+        {/* DOCK 2: MULTI-CAMERA SOURCES, LAYOUT & AUDIO MIXER */}
         <div className="flex flex-col rounded-xl border border-slate-800 bg-[#131926] overflow-hidden">
           <div className="px-3 py-2 bg-slate-900 border-b border-slate-800 flex items-center justify-between gap-1.5">
             <span className="text-xs font-black uppercase tracking-wider text-white flex items-center gap-1.5 truncate">
               <Camera className="h-3.5 w-3.5 text-sky-400 shrink-0" />
-              <span>2. Scene Sources ({previewScene?.cameras.length || (previewScene?.mediaConfig ? 1 : 0)})</span>
+              <span>
+                2. Sources ({previewScene?.cameras.length || (previewScene?.mediaConfig ? 1 : 0)} Cam • {audioSources.length} Audio)
+              </span>
             </span>
             {previewScene?.kind === "camera_scene" && (
               <div className="flex items-center gap-1 shrink-0">
@@ -4816,7 +5340,7 @@ function LiveBroadcastStudioContent() {
             )}
           </div>
 
-          <div className="p-2.5 flex-1 space-y-2.5 overflow-y-auto max-h-80">
+          <div className="p-2.5 flex-1 space-y-2.5 overflow-y-auto max-h-96">
             {previewScene?.kind === "replay_scene" ? (
               <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 space-y-2 text-xs">
                 <p className="font-black text-amber-300 uppercase">
@@ -4850,6 +5374,10 @@ function LiveBroadcastStudioContent() {
                   <span className="rounded bg-slate-800 px-2 py-0.5 text-[0.6rem] font-bold text-slate-300 truncate max-w-[140px]">
                     {previewScene.mediaConfig?.fileName}
                   </span>
+                </div>
+
+                <div className="rounded-lg bg-amber-950/40 border border-amber-500/30 px-2.5 py-1.5 text-[0.62rem] font-bold text-amber-200">
+                  ℹ️ Scorebug &amp; Player Stats overlays are automatically hidden while a Picture or Video scene is active.
                 </div>
 
                 {previewScene.kind === "picture_scene" && (
@@ -5151,6 +5679,204 @@ function LiveBroadcastStudioContent() {
                 )}
               </>
             )}
+
+            {/* AUDIO SOURCES & MIXER PANEL */}
+            <div className="pt-2.5 border-t border-slate-800 space-y-2">
+              <div className="flex items-center justify-between gap-1.5">
+                <span className="text-[0.65rem] font-black uppercase tracking-wider text-emerald-400 flex items-center gap-1">
+                  <Mic className="h-3.5 w-3.5" />
+                  Audio Mixer ({audioSources.length})
+                </span>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={handleAddMicAudioSource}
+                    className="inline-flex items-center gap-1 rounded-lg bg-emerald-600/25 hover:bg-emerald-600/40 border border-emerald-500/40 px-2 py-0.5 text-[0.58rem] font-black uppercase text-emerald-300 cursor-pointer"
+                    title="Add Microphone / Line-In Audio Source"
+                  >
+                    <Mic className="h-2.5 w-2.5" />
+                    <span>+ Mic</span>
+                  </button>
+                  <label
+                    className="inline-flex items-center gap-1 rounded-lg bg-purple-600/25 hover:bg-purple-600/40 border border-purple-500/40 px-2 py-0.5 text-[0.58rem] font-black uppercase text-purple-300 cursor-pointer"
+                    title="Upload Audio File / BGM / Stinger Sound (.mp3, .wav, .ogg)"
+                  >
+                    <Music className="h-2.5 w-2.5" />
+                    <span>+ Audio File</span>
+                    <input
+                      type="file"
+                      accept="audio/*"
+                      onChange={handleAddFileAudioSource}
+                      className="hidden"
+                    />
+                  </label>
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                {audioSources.map((src) => {
+                  const level = audioLevelsById[src.id] ?? 0;
+                  const levelPct = Math.round(Math.min(100, level * 100));
+                  return (
+                    <div
+                      key={src.id}
+                      className="rounded-xl border border-slate-800 bg-slate-900/95 p-2 space-y-1.5"
+                    >
+                      <div className="flex items-center justify-between gap-1.5">
+                        <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                          {src.kind === "mic_input" ? (
+                            <Mic className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
+                          ) : (
+                            <Music className="h-3.5 w-3.5 text-purple-400 shrink-0" />
+                          )}
+                          <input
+                            type="text"
+                            value={src.name}
+                            onChange={(e) =>
+                              handleUpdateAudioSource(src.id, {
+                                name: e.target.value,
+                              })
+                            }
+                            className="bg-transparent text-[0.68rem] font-black text-white focus:outline-none border-b border-transparent focus:border-emerald-400 truncate w-full"
+                          />
+                        </div>
+
+                        <div className="flex items-center gap-1 shrink-0">
+                          {!src.isActive ? (
+                            <button
+                              type="button"
+                              onClick={() => startAudioSource(src)}
+                              className="rounded bg-emerald-600 hover:bg-emerald-500 px-2 py-0.5 text-[0.58rem] font-black uppercase text-white cursor-pointer"
+                            >
+                              {src.kind === "audio_file" ? "Play" : "Activate"}
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => stopAudioSource(src.id)}
+                              className="rounded bg-slate-700 hover:bg-slate-600 px-2 py-0.5 text-[0.58rem] font-black uppercase text-rose-300 cursor-pointer"
+                            >
+                              Stop
+                            </button>
+                          )}
+
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleUpdateAudioSource(src.id, {
+                                muted: !src.muted,
+                              })
+                            }
+                            className={`p-1 rounded border cursor-pointer ${
+                              src.muted
+                                ? "bg-rose-600/30 border-rose-500/60 text-rose-300"
+                                : "bg-slate-800 border-slate-700 text-emerald-400"
+                            }`}
+                            title={src.muted ? "Unmute Audio" : "Mute Audio"}
+                          >
+                            {src.muted ? (
+                              <VolumeX className="h-3 w-3" />
+                            ) : (
+                              <Volume2 className="h-3 w-3" />
+                            )}
+                          </button>
+
+                          {audioSources.length > 1 && (
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveAudioSource(src.id)}
+                              className="p-1 text-slate-500 hover:text-rose-400 cursor-pointer"
+                              title="Remove audio source"
+                            >
+                              <Trash2 className="h-3 w-3" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {src.kind === "mic_input" ? (
+                        <select
+                          value={src.deviceId || ""}
+                          onChange={(e) => {
+                            const nextDeviceId = e.target.value;
+                            handleUpdateAudioSource(src.id, {
+                              deviceId: nextDeviceId,
+                            });
+                            if (src.isActive) {
+                              startAudioSource({
+                                ...src,
+                                deviceId: nextDeviceId,
+                              });
+                            }
+                          }}
+                          className="w-full rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-[0.62rem] font-bold text-slate-200"
+                        >
+                          <option value="">Default Microphone / Audio Input</option>
+                          {audioDevices.map((d, i) => (
+                            <option key={d.deviceId || i} value={d.deviceId}>
+                              {d.label || `Microphone #${i + 1}`}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <div className="flex items-center justify-between text-[0.6rem] text-slate-400">
+                          <span className="truncate max-w-[150px]">
+                            🎵 {src.fileName || "Audio Track"}
+                          </span>
+                          <label className="inline-flex items-center gap-1 font-bold text-slate-300 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={Boolean(src.loop)}
+                              onChange={(e) =>
+                                handleUpdateAudioSource(src.id, {
+                                  loop: e.target.checked,
+                                })
+                              }
+                              className="h-3 w-3 rounded accent-purple-500"
+                            />
+                            <span>Loop</span>
+                          </label>
+                        </div>
+                      )}
+
+                      {/* Volume Slider + Live VU Meter */}
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <span className="text-[0.58rem] font-mono font-bold text-slate-400 w-9">
+                            {Math.round(src.volume * 100)}%
+                          </span>
+                          <input
+                            type="range"
+                            min={0}
+                            max={1.5}
+                            step={0.05}
+                            value={src.volume}
+                            onChange={(e) =>
+                              handleUpdateAudioSource(src.id, {
+                                volume: Number(e.target.value),
+                              })
+                            }
+                            className="flex-1 h-1.5 accent-emerald-500 cursor-pointer"
+                          />
+                        </div>
+                        <div className="h-1.5 w-full rounded-full bg-slate-950 overflow-hidden border border-slate-800">
+                          <div
+                            className={`h-full transition-all duration-75 ${
+                              levelPct > 85
+                                ? "bg-rose-500"
+                                : levelPct > 60
+                                  ? "bg-amber-400"
+                                  : "bg-emerald-500"
+                            }`}
+                            style={{ width: `${src.muted ? 0 : levelPct}%` }}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
           </div>
         </div>
 
@@ -5163,7 +5889,7 @@ function LiveBroadcastStudioContent() {
             </span>
           </div>
 
-          <div className="p-3 space-y-3 text-xs">
+          <div className="p-3 space-y-3 text-xs overflow-y-auto max-h-96">
             <div className="space-y-1">
               <label className="text-[0.65rem] font-black uppercase text-slate-400">
                 Scoreboard Position (with Team Logos):
@@ -5205,7 +5931,7 @@ function LiveBroadcastStudioContent() {
               </div>
             </div>
 
-            {/* Active Team Logos & Scorebug Initials/First-Word Preview Strip */}
+            {/* Active Team Logos & Scorebug Initials/First-Word Preview + Quick Initials Editor */}
             <div className="rounded-lg border border-slate-800 bg-slate-900/90 px-2.5 py-2 space-y-2">
               <div className="flex items-center justify-between gap-2">
                 <div className="flex items-center gap-1.5 min-w-0">
@@ -5225,7 +5951,7 @@ function LiveBroadcastStudioContent() {
                   </span>
                 </div>
                 <span className="text-[0.56rem] font-black text-emerald-400 uppercase shrink-0">
-                  Initials / 1st Name
+                  Scorebug Initials
                 </span>
                 <div className="flex items-center gap-1.5 min-w-0">
                   <span className="text-[0.65rem] font-black text-slate-100 truncate">
@@ -5244,6 +5970,52 @@ function LiveBroadcastStudioContent() {
                   )}
                 </div>
               </div>
+
+              {/* Inline Edit Team Initials (Away & Home) */}
+              {(awayTeam || homeTeam) && (
+                <div className="grid grid-cols-2 gap-1.5 pt-1 border-t border-slate-800/80">
+                  <div className="space-y-0.5">
+                    <label className="block text-[0.55rem] font-bold uppercase text-slate-400 truncate">
+                      Away Initials ({awayTeam?.name || "Away"}):
+                    </label>
+                    <input
+                      type="text"
+                      maxLength={6}
+                      value={awayTeam?.initials || ""}
+                      disabled={!awayTeam}
+                      onChange={(e) => {
+                        if (!awayTeam) return;
+                        void updateTeamInLeague(awayTeam.id, {
+                          ...awayTeam,
+                          initials: e.target.value.toUpperCase(),
+                        });
+                      }}
+                      placeholder={getScorebugTeamDisplay({ name: awayTeam?.name }, "AWAY")}
+                      className="w-full rounded border border-slate-700 bg-slate-950 px-2 py-1 text-[0.65rem] font-black uppercase tracking-wider text-white focus:outline-none focus:border-emerald-500"
+                    />
+                  </div>
+                  <div className="space-y-0.5">
+                    <label className="block text-[0.55rem] font-bold uppercase text-slate-400 truncate">
+                      Home Initials ({homeTeam?.name || "Home"}):
+                    </label>
+                    <input
+                      type="text"
+                      maxLength={6}
+                      value={homeTeam?.initials || ""}
+                      disabled={!homeTeam}
+                      onChange={(e) => {
+                        if (!homeTeam) return;
+                        void updateTeamInLeague(homeTeam.id, {
+                          ...homeTeam,
+                          initials: e.target.value.toUpperCase(),
+                        });
+                      }}
+                      placeholder={getScorebugTeamDisplay({ name: homeTeam?.name }, "HOME")}
+                      className="w-full rounded border border-slate-700 bg-slate-950 px-2 py-1 text-[0.65rem] font-black uppercase tracking-wider text-white focus:outline-none focus:border-emerald-500"
+                    />
+                  </div>
+                </div>
+              )}
 
               {/* Timeout & Penalty Controls for Scorebug */}
               <div className="grid grid-cols-2 gap-1.5 pt-1.5 border-t border-slate-800/80 text-[0.6rem]">
@@ -5326,6 +6098,59 @@ function LiveBroadcastStudioContent() {
                     {isHomeInPenalty ? "● PENALTY ON" : "Penalty Off"}
                   </button>
                 </div>
+              </div>
+            </div>
+
+            {/* Transition Stinger Logo Upload & Test Control */}
+            <div className="rounded-lg border border-amber-500/30 bg-amber-950/15 p-2.5 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[0.65rem] font-black uppercase text-amber-300">
+                  ✨ Transition Effect Logo (League / Custom)
+                </span>
+                {effectiveTransitionLogoUrl && (
+                  <img
+                    src={effectiveTransitionLogoUrl}
+                    alt="Transition Logo"
+                    className="h-6 w-6 rounded-full object-contain bg-slate-900 border border-amber-400/50 p-0.5"
+                  />
+                )}
+              </div>
+              <div className="flex items-center gap-1.5">
+                <label className="flex-1 inline-flex items-center justify-center gap-1 rounded-lg border border-amber-500/40 bg-amber-500/20 hover:bg-amber-500/30 px-2.5 py-1.5 text-[0.62rem] font-black uppercase text-amber-200 cursor-pointer">
+                  <span>Upload Transition Logo</span>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={handleUploadTransitionLogo}
+                    className="hidden"
+                  />
+                </label>
+                {customTransitionLogoUrl && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCustomTransitionLogoUrl("");
+                      try {
+                        window.localStorage.removeItem(
+                          "boxscore_studio_transition_logo"
+                        );
+                      } catch {
+                        // ignore
+                      }
+                    }}
+                    className="rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 px-2 py-1.5 text-[0.6rem] font-bold text-slate-300 cursor-pointer"
+                    title="Reset to League Logo"
+                  >
+                    Use League Logo
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={handleLogoTransitionToLive}
+                  className="rounded-lg bg-amber-500 hover:bg-amber-400 px-2.5 py-1.5 text-[0.62rem] font-black uppercase text-slate-950 cursor-pointer"
+                >
+                  Test Wipe
+                </button>
               </div>
             </div>
 
