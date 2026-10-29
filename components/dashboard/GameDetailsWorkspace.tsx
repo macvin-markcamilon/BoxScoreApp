@@ -2,6 +2,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
+  ArrowLeft,
   Award,
   BarChart2,
   BarChart3,
@@ -1089,7 +1090,18 @@ export function GameDetailsWorkspace({
       <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-xs">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2 mb-2">
+              {onSwitchTab && (
+                <button
+                  type="button"
+                  onClick={() => onSwitchTab("schedule")}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-slate-50 px-2.5 py-1 text-xs font-black uppercase text-slate-700 hover:bg-slate-100 hover:text-slate-900 transition-colors cursor-pointer shadow-2xs"
+                  title="Return to Schedule"
+                >
+                  <ArrowLeft className="h-3.5 w-3.5 text-[#8B0D0E]" />
+                  <span>Back to Schedule</span>
+                </button>
+              )}
               <span
                 className="rounded-md px-2.5 py-0.5 text-xs font-black uppercase tracking-wider text-white"
                 style={{ backgroundColor: "#0B2F5C" }}

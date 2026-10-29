@@ -1,12 +1,13 @@
 "use client";
 
-import React, { useEffect } from "react";
+import React, { useEffect, useState } from "react";
 import { AuthScreens } from "@/components/auth/AuthScreens";
 import { BoxScoreLogo } from "@/components/brand/BoxScoreLogo";
 import { AppDashboardBlank } from "@/components/dashboard/AppDashboardBlank";
 import { LeagueDashboard } from "@/components/dashboard/LeagueDashboard";
 import { UserProfileWorkspace } from "@/components/profile/UserProfileWorkspace";
-import { TopNavigation } from "@/components/layout/TopNavigation";
+import { AppSidebar } from "@/components/layout/AppSidebar";
+import { TopHeaderBar } from "@/components/layout/TopHeaderBar";
 import { supabase } from "@/lib/supabase-client";
 import { useBoxScoreStore } from "@/stores/useBoxScoreStore";
 
@@ -19,6 +20,8 @@ export default function HomePage() {
     refreshProfileFromSession,
     setupRealtimeSubscriptions,
   } = useBoxScoreStore();
+
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   useEffect(() => {
     initializeSession();
@@ -70,33 +73,45 @@ export default function HomePage() {
   }
 
   return (
-    <div className="flex min-h-screen flex-col bg-slate-50">
-      <TopNavigation />
+    <div className="flex min-h-screen bg-slate-50 text-slate-900">
+      {/* 1. Dedicated Left-Hand Navigation Sidebar */}
+      <AppSidebar
+        isMobileOpen={isMobileMenuOpen}
+        setIsMobileOpen={setIsMobileMenuOpen}
+      />
 
-      <main className="flex-1">
-        {activeSection === "dashboard" ? (
-          <AppDashboardBlank />
-        ) : activeSection === "profile" ? (
-          <UserProfileWorkspace />
-        ) : (
-          <LeagueDashboard />
-        )}
-      </main>
+      {/* 2. Main Content Layout (Responsive Margin to accommodate Desktop Sidebar) */}
+      <div className="flex flex-1 flex-col transition-all duration-300 lg:pl-72 min-w-0">
+        {/* Dynamic Top Header Bar with Context & Back Buttons */}
+        <TopHeaderBar onOpenMobileMenu={() => setIsMobileMenuOpen(true)} />
 
-      <footer className="border-t border-slate-200 bg-white py-4 px-4 sm:px-6 text-xs text-slate-500">
-        <div className="mx-auto flex max-w-[1440px] flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <BoxScoreLogo size="sm" />
-            <span className="font-semibold text-slate-600">
-              Basketball League Management Platform • Connected to Supabase
-            </span>
+        {/* Content Area */}
+        <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-[1600px] w-full mx-auto">
+          {activeSection === "dashboard" ? (
+            <AppDashboardBlank />
+          ) : activeSection === "profile" ? (
+            <UserProfileWorkspace />
+          ) : (
+            <LeagueDashboard />
+          )}
+        </main>
+
+        {/* Footer */}
+        <footer className="border-t border-slate-200 bg-white py-4 px-4 sm:px-6 text-xs text-slate-500">
+          <div className="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <BoxScoreLogo size="sm" />
+              <span className="font-semibold text-slate-600">
+                Basketball League Management Platform • Connected to Supabase
+              </span>
+            </div>
+            <div className="font-bold uppercase tracking-wider text-slate-500">
+              Signed in as {userProfile.firstName} {userProfile.lastName} (
+              {userProfile.email})
+            </div>
           </div>
-          <div className="font-bold uppercase tracking-wider text-slate-500">
-            Signed in as {userProfile.firstName} {userProfile.lastName} (
-            {userProfile.email})
-          </div>
-        </div>
-      </footer>
+        </footer>
+      </div>
     </div>
   );
 }

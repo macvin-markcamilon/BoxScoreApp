@@ -2,6 +2,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
+  ArrowLeft,
   ArrowLeftRight,
   Award,
   Bell,
@@ -2417,6 +2418,17 @@ export function LeagueGameManagement({
             </div>
             <div>
               <div className="flex flex-wrap items-center gap-2">
+                {onSwitchTab && (
+                  <button
+                    type="button"
+                    onClick={() => onSwitchTab("schedule")}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-slate-50 px-2.5 py-1 text-xs font-black uppercase text-slate-700 hover:bg-slate-100 hover:text-slate-900 transition-colors cursor-pointer shadow-2xs mr-1"
+                    title="Return to Schedule"
+                  >
+                    <ArrowLeft className="h-3.5 w-3.5 text-[#8B0D0E]" />
+                    <span>Back to Schedule</span>
+                  </button>
+                )}
                 <span className="rounded-md bg-[#0B2F5C] px-2 py-0.5 text-[0.65rem] font-black uppercase tracking-wider text-white">
                   Official Scorebook &amp; Committee Table Control
                 </span>

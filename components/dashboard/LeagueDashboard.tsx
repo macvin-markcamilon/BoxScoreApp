@@ -1591,10 +1591,11 @@ create policy "Auth teams delete" on public.teams for delete using (auth.uid() =
               <button
                 type="button"
                 onClick={() => setSelectedLeagueId(null)}
-                className="inline-flex items-center gap-1.5 text-xs font-black uppercase tracking-wider text-slate-200 hover:text-white cursor-pointer"
+                className="inline-flex items-center gap-2 rounded-xl bg-white/10 px-3 py-1.5 text-xs font-black uppercase tracking-wider text-white hover:bg-white/20 transition-all cursor-pointer border border-white/20 shadow-2xs"
+                title="Return to All Leagues list"
               >
-                <ArrowLeft className="h-4 w-4" aria-hidden="true" />
-                Back to All Leagues
+                <ArrowLeft className="h-4 w-4 text-amber-300" aria-hidden="true" />
+                <span>Back to All Leagues</span>
               </button>
 
               <div className="flex items-center gap-2">

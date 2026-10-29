@@ -299,16 +299,18 @@ export function UserProfileWorkspace() {
     <div className="mx-auto max-w-[1300px] px-4 py-8 sm:px-6">
       {/* Top Breadcrumb & Sign Out Header */}
       <div className="mb-6 flex flex-wrap items-center justify-between gap-4">
-        <div>
+        <div className="flex flex-col gap-2">
           <button
             type="button"
             onClick={() => setActiveSection("dashboard")}
-            className="text-xs font-bold text-slate-500 hover:text-slate-800 transition-colors uppercase tracking-wider cursor-pointer"
+            className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3.5 py-1.5 text-xs font-black uppercase tracking-wider text-slate-700 hover:bg-slate-50 hover:text-slate-900 transition-all cursor-pointer shadow-2xs w-fit"
+            title="Back to App Dashboard"
           >
-            ← Back to App Dashboard
+            <span className="text-[#8B0D0E] font-black text-sm">←</span>
+            <span>Back to App Dashboard</span>
           </button>
           <h1 className="text-2xl font-black uppercase tracking-tight text-slate-900 sm:text-3xl">
-            Account & Roster Profile
+            Account &amp; Roster Profile
           </h1>
         </div>
 
