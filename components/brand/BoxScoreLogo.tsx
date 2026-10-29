@@ -110,25 +110,6 @@ export function BoxScoreLogo({
           SCORE
         </span>
       </div>
-
-      {showTagline && (
-        <div className="hidden sm:flex flex-col">
-          <span
-            className={`text-xs font-bold uppercase tracking-widest leading-tight ${
-              variant === "dark-bg" ? "text-slate-100" : "text-slate-800"
-            }`}
-          >
-            FIBA-Grade Telemetry
-          </span>
-          <span
-            className={`text-[0.7rem] font-medium tracking-wider uppercase ${
-              variant === "dark-bg" ? "text-slate-300" : "text-slate-500"
-            }`}
-          >
-            League & Courtside Engine
-          </span>
-        </div>
-      )}
     </div>
   );
 }

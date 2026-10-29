@@ -22,6 +22,7 @@ export default function HomePage() {
   } = useBoxScoreStore();
 
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
 
   useEffect(() => {
     initializeSession();
@@ -78,10 +79,16 @@ export default function HomePage() {
       <AppSidebar
         isMobileOpen={isMobileMenuOpen}
         setIsMobileOpen={setIsMobileMenuOpen}
+        isCollapsed={isSidebarCollapsed}
+        setIsCollapsed={setIsSidebarCollapsed}
       />
 
-      {/* 2. Main Content Layout (Responsive Margin to accommodate Desktop Sidebar) */}
-      <div className="flex flex-1 flex-col transition-all duration-300 lg:pl-72 min-w-0">
+      {/* 2. Main Content Layout (Responsive Margin that adjusts when Sidebar is compressed/expanded) */}
+      <div
+        className={`flex flex-1 flex-col transition-all duration-300 min-w-0 ${
+          isSidebarCollapsed ? "lg:pl-20" : "lg:pl-72"
+        }`}
+      >
         {/* Dynamic Top Header Bar with Context & Back Buttons */}
         <TopHeaderBar onOpenMobileMenu={() => setIsMobileMenuOpen(true)} />
 

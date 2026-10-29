@@ -29,9 +29,16 @@ import { useBoxScoreStore } from "@/stores/useBoxScoreStore";
 interface AppSidebarProps {
   isMobileOpen: boolean;
   setIsMobileOpen: (open: boolean) => void;
+  isCollapsed?: boolean;
+  setIsCollapsed?: (collapsed: boolean) => void;
 }
 
-export function AppSidebar({ isMobileOpen, setIsMobileOpen }: AppSidebarProps) {
+export function AppSidebar({
+  isMobileOpen,
+  setIsMobileOpen,
+  isCollapsed: controlledCollapsed,
+  setIsCollapsed: setControlledCollapsed,
+}: AppSidebarProps) {
   const {
     userProfile,
     activeSection,
@@ -47,7 +54,9 @@ export function AppSidebar({ isMobileOpen, setIsMobileOpen }: AppSidebarProps) {
     declineLeagueRoleInvitation,
   } = useBoxScoreStore();
 
-  const [isCollapsed, setIsCollapsed] = useState(false);
+  const [internalCollapsed, setInternalCollapsed] = useState(false);
+  const isCollapsed = controlledCollapsed ?? internalCollapsed;
+  const setIsCollapsed = setControlledCollapsed ?? setInternalCollapsed;
   const [isNotifOpen, setIsNotifOpen] = useState(false);
   const [isLeaguesExpanded, setIsLeaguesExpanded] = useState(true);
   const notifDropdownRef = useRef<HTMLDivElement | null>(null);
@@ -129,7 +138,11 @@ export function AppSidebar({ isMobileOpen, setIsMobileOpen }: AppSidebarProps) {
         style={{ backgroundColor: "#0B2F5C" }}
       >
         {/* Header / Brand */}
-        <div className="flex h-20 items-center justify-between border-b border-white/10 px-4">
+        <div
+          className={`flex h-20 items-center justify-between border-b border-white/10 ${
+            isCollapsed ? "px-2 gap-1" : "px-4"
+          }`}
+        >
           {!isCollapsed ? (
             <button
               type="button"
@@ -141,7 +154,7 @@ export function AppSidebar({ isMobileOpen, setIsMobileOpen }: AppSidebarProps) {
               className="text-left focus:outline-none cursor-pointer overflow-hidden"
               title="Go to App Dashboard"
             >
-              <BoxScoreLogo size="sm" variant="dark-bg" showTagline />
+              <BoxScoreLogo size="sm" variant="dark-bg" />
             </button>
           ) : (
             <button
@@ -151,7 +164,7 @@ export function AppSidebar({ isMobileOpen, setIsMobileOpen }: AppSidebarProps) {
                 setActiveSection("dashboard");
                 setIsMobileOpen(false);
               }}
-              className="mx-auto flex h-10 w-10 items-center justify-center rounded-xl bg-[#8B0D0E] font-black text-white shadow-md cursor-pointer"
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[#8B0D0E] text-xs font-black text-white shadow-md cursor-pointer"
               title="Box Score App"
             >
               BS
@@ -162,7 +175,7 @@ export function AppSidebar({ isMobileOpen, setIsMobileOpen }: AppSidebarProps) {
           <button
             type="button"
             onClick={() => setIsCollapsed(!isCollapsed)}
-            className="hidden lg:flex h-8 w-8 items-center justify-center rounded-lg border border-white/15 bg-white/10 text-slate-300 hover:bg-white/20 hover:text-white transition-colors cursor-pointer"
+            className="hidden lg:flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/15 bg-white/10 text-slate-300 hover:bg-white/20 hover:text-white transition-colors cursor-pointer"
             title={isCollapsed ? "Expand Sidebar" : "Collapse Sidebar"}
           >
             {isCollapsed ? (
