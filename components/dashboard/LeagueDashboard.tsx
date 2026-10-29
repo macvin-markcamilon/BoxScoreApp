@@ -964,12 +964,13 @@ Derrick, White, 9, PG, false, `
   const handleImageFileSelect = async (
     e: React.ChangeEvent<HTMLInputElement>,
     setter: (dataUrl: string) => void | Promise<void>,
-    maxDim = 320
+    maxDim = 500,
+    forceSquare = true
   ) => {
     const file = e.target.files?.[0];
     if (!file) return;
     try {
-      const compressedDataUrl = await compressImageFile(file, maxDim, 0.84);
+      const compressedDataUrl = await compressImageFile(file, maxDim, 0.85, forceSquare);
       await setter(compressedDataUrl);
     } catch {
       const reader = new FileReader();

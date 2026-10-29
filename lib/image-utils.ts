@@ -16,8 +16,9 @@ import {
  */
 export async function compressImageFile(
   file: File,
-  maxDimension = 320,
-  quality = 0.82
+  maxDimension = 500,
+  quality = 0.85,
+  forceSquare = false
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -33,38 +34,53 @@ export async function compressImageFile(
       const img = new Image();
       img.onerror = () => resolve(rawDataUrl);
       img.onload = () => {
-        let width = img.naturalWidth || img.width || maxDimension;
-        let height = img.naturalHeight || img.height || maxDimension;
-
-        if (width > maxDimension || height > maxDimension) {
-          if (width >= height) {
-            height = Math.round((height * maxDimension) / width);
-            width = maxDimension;
-          } else {
-            width = Math.round((width * maxDimension) / height);
-            height = maxDimension;
-          }
-        }
+        const origWidth = img.naturalWidth || img.width;
+        const origHeight = img.naturalHeight || img.height;
 
         const canvas = document.createElement("canvas");
-        canvas.width = Math.max(1, width);
-        canvas.height = Math.max(1, height);
         const ctx = canvas.getContext("2d");
         if (!ctx) {
           resolve(rawDataUrl);
           return;
         }
 
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        if (forceSquare) {
+          // Crop center horizontally, top-aligned vertically to preserve face
+          const side = Math.min(origWidth, origHeight);
+          const srcX = Math.round((origWidth - side) / 2);
+          const srcY = 0;
+          const targetDim = Math.min(maxDimension, side);
 
-        // Try WebP first for smallest size + alpha transparency support, fallback to JPEG/PNG
+          canvas.width = targetDim;
+          canvas.height = targetDim;
+          ctx.drawImage(img, srcX, srcY, side, side, 0, 0, targetDim, targetDim);
+        } else {
+          let width = origWidth || maxDimension;
+          let height = origHeight || maxDimension;
+
+          if (width > maxDimension || height > maxDimension) {
+            if (width >= height) {
+              height = Math.round((height * maxDimension) / width);
+              width = maxDimension;
+            } else {
+              width = Math.round((width * maxDimension) / height);
+              height = maxDimension;
+            }
+          }
+
+          canvas.width = Math.max(1, width);
+          canvas.height = Math.max(1, height);
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        }
+
+        // Try WebP first for smallest size + alpha transparency support, fallback to PNG/JPEG
         let compressed = canvas.toDataURL("image/webp", quality);
         if (
           !compressed ||
           compressed === "data:," ||
           compressed.length > rawDataUrl.length
         ) {
-          compressed = canvas.toDataURL("image/jpeg", quality);
+          compressed = canvas.toDataURL("image/png");
         }
         resolve(compressed);
       };

@@ -1,8 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
+import sharp from "sharp";
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const targetUrl = searchParams.get("url");
+  const forceSquare =
+    searchParams.get("square") === "1" ||
+    searchParams.get("square") === "true" ||
+    (targetUrl && (targetUrl.includes("headshots") || targetUrl.includes("nba.com")));
 
   if (!targetUrl) {
     return new NextResponse("Missing url parameter", { status: 400 });
@@ -29,10 +34,27 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    const contentType = response.headers.get("content-type") || "image/png";
+    let contentType = response.headers.get("content-type") || "image/png";
     const arrayBuffer = await response.arrayBuffer();
+    let imageBuffer = Buffer.from(arrayBuffer);
 
-    return new NextResponse(arrayBuffer, {
+    // If requested or if it's an NBA/player headshot, standardize to 500x500 px (1:1 square aspect ratio)
+    if (forceSquare) {
+      try {
+        imageBuffer = await sharp(imageBuffer)
+          .resize(500, 500, {
+            fit: "cover",
+            position: "top",
+          })
+          .png({ quality: 90 })
+          .toBuffer();
+        contentType = "image/png";
+      } catch (sharpErr) {
+        console.warn("Failed to standardize image with sharp:", sharpErr);
+      }
+    }
+
+    return new NextResponse(imageBuffer as unknown as BodyInit, {
       headers: {
         "Content-Type": contentType,
         "Access-Control-Allow-Origin": "*",
@@ -44,3 +66,4 @@ export async function GET(req: NextRequest) {
     return new NextResponse(`Error proxying image: ${msg}`, { status: 500 });
   }
 }
+

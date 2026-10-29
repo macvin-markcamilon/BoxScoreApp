@@ -891,7 +891,7 @@ export function LeagueGameManagement({
     const file = e.target.files?.[0];
     if (!file) return;
     try {
-      const compressed = await compressImageFile(file, 320, 0.84);
+      const compressed = await compressImageFile(file, 500, 0.85, true);
       cb(compressed);
     } catch {
       // Ignore

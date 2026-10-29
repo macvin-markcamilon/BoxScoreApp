@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import { useBoxScoreStore } from "@/stores/useBoxScoreStore";
 import { PlayerPosition } from "@/types/boxscore";
+import { compressImageFile } from "@/lib/image-utils";
 
 const ALL_POSITIONS: PlayerPosition[] = ["PG", "SG", "SF", "PF", "C"];
 
@@ -67,19 +68,24 @@ export function UserProfileWorkspace() {
     .slice(0, 2)
     .toUpperCase();
 
-  const handleAvatarFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleAvatarFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        const result = event.target?.result as string;
-        if (result) {
-          setImageUrl(result);
-          // auto update profile with image
-          updateUserProfile({ imageUrl: result });
-        }
-      };
-      reader.readAsDataURL(file);
+      try {
+        const compressed = await compressImageFile(file, 500, 0.88, true);
+        setImageUrl(compressed);
+        updateUserProfile({ imageUrl: compressed });
+      } catch {
+        const reader = new FileReader();
+        reader.onload = (event) => {
+          const result = event.target?.result as string;
+          if (result) {
+            setImageUrl(result);
+            updateUserProfile({ imageUrl: result });
+          }
+        };
+        reader.readAsDataURL(file);
+      }
     }
   };
 

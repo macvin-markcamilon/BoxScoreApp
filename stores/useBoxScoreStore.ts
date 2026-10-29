@@ -928,7 +928,7 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
     try {
       const sessionRes = await withTimeout(
         supabase.auth.getSession(),
-        3500,
+        7000,
         { data: { session: null }, error: null } as Awaited<
           ReturnType<typeof supabase.auth.getSession>
         >
@@ -946,7 +946,7 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
                 .eq("id", session.user.id)
                 .maybeSingle()
             ),
-            2500,
+            5000,
             null
           );
 
@@ -991,7 +991,7 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
     try {
       const sessionRes = await withTimeout(
         supabase.auth.getSession(),
-        2500,
+        7000,
         { data: { session: null }, error: null } as Awaited<
           ReturnType<typeof supabase.auth.getSession>
         >
@@ -1003,12 +1003,20 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
 
       let dbProfileRow: Record<string, unknown> | null = null;
       try {
-        const { data: profData } = await supabase
-          .from("profiles")
-          .select("*")
-          .eq("id", sessionUser.id)
-          .maybeSingle();
-        dbProfileRow = (profData as Record<string, unknown>) ?? null;
+        const profRes = await withTimeout(
+          Promise.resolve(
+            supabase
+              .from("profiles")
+              .select("*")
+              .eq("id", sessionUser.id)
+              .maybeSingle()
+          ),
+          5000,
+          null
+        );
+        if (profRes && !profRes.error && profRes.data) {
+          dbProfileRow = profRes.data as Record<string, unknown>;
+        }
       } catch {
         // Ignore if table doesn't exist yet
       }
@@ -1203,7 +1211,8 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
   signOutUser: async () => {
     removeLocalCache(STORAGE_KEYS.PROFILE);
     try {
-      await supabase.auth.signOut();
+      // Use local scope so only THIS browser session signs out, without revoking sessions on other devices
+      await supabase.auth.signOut({ scope: "local" });
     } catch {
       // Ignore network error on sign out
     }

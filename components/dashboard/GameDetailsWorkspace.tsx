@@ -774,7 +774,7 @@ export function GameDetailsWorkspace({
       // If it's a remote http/https URL, route through /api/image-proxy?url=... to prevent CORS blocking!
       let effectiveSrc = src;
       if (src.startsWith("http://") || src.startsWith("https://")) {
-        effectiveSrc = `/api/image-proxy?url=${encodeURIComponent(src)}`;
+        effectiveSrc = `/api/image-proxy?url=${encodeURIComponent(src)}&square=1`;
       }
 
       const img = new Image();
@@ -967,15 +967,18 @@ export function GameDetailsWorkspace({
     const playerImg = await loadImageAsync(playerImgUrl);
 
     if (playerImg) {
-      // 1:1 square crop source parameters
+      // 1:1 square crop source parameters (aspect ratio = 1)
       const squareSide = Math.min(playerImg.width, playerImg.height);
       const srcX = Math.round((playerImg.width - squareSide) / 2);
-      const srcY = Math.round((playerImg.height - squareSide) / 2);
+      // Top-anchored crop (srcY = 0) ensures the face, head, and eyes are always preserved
+      const srcY = 0;
 
-      // Render size: 880x880 square
-      const destSize = 880;
+      // Render size: 820x820 square
+      // Standardized for 500x500 aspect ratio 1 headshots:
+      // Perfectly centers optical torso/face at X = 315px, anchored at the bottom edge
+      const destSize = 820;
       const drawX = Math.round(315 - destSize / 2); // Center of square is at X = 315px
-      const drawY = 1080 - destSize; // Anchored to bottom edge
+      const drawY = 1080 - destSize; // Anchored to bottom edge (260px)
 
       ctx.drawImage(
         playerImg,

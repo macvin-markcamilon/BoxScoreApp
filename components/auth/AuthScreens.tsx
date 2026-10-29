@@ -19,7 +19,7 @@ import {
   Users,
 } from "lucide-react";
 import { BoxScoreLogo } from "@/components/brand/BoxScoreLogo";
-import { supabase } from "@/lib/supabase-client";
+import { supabase, mapAuthUserToProfile } from "@/lib/supabase-client";
 import { useBoxScoreStore } from "@/stores/useBoxScoreStore";
 import { PlayerPosition, UserAccountRole } from "@/types/boxscore";
 
@@ -137,7 +137,11 @@ export function AuthScreens({ initialMode = "login" }: AuthScreensProps) {
       }
 
       if (data.session) {
-        await refreshProfileFromSession();
+        if (data.session.user) {
+          const immediateProfile = mapAuthUserToProfile(data.session.user);
+          useBoxScoreStore.setState({ userProfile: immediateProfile, isAuthLoading: false });
+        }
+        void refreshProfileFromSession();
         router.push("/");
         // If on the home page root, also trigger a router refresh or window navigation so the dashboard mounts
         if (typeof window !== "undefined" && (window.location.pathname === "/" || window.location.pathname === "")) {
@@ -227,7 +231,11 @@ export function AuthScreens({ initialMode = "login" }: AuthScreensProps) {
       }
 
       if (data.session) {
-        await refreshProfileFromSession();
+        if (data.session.user) {
+          const immediateProfile = mapAuthUserToProfile(data.session.user);
+          useBoxScoreStore.setState({ userProfile: immediateProfile, isAuthLoading: false });
+        }
+        void refreshProfileFromSession();
         router.push("/");
         // If on the home page root, also trigger a router refresh or window navigation so the dashboard mounts
         if (typeof window !== "undefined" && (window.location.pathname === "/" || window.location.pathname === "")) {
