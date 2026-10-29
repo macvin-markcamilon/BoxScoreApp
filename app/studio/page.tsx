@@ -10,10 +10,12 @@ import {
   Camera,
   Check,
   Circle,
+  Clock,
   Copy,
   Download,
   Film,
   Grid,
+  GripHorizontal,
   HardDrive,
   Layers,
   Layout,
@@ -25,20 +27,25 @@ import {
   RefreshCw,
   Repeat,
   Scissors,
+  Search,
   Settings,
   Sliders,
   Sparkles,
   Square,
+  Tag,
   Trash2,
   Tv,
   Video,
   Zap,
+  ZoomIn,
+  ZoomOut,
 } from "lucide-react";
 import { BoxScoreLogo } from "@/components/brand/BoxScoreLogo";
 import { useBoxScoreStore } from "@/stores/useBoxScoreStore";
 import {
   StoredGameVideo,
   TimelineFrame,
+  TimelineClockTag,
   saveVideoToIndexedDB,
   getAllStoredVideos,
   deleteStoredVideo,
@@ -268,7 +275,15 @@ function LiveBroadcastStudioContent() {
   const [selectedTimelineVideoId, setSelectedTimelineVideoId] = useState<string>("");
   const [timelinePlayheadSec, setTimelinePlayheadSec] = useState<number>(0);
   const [trimStartSec, setTrimStartSec] = useState<number>(0);
-  const [trimEndSec, setTrimEndSec] = useState<number>(8);
+  const [trimEndSec, setTrimEndSec] = useState<number>(10);
+  const [replayBoxDurationPreset, setReplayBoxDurationPreset] = useState<number>(10);
+  const [timelineZoomPxPerSec, setTimelineZoomPxPerSec] = useState<number>(64);
+  const [clockSearchQuery, setClockSearchQuery] = useState<string>("");
+  const [customTagInput, setCustomTagInput] = useState<string>("");
+  const [liveClockTags, setLiveClockTags] = useState<TimelineClockTag[]>([]);
+  const [activeDragMode, setActiveDragMode] = useState<
+    "playhead" | "box_move" | "box_left" | "box_right" | null
+  >(null);
   const [selectedReplaySpeed, setSelectedReplaySpeed] = useState<number>(0.5);
   const [replayClipLabel, setReplayClipLabel] = useState<string>("");
   const [timelineNotice, setTimelineNotice] = useState<string | null>(null);
@@ -299,7 +314,27 @@ function LiveBroadcastStudioContent() {
   const recordedChunksRef = useRef<Blob[]>([]);
   const recordIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const liveCaptureFramesRef = useRef<TimelineFrame[]>([]);
+  const liveClockTagsRef = useRef<TimelineClockTag[]>([]);
   const recordStartTimeRef = useRef<number>(0);
+
+  // Timeline Scroll, Zoom & Pointer-Capture Drag Refs
+  const timelineScrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const timelineTrackInnerRef = useRef<HTMLDivElement | null>(null);
+  const dragOffsetSecRef = useRef<number>(0);
+  const dragBoxWidthSecRef = useRef<number>(10);
+
+  // Live Game Clock & Score Refs for Real-Time Frame Tagging during Recording
+  const liveClockStateRef = useRef<{
+    period: number;
+    clockSeconds: number;
+    homeScore: number;
+    awayScore: number;
+  }>({
+    period: 1,
+    clockSeconds: 600,
+    homeScore: 0,
+    awayScore: 0,
+  });
 
   // RTMP WebCodecs Encoder Refs
   const rtmpSessionIdRef = useRef<string>(`rtmp-${generateUUID().slice(0, 8)}`);
@@ -442,6 +477,16 @@ function LiveBroadcastStudioContent() {
   useEffect(() => {
     refreshCameraDevices();
   }, [refreshCameraDevices]);
+
+  // Keep liveClockStateRef synced with current Game Clock & Score for real-time frame tagging
+  useEffect(() => {
+    liveClockStateRef.current = {
+      period,
+      clockSeconds,
+      homeScore,
+      awayScore,
+    };
+  }, [period, clockSeconds, homeScore, awayScore]);
 
   // Ensure hidden <video> element exists for each camera slot
   const getOrCreateSlotVideoElement = (slotId: string): HTMLVideoElement => {
@@ -1218,7 +1263,7 @@ function LiveBroadcastStudioContent() {
     );
   };
 
-  // Capture a small thumbnail from Live Canvas for the Bottom Camera Timeline
+  // Capture a small thumbnail + exact Game Clock & Score from Live Canvas for the Bottom Camera Timeline
   const captureLiveTimelineThumbnail = (sec: number): TimelineFrame | null => {
     const lCanvas = liveCanvasRef.current;
     if (!lCanvas) return null;
@@ -1229,9 +1274,16 @@ function LiveBroadcastStudioContent() {
       const tCtx = thumbCanvas.getContext("2d");
       if (!tCtx) return null;
       tCtx.drawImage(lCanvas, 0, 0, 160, 90);
+      const clk = liveClockStateRef.current;
+      const pLabel = getPeriodLabel(clk.period);
       return {
         timeSec: sec,
         dataUrl: thumbCanvas.toDataURL("image/jpeg", 0.6),
+        gameClockLabel: `${pLabel} ${formatClock(clk.clockSeconds)}`,
+        period: clk.period,
+        gameClockSeconds: clk.clockSeconds,
+        homeScore: clk.homeScore,
+        awayScore: clk.awayScore,
       };
     } catch {
       return null;
@@ -1270,6 +1322,18 @@ function LiveBroadcastStudioContent() {
       setLiveRecordingFrames([]);
       recordStartTimeRef.current = Date.now();
 
+      // Create initial Game Clock Tag at 0s so operator has a starting clock anchor
+      const initClk = liveClockStateRef.current;
+      const startTag: TimelineClockTag = {
+        id: `tag-${generateUUID().slice(0, 6)}`,
+        recTimeSec: 0,
+        gameClockLabel: `${getPeriodLabel(initClk.period)} ${formatClock(initClk.clockSeconds)}`,
+        scoreLabel: `${initClk.awayScore}-${initClk.homeScore}`,
+        label: "Rec Start",
+      };
+      liveClockTagsRef.current = [startTag];
+      setLiveClockTags([startTag]);
+
       // Take initial frame at 0s
       const firstFrame = captureLiveTimelineThumbnail(0);
       if (firstFrame) {
@@ -1291,6 +1355,7 @@ function LiveBroadcastStudioContent() {
         );
         const videoId = generateUUID();
         const frames = [...liveCaptureFramesRef.current];
+        const tags = [...liveClockTagsRef.current];
 
         const newVideo: StoredGameVideo = {
           id: videoId,
@@ -1304,6 +1369,7 @@ function LiveBroadcastStudioContent() {
           createdAt: new Date().toISOString(),
           thumbnailDataUrl: frames[0]?.dataUrl || "",
           timelineFrames: frames,
+          clockTags: tags,
           homeScore,
           awayScore,
           homeTeamName,
@@ -1342,13 +1408,16 @@ function LiveBroadcastStudioContent() {
         const updatedList = await getAllStoredVideos();
         setStoredVideos(updatedList);
         setSelectedTimelineVideoId(newVideo.id);
-        setTrimStartSec(Math.max(0, elapsedSec - 6));
+        // Default to a 10-second Replay Selection Box at the end of the recording!
+        const boxDur = Math.min(elapsedSec, replayBoxDurationPreset || 10);
+        const defaultStart = Math.max(0, elapsedSec - boxDur);
+        setTrimStartSec(defaultStart);
         setTrimEndSec(elapsedSec);
-        setTimelinePlayheadSec(Math.max(0, elapsedSec - 6));
+        setTimelinePlayheadSec(defaultStart);
         setIsRecording(false);
         setRecordSeconds(0);
         setTimelineNotice(
-          `✓ Saved ${elapsedSec}s recording to Camera Timeline! Select an In/Out range below to create a Replay Scene.`
+          `✓ Saved ${elapsedSec}s recording with Game Clock tags! Drag the 10s Replay Box or Playhead below to create a Replay Scene.`
         );
         setTimeout(() => setTimelineNotice(null), 6000);
       };
@@ -1365,6 +1434,11 @@ function LiveBroadcastStudioContent() {
           if (snap) {
             liveCaptureFramesRef.current = [...liveCaptureFramesRef.current, snap];
             setLiveRecordingFrames([...liveCaptureFramesRef.current]);
+          }
+          // Auto-scroll timeline track during live recording
+          if (timelineScrollContainerRef.current) {
+            timelineScrollContainerRef.current.scrollLeft =
+              timelineScrollContainerRef.current.scrollWidth;
           }
           return next;
         });
@@ -1685,6 +1759,43 @@ function LiveBroadcastStudioContent() {
     }
   };
 
+  const activeTimelineDuration = Math.max(
+    10,
+    isRecording ? Math.max(15, recordSeconds + 2) : selectedTimelineVideo?.durationSeconds || 20
+  );
+  const displayTimelineFrames = useMemo(
+    () => (isRecording ? liveRecordingFrames : selectedTimelineVideo?.timelineFrames || []),
+    [isRecording, liveRecordingFrames, selectedTimelineVideo]
+  );
+  const displayClockTags = useMemo(
+    () => (isRecording ? liveClockTags : selectedTimelineVideo?.clockTags || []),
+    [isRecording, liveClockTags, selectedTimelineVideo]
+  );
+
+  // Get exact Game Clock Tag (e.g. "Q2 08:42") at any recording second on the timeline
+  const getGameClockLabelAtSec = useCallback(
+    (sec: number): string => {
+      const rounded = Math.max(0, Math.round(sec));
+      if (displayTimelineFrames.length > 0) {
+        let best = displayTimelineFrames[0];
+        let bestDiff = Math.abs(best.timeSec - rounded);
+        for (const f of displayTimelineFrames) {
+          const diff = Math.abs(f.timeSec - rounded);
+          if (diff < bestDiff) {
+            best = f;
+            bestDiff = diff;
+          }
+        }
+        if (best?.gameClockLabel) {
+          return best.gameClockLabel;
+        }
+      }
+      const fallbackClock = Math.max(0, clockSeconds - rounded);
+      return `${getPeriodLabel(period)} ${formatClock(fallbackClock)}`;
+    },
+    [displayTimelineFrames, clockSeconds, period]
+  );
+
   // Create a Replay Scene from the selected Timeline In/Out range!
   const handleCreateReplaySceneFromTimeline = (pushImmediatelyToLive = false) => {
     if (!selectedTimelineVideo) {
@@ -1694,10 +1805,12 @@ function LiveBroadcastStudioContent() {
 
     const start = Math.max(0, Math.min(trimStartSec, trimEndSec - 0.5));
     const end = Math.max(start + 1, Math.min(trimEndSec, selectedTimelineVideo.durationSeconds || 60));
+    const startGameClock = getGameClockLabelAtSec(start);
+    const endGameClock = getGameClockLabelAtSec(end);
 
     const customTitle =
       replayClipLabel.trim() ||
-      `Replay (${formatClock(start)}-${formatClock(end)} @ ${selectedReplaySpeed}x)`;
+      `Replay [${startGameClock}] (${formatClock(start)}-${formatClock(end)} @ ${selectedReplaySpeed}x)`;
 
     const newReplayScene: StudioScene = {
       id: `scene-replay-${generateUUID().slice(0, 6)}`,
@@ -1722,20 +1835,266 @@ function LiveBroadcastStudioContent() {
     setReplayClipLabel("");
     setTimelineNotice(
       pushImmediatelyToLive
-        ? `⚡ Replay Scene "${customTitle}" created and pushed LIVE on Program!`
-        : `✓ Replay Scene "${customTitle}" added to Scenes & cued on Left Preview Monitor!`
+        ? `⚡ Replay Scene "${customTitle}" (${startGameClock} → ${endGameClock}) created and pushed LIVE!`
+        : `✓ Replay Scene "${customTitle}" (${startGameClock} → ${endGameClock}) added to Scenes & cued on Left Preview!`
     );
     setTimeout(() => setTimelineNotice(null), 5000);
   };
 
-  const handleScrubTimeline = (sec: number) => {
-    const maxDur = selectedTimelineVideo?.durationSeconds || 10;
-    const clamped = Math.max(0, Math.min(maxDur, sec));
-    setTimelinePlayheadSec(clamped);
-    if (timelineScrubVideoRef.current) {
-      timelineScrubVideoRef.current.currentTime = clamped;
+  const handleScrubTimeline = useCallback(
+    (sec: number) => {
+      const maxDur = isRecording
+        ? Math.max(10, recordSeconds)
+        : selectedTimelineVideo?.durationSeconds || 20;
+      const clamped = Math.max(0, Math.min(maxDur, Number(sec.toFixed(1))));
+      setTimelinePlayheadSec(clamped);
+      if (timelineScrubVideoRef.current && !isRecording) {
+        try {
+          timelineScrubVideoRef.current.currentTime = clamped;
+        } catch {}
+      }
+    },
+    [isRecording, recordSeconds, selectedTimelineVideo]
+  );
+
+  // Scroll horizontal timeline container so target second is visible & centered
+  const scrollTimelineToSec = useCallback(
+    (sec: number) => {
+      const container = timelineScrollContainerRef.current;
+      if (!container) return;
+      const targetPx = sec * timelineZoomPxPerSec;
+      const halfView = container.clientWidth / 2;
+      container.scrollTo({
+        left: Math.max(0, targetPx - halfView),
+        behavior: "smooth",
+      });
+    },
+    [timelineZoomPxPerSec]
+  );
+
+  // Snap the 10-second (or preset) Replay Selection Box around or ending at target second
+  const handleSnapBoxToSecond = useCallback(
+    (targetSec: number, boxDuration = replayBoxDurationPreset) => {
+      const maxDur = activeTimelineDuration;
+      const clampedTarget = Math.max(0, Math.min(maxDur, targetSec));
+      const half = boxDuration / 2;
+      let start = Math.max(0, clampedTarget - half);
+      let end = start + boxDuration;
+      if (end > maxDur) {
+        end = maxDur;
+        start = Math.max(0, end - boxDuration);
+      }
+      setTrimStartSec(Number(start.toFixed(1)));
+      setTrimEndSec(Number(end.toFixed(1)));
+      handleScrubTimeline(clampedTarget);
+      scrollTimelineToSec(clampedTarget);
+    },
+    [activeTimelineDuration, replayBoxDurationPreset, handleScrubTimeline, scrollTimelineToSec]
+  );
+
+  // Change Replay Selection Box Size Preset (e.g. 5s, 10s, 15s, 20s)
+  const handleSetReplayBoxPreset = (durationSec: number) => {
+    setReplayBoxDurationPreset(durationSec);
+    const maxDur = activeTimelineDuration;
+    let start = trimStartSec;
+    let end = start + durationSec;
+    if (end > maxDur) {
+      end = maxDur;
+      start = Math.max(0, end - durationSec);
+    }
+    setTrimStartSec(Number(start.toFixed(1)));
+    setTrimEndSec(Number(end.toFixed(1)));
+  };
+
+  // Tag a Play with the Game Clock on the Timeline (works both live during recording and on saved recordings)
+  const handleAddClockTag = async (presetLabel?: string) => {
+    const labelText = (presetLabel || customTagInput.trim() || "Key Play").trim();
+    const recSec = isRecording ? recordSeconds : Math.round(timelinePlayheadSec);
+    const gClock = isRecording
+      ? `${getPeriodLabel(period)} ${formatClock(clockSeconds)}`
+      : getGameClockLabelAtSec(recSec);
+    const sLabel = `${awayScore}-${homeScore}`;
+
+    const newTag: TimelineClockTag = {
+      id: `tag-${generateUUID().slice(0, 6)}`,
+      recTimeSec: recSec,
+      gameClockLabel: gClock,
+      scoreLabel: sLabel,
+      label: labelText,
+    };
+
+    if (isRecording) {
+      const nextTags = [...liveClockTagsRef.current, newTag];
+      liveClockTagsRef.current = nextTags;
+      setLiveClockTags(nextTags);
+      setCustomTagInput("");
+      setTimelineNotice(`🏷️ Tagged "${labelText}" at Game Clock ${gClock} (Rec ${formatClock(recSec)})`);
+      setTimeout(() => setTimelineNotice(null), 4000);
+      return;
+    }
+
+    if (selectedTimelineVideo) {
+      const updatedVideo: StoredGameVideo = {
+        ...selectedTimelineVideo,
+        clockTags: [...(selectedTimelineVideo.clockTags || []), newTag],
+      };
+      await saveVideoToIndexedDB(updatedVideo);
+      const list = await getAllStoredVideos();
+      setStoredVideos(list);
+      setCustomTagInput("");
+      setTimelineNotice(`🏷️ Tagged "${labelText}" at Game Clock ${gClock} (Rec ${formatClock(recSec)})`);
+      setTimeout(() => setTimelineNotice(null), 4000);
     }
   };
+
+  const handleRemoveClockTag = async (tagId: string) => {
+    if (isRecording) {
+      const nextTags = liveClockTagsRef.current.filter((t) => t.id !== tagId);
+      liveClockTagsRef.current = nextTags;
+      setLiveClockTags(nextTags);
+      return;
+    }
+    if (selectedTimelineVideo) {
+      const updatedVideo: StoredGameVideo = {
+        ...selectedTimelineVideo,
+        clockTags: (selectedTimelineVideo.clockTags || []).filter((t) => t.id !== tagId),
+      };
+      await saveVideoToIndexedDB(updatedVideo);
+      const list = await getAllStoredVideos();
+      setStoredVideos(list);
+    }
+  };
+
+  // Convert pointer clientX to exact timeline second using uncompressed pixel-per-second track
+  const clientXToTimelineSec = useCallback(
+    (clientX: number): number => {
+      const trackEl = timelineTrackInnerRef.current;
+      if (!trackEl) return 0;
+      const rect = trackEl.getBoundingClientRect();
+      const relX = clientX - rect.left;
+      const sec = relX / timelineZoomPxPerSec;
+      return Math.max(0, Math.min(activeTimelineDuration, Number(sec.toFixed(1))));
+    },
+    [timelineZoomPxPerSec, activeTimelineDuration]
+  );
+
+  // Pointer-capture drag handlers for Playhead and 10s Replay Selection Box
+  const startTimelineDrag = (
+    e: React.PointerEvent<HTMLElement>,
+    mode: "playhead" | "box_move" | "box_left" | "box_right"
+  ) => {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    const pointerSec = clientXToTimelineSec(e.clientX);
+    if (mode === "box_move") {
+      dragOffsetSecRef.current = pointerSec - trimStartSec;
+      dragBoxWidthSecRef.current = Math.max(1, trimEndSec - trimStartSec);
+    } else if (mode === "playhead") {
+      handleScrubTimeline(pointerSec);
+    }
+    setActiveDragMode(mode);
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+
+  const moveTimelineDrag = (
+    e: React.PointerEvent<HTMLElement>,
+    mode: "playhead" | "box_move" | "box_left" | "box_right"
+  ) => {
+    if (!e.currentTarget.hasPointerCapture(e.pointerId)) return;
+    e.stopPropagation();
+    const pointerSec = clientXToTimelineSec(e.clientX);
+    const maxDur = activeTimelineDuration;
+
+    if (mode === "playhead") {
+      handleScrubTimeline(pointerSec);
+    } else if (mode === "box_move") {
+      const boxW = dragBoxWidthSecRef.current;
+      const rawStart = pointerSec - dragOffsetSecRef.current;
+      const clampedStart = Math.max(0, Math.min(maxDur - boxW, Number(rawStart.toFixed(1))));
+      const clampedEnd = Number(Math.min(maxDur, clampedStart + boxW).toFixed(1));
+      setTrimStartSec(clampedStart);
+      setTrimEndSec(clampedEnd);
+      handleScrubTimeline(clampedStart);
+    } else if (mode === "box_left") {
+      const clampedStart = Math.max(0, Math.min(trimEndSec - 1, pointerSec));
+      setTrimStartSec(clampedStart);
+      handleScrubTimeline(clampedStart);
+    } else if (mode === "box_right") {
+      const clampedEnd = Math.max(trimStartSec + 1, Math.min(maxDur, pointerSec));
+      setTrimEndSec(clampedEnd);
+      handleScrubTimeline(clampedEnd);
+    }
+  };
+
+  const endTimelineDrag = (e: React.PointerEvent<HTMLElement>) => {
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      try {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      } catch {}
+    }
+    setActiveDragMode(null);
+  };
+
+  // Search / Filter Game Clock Tags & Frames on the Timeline
+  const clockSearchMatches = useMemo(() => {
+    const q = clockSearchQuery.trim().toLowerCase();
+    if (!q) return [];
+    const results: Array<{
+      id: string;
+      recTimeSec: number;
+      gameClockLabel: string;
+      title: string;
+      kind: "tag" | "frame";
+    }> = [];
+
+    for (const t of displayClockTags) {
+      if (
+        t.gameClockLabel.toLowerCase().includes(q) ||
+        t.label.toLowerCase().includes(q) ||
+        formatClock(t.recTimeSec).includes(q)
+      ) {
+        results.push({
+          id: t.id,
+          recTimeSec: t.recTimeSec,
+          gameClockLabel: t.gameClockLabel,
+          title: `🏷️ ${t.label} (${t.scoreLabel})`,
+          kind: "tag",
+        });
+      }
+    }
+
+    for (const f of displayTimelineFrames) {
+      const gLabel = f.gameClockLabel || getGameClockLabelAtSec(f.timeSec);
+      if (gLabel.toLowerCase().includes(q) || formatClock(f.timeSec).includes(q)) {
+        if (!results.some((r) => Math.abs(r.recTimeSec - f.timeSec) < 1)) {
+          results.push({
+            id: `frame-${f.timeSec}`,
+            recTimeSec: f.timeSec,
+            gameClockLabel: gLabel,
+            title: `📹 Frame @ Rec ${formatClock(f.timeSec)}`,
+            kind: "frame",
+          });
+        }
+      }
+    }
+    return results.slice(0, 12);
+  }, [clockSearchQuery, displayClockTags, displayTimelineFrames, getGameClockLabelAtSec]);
+
+  // Active Playhead Frame Preview
+  const activePlayheadFrame = useMemo(() => {
+    if (displayTimelineFrames.length === 0) return null;
+    const target = Math.round(timelinePlayheadSec);
+    let best = displayTimelineFrames[0];
+    let bestDiff = Math.abs(best.timeSec - target);
+    for (const f of displayTimelineFrames) {
+      const diff = Math.abs(f.timeSec - target);
+      if (diff < bestDiff) {
+        best = f;
+        bestDiff = diff;
+      }
+    }
+    return best;
+  }, [displayTimelineFrames, timelinePlayheadSec]);
 
   const handleDeleteStoredVideo = async (videoId: string) => {
     await deleteStoredVideo(videoId);
@@ -1761,13 +2120,11 @@ function LiveBroadcastStudioContent() {
     setTimeout(() => setCopiedKey(null), 2000);
   };
 
-  const activeTimelineDuration = Math.max(
-    1,
-    isRecording ? Math.max(10, recordSeconds) : selectedTimelineVideo?.durationSeconds || 10
+  // Uncompressed pixel width of the timeline track based on Zoom level (px/sec)
+  const totalTimelineWidthPx = Math.max(
+    760,
+    Math.ceil(activeTimelineDuration * timelineZoomPxPerSec)
   );
-  const displayTimelineFrames = isRecording
-    ? liveRecordingFrames
-    : selectedTimelineVideo?.timelineFrames || [];
 
   return (
     <div className="min-h-screen bg-[#0b0e14] text-slate-100 flex flex-col font-sans select-none">
@@ -2040,38 +2397,86 @@ function LiveBroadcastStudioContent() {
       </section>
 
       {/* =====================================================================
-          3. BOTTOM LIVE RECORD & CAMERA TIMELINE DOCK (CREATE REPLAY SCENES FROM TIMELINE!)
+          3. BOTTOM LIVE RECORD & CAMERA TIMELINE DOCK (GAME CLOCK TAGS, 10s REPLAY BOX, PLAYHEAD & ZOOM/SCROLL)
          ===================================================================== */}
       <section className="p-3 sm:p-4 bg-[#101520] border-b border-slate-800 space-y-3">
+        {/* TOP TIMELINE HEADER: TITLE, SAVED RECORD PICKER & ZOOM CONTROLS */}
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <span className="inline-flex h-6 w-6 items-center justify-center rounded-lg bg-amber-500/20 text-amber-400 border border-amber-500/30">
               <Film className="h-3.5 w-3.5" />
             </span>
             <h2 className="text-xs sm:text-sm font-black uppercase tracking-wider text-white">
-              Live Recording &amp; Camera Timeline (Select Segment to Create Slow-Mo Replay Scene)
+              Camera Timeline • Game Clock Tagging &amp; 10s Replay Selector
             </h2>
             {isRecording && (
               <span className="rounded-md bg-rose-600/20 border border-rose-500/40 px-2 py-0.5 text-[0.65rem] font-black text-rose-300 animate-pulse">
-                Capturing Live Timeline Frames ({recordSeconds}s)...
+                ● Live Recording ({recordSeconds}s • {getPeriodLabel(period)} {formatClock(clockSeconds)})
               </span>
             )}
           </div>
 
-          {/* Saved Recording Picker */}
+          {/* Right: Saved Recording Picker + Zoom In/Out Controls */}
           <div className="flex flex-wrap items-center gap-2">
-            <label className="text-[0.68rem] font-black uppercase text-slate-400">
-              Saved Record on Timeline:
-            </label>
+            <div className="flex items-center gap-1.5 rounded-xl bg-slate-900 border border-slate-800 px-2.5 py-1">
+              <span className="text-[0.62rem] font-black uppercase text-slate-400">
+                Track Zoom:
+              </span>
+              <button
+                type="button"
+                onClick={() =>
+                  setTimelineZoomPxPerSec((z) => Math.max(24, z - 16))
+                }
+                className="rounded bg-slate-800 hover:bg-slate-700 p-1 text-slate-200 cursor-pointer"
+                title="Zoom Out Timeline Track"
+              >
+                <ZoomOut className="h-3.5 w-3.5" />
+              </button>
+              <input
+                type="range"
+                aria-label="Timeline Track Zoom"
+                min={24}
+                max={160}
+                step={8}
+                value={timelineZoomPxPerSec}
+                onChange={(e) => setTimelineZoomPxPerSec(Number(e.target.value))}
+                className="w-24 accent-sky-400 cursor-pointer"
+              />
+              <button
+                type="button"
+                onClick={() =>
+                  setTimelineZoomPxPerSec((z) => Math.min(160, z + 16))
+                }
+                className="rounded bg-slate-800 hover:bg-slate-700 p-1 text-slate-200 cursor-pointer"
+                title="Zoom In Timeline Track"
+              >
+                <ZoomIn className="h-3.5 w-3.5" />
+              </button>
+              <span className="text-[0.62rem] font-mono font-bold text-sky-400 min-w-[46px] text-right">
+                {timelineZoomPxPerSec}px/s
+              </span>
+              <button
+                type="button"
+                onClick={() => scrollTimelineToSec(timelinePlayheadSec)}
+                className="ml-1 rounded bg-slate-800 hover:bg-slate-700 px-2 py-0.5 text-[0.6rem] font-black uppercase text-rose-300 border border-rose-500/30 cursor-pointer"
+                title="Scroll timeline to center the Playhead"
+              >
+                Center Playhead
+              </button>
+            </div>
+
             <select
+              aria-label="Select Saved Recording on Timeline"
               value={selectedTimelineVideoId}
               onChange={(e) => {
                 const vid = storedVideos.find((v) => v.id === e.target.value);
                 setSelectedTimelineVideoId(e.target.value);
                 if (vid) {
-                  setTrimStartSec(0);
-                  setTrimEndSec(Math.max(2, Math.min(vid.durationSeconds, 8)));
-                  setTimelinePlayheadSec(0);
+                  const boxDur = Math.min(vid.durationSeconds || 10, replayBoxDurationPreset || 10);
+                  const start = Math.max(0, (vid.durationSeconds || 10) - boxDur);
+                  setTrimStartSec(start);
+                  setTrimEndSec(vid.durationSeconds || 10);
+                  setTimelinePlayheadSec(start);
                 }
               }}
               className="rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1 text-xs font-bold text-white focus:outline-none focus:border-amber-400 cursor-pointer"
@@ -2096,7 +2501,7 @@ function LiveBroadcastStudioContent() {
                   title="Download this recorded game file"
                 >
                   <Download className="h-3 w-3 text-sky-400" />
-                  <span>Save File</span>
+                  <span>Save</span>
                 </button>
                 <button
                   type="button"
@@ -2108,6 +2513,105 @@ function LiveBroadcastStudioContent() {
                 </button>
               </div>
             )}
+          </div>
+        </div>
+
+        {/* GAME CLOCK TAG & SEARCH BAR (FIND ANY PLAY BY GAME CLOCK OR STAMP NEW PLAY TAGS!) */}
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-800 bg-[#0d121c] px-3 py-2">
+          {/* Left: Search by Game Clock */}
+          <div className="flex flex-wrap items-center gap-2 flex-1 min-w-[260px]">
+            <div className="relative flex items-center flex-1 max-w-xs">
+              <Search className="h-3.5 w-3.5 text-amber-400 absolute left-2.5 pointer-events-none" />
+              <input
+                type="text"
+                value={clockSearchQuery}
+                onChange={(e) => setClockSearchQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && clockSearchMatches.length > 0) {
+                    handleSnapBoxToSecond(clockSearchMatches[0].recTimeSec);
+                  }
+                }}
+                placeholder="Search Game Clock (e.g. 08:42, Q2, 3PT)..."
+                className="w-full rounded-lg border border-slate-700 bg-slate-900 pl-8 pr-2.5 py-1 text-xs font-bold text-white placeholder:text-slate-500 focus:outline-none focus:border-amber-400"
+              />
+              {clockSearchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setClockSearchQuery("")}
+                  className="absolute right-2 text-[0.65rem] font-black text-slate-400 hover:text-white cursor-pointer"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+
+            {/* Instant Search Results Pills */}
+            {clockSearchQuery.trim() !== "" && (
+              <div className="flex flex-wrap items-center gap-1">
+                {clockSearchMatches.length === 0 ? (
+                  <span className="text-[0.65rem] font-bold text-slate-500">
+                    No matching Game Clock found
+                  </span>
+                ) : (
+                  clockSearchMatches.map((m) => (
+                    <button
+                      key={m.id}
+                      type="button"
+                      onClick={() => handleSnapBoxToSecond(m.recTimeSec)}
+                      className="inline-flex items-center gap-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/50 px-2 py-0.5 text-[0.62rem] font-black text-amber-200 cursor-pointer"
+                      title="Click to jump Playhead & 10s Replay Box to this Game Clock"
+                    >
+                      <Clock className="h-2.5 w-2.5 text-amber-400" />
+                      <span>{m.gameClockLabel}</span>
+                      <span className="text-slate-400">({formatClock(m.recTimeSec)})</span>
+                      <span className="text-white">{m.title}</span>
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Right: Stamp Game Clock Tag onto Timeline */}
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[0.62rem] font-black uppercase text-slate-400 flex items-center gap-1">
+              <Tag className="h-3 w-3 text-emerald-400" />
+              Tag Game Clock ({isRecording ? `${getPeriodLabel(period)} ${formatClock(clockSeconds)}` : getGameClockLabelAtSec(timelinePlayheadSec)}):
+            </span>
+            {[
+              { label: "🏀 3PT Shot", tag: "3PT Shot" },
+              { label: "⚡ Highlight", tag: "Highlight" },
+              { label: "🚨 Foul / Review", tag: "Foul/Review" },
+            ].map((preset) => (
+              <button
+                key={preset.tag}
+                type="button"
+                onClick={() => handleAddClockTag(preset.tag)}
+                className="rounded-lg border border-emerald-500/40 bg-emerald-950/40 hover:bg-emerald-900/60 px-2 py-1 text-[0.62rem] font-black text-emerald-300 cursor-pointer transition-colors"
+                title="Bookmark this exact Game Clock moment on the timeline"
+              >
+                + {preset.label}
+              </button>
+            ))}
+            <div className="flex items-center gap-1">
+              <input
+                type="text"
+                value={customTagInput}
+                onChange={(e) => setCustomTagInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleAddClockTag();
+                }}
+                placeholder="Custom play note..."
+                className="w-28 rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-[0.65rem] font-bold text-white focus:outline-none focus:border-emerald-400"
+              />
+              <button
+                type="button"
+                onClick={() => handleAddClockTag()}
+                className="rounded-lg bg-emerald-600 hover:bg-emerald-500 px-2.5 py-1 text-[0.62rem] font-black uppercase text-white cursor-pointer"
+              >
+                + Tag Clock
+              </button>
+            </div>
           </div>
         </div>
 
@@ -2124,199 +2628,457 @@ function LiveBroadcastStudioContent() {
           </div>
         )}
 
-        {/* VISUAL CAMERA FILMSTRIP TIMELINE TRACK */}
+        {/* MAIN TIMELINE WORKSPACE: PLAYHEAD INSPECTOR (LEFT) + UNCOMPRESSED SCROLLABLE TRACK (RIGHT) */}
         <div className="rounded-xl border border-slate-800 bg-[#0b0e15] p-3 space-y-3">
-          {/* Filmstrip Track + Highlighted Trim Overlay */}
-          <div className="relative h-24 w-full rounded-lg overflow-hidden border border-slate-700 bg-slate-900 select-none">
-            {/* Thumbnail Frames along the timeline */}
-            {displayTimelineFrames.length > 0 ? (
-              <div className="flex h-full w-full">
-                {displayTimelineFrames.map((f, idx) => (
-                  <div
-                    key={idx}
-                    onClick={() => handleScrubTimeline(f.timeSec)}
-                    className="relative flex-1 h-full border-r border-slate-800/80 cursor-pointer group overflow-hidden"
-                    title={`Jump to ${formatClock(f.timeSec)}`}
-                  >
-                    <img
-                      src={f.dataUrl}
-                      alt={`Frame ${f.timeSec}s`}
-                      className="h-full w-full object-cover opacity-85 group-hover:opacity-100 transition-opacity"
-                    />
-                    <span className="absolute bottom-1 left-1 rounded bg-black/75 px-1 py-0.2 text-[0.55rem] font-mono text-slate-300">
-                      {formatClock(f.timeSec)}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="flex h-full w-full flex-col items-center justify-center text-slate-500 gap-1">
-                <p className="text-xs font-black uppercase tracking-wider text-slate-400">
-                  Camera Timeline Ready
-                </p>
-                <p className="text-[0.68rem] text-slate-500">
-                  Click &quot;Start Live Record&quot; to record the game. Live camera frames will populate along this timeline so you can highlight any play for slow-motion replay!
-                </p>
-              </div>
-            )}
-
-            {/* Selected Replay Trim Window Overlay (IN [ -> OUT ]) */}
-            {selectedTimelineVideo && !isRecording && (
-              <div
-                className="absolute top-0 bottom-0 bg-amber-500/25 border-x-4 border-amber-400 pointer-events-none flex items-start justify-between px-1.5 pt-1"
-                style={{
-                  left: `${Math.min(100, (trimStartSec / activeTimelineDuration) * 100)}%`,
-                  width: `${Math.max(
-                    2,
-                    Math.min(
-                      100,
-                      ((trimEndSec - trimStartSec) / activeTimelineDuration) * 100
-                    )
-                  )}%`,
-                }}
-              >
-                <span className="rounded bg-amber-400 px-1 py-0.2 text-[0.58rem] font-black text-slate-950">
-                  IN [{formatClock(trimStartSec)}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 items-stretch">
+            {/* LEFT 3 COLS: PLAYHEAD FRAME INSPECTOR & TRANSPORT */}
+            <div className="lg:col-span-3 flex flex-col justify-between rounded-xl border border-slate-800 bg-[#121722] p-2.5 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[0.62rem] font-black uppercase tracking-wider text-rose-400 flex items-center gap-1">
+                  <span className="h-2 w-2 rounded-full bg-rose-500" />
+                  Playhead Inspector
                 </span>
-                <span className="rounded bg-amber-400 px-1 py-0.2 text-[0.58rem] font-black text-slate-950">
-                  {formatClock(trimEndSec)}] OUT
+                <span className="rounded bg-amber-500/20 border border-amber-400/40 px-1.5 py-0.5 text-[0.62rem] font-black text-amber-300">
+                  🏀 {getGameClockLabelAtSec(timelinePlayheadSec)}
                 </span>
               </div>
-            )}
 
-            {/* Playhead Indicator Line */}
-            {selectedTimelineVideo && !isRecording && (
-              <div
-                className="absolute top-0 bottom-0 w-0.5 bg-rose-500 pointer-events-none"
-                style={{
-                  left: `${Math.min(100, (timelinePlayheadSec / activeTimelineDuration) * 100)}%`,
-                }}
-              >
-                <div className="h-3 w-3 -ml-1.25 rounded-full bg-rose-500 border border-white shadow" />
-              </div>
-            )}
-          </div>
-
-          {/* Interactive Timeline Sliders (Scrub Playhead, IN Start, OUT End) + Replay Scene Creator */}
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 items-center pt-1">
-            {/* Left 6 cols: Range Sliders & Quick Trim Presets */}
-            <div className="lg:col-span-6 space-y-2">
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                {/* Playhead Scrubber */}
-                <div className="rounded-lg bg-slate-900 border border-slate-800 px-2.5 py-1.5">
-                  <div className="flex justify-between text-[0.65rem] font-black uppercase text-slate-400">
-                    <span>Playhead</span>
-                    <span className="text-rose-400 font-mono">
-                      {formatPreciseTime(timelinePlayheadSec)}
-                    </span>
-                  </div>
-                  <input
-                    type="range"
-                    min={0}
-                    max={activeTimelineDuration}
-                    step={0.1}
-                    value={timelinePlayheadSec}
-                    onChange={(e) => handleScrubTimeline( Number(e.target.value))}
-                    className="w-full accent-rose-500 cursor-pointer"
+              {/* Mini Frame Monitor at Playhead */}
+              <div className="relative aspect-video w-full rounded-lg overflow-hidden bg-black border border-slate-700 flex items-center justify-center">
+                {activePlayheadFrame ? (
+                  <img
+                    src={activePlayheadFrame.dataUrl}
+                    alt="Playhead Frame"
+                    className="w-full h-full object-cover"
                   />
-                </div>
-
-                {/* Trim Start (IN [) */}
-                <div className="rounded-lg bg-slate-900 border border-slate-800 px-2.5 py-1.5">
-                  <div className="flex justify-between text-[0.65rem] font-black uppercase text-amber-400">
-                    <span>[ Replay Start</span>
-                    <span className="font-mono">{formatPreciseTime(trimStartSec)}</span>
-                  </div>
-                  <input
-                    type="range"
-                    min={0}
-                    max={Math.max(0.5, trimEndSec - 0.5)}
-                    step={0.5}
-                    value={trimStartSec}
-                    onChange={(e) => {
-                      const val = Number(e.target.value);
-                      setTrimStartSec(val);
-                      handleScrubTimeline(val);
-                    }}
-                    className="w-full accent-amber-400 cursor-pointer"
-                  />
-                </div>
-
-                {/* Trim End (OUT ]) */}
-                <div className="rounded-lg bg-slate-900 border border-slate-800 px-2.5 py-1.5">
-                  <div className="flex justify-between text-[0.65rem] font-black uppercase text-amber-400">
-                    <span>Replay End ]</span>
-                    <span className="font-mono">{formatPreciseTime(trimEndSec)}</span>
-                  </div>
-                  <input
-                    type="range"
-                    min={Math.min(activeTimelineDuration, trimStartSec + 1)}
-                    max={activeTimelineDuration}
-                    step={0.5}
-                    value={trimEndSec}
-                    onChange={(e) => {
-                      const val = Number(e.target.value);
-                      setTrimEndSec(val);
-                      handleScrubTimeline(val);
-                    }}
-                    className="w-full accent-amber-400 cursor-pointer"
-                  />
+                ) : (
+                  <span className="text-[0.65rem] font-bold text-slate-500 text-center px-2">
+                    Record game to inspect frames at Playhead
+                  </span>
+                )}
+                <div className="absolute bottom-1 left-1 right-1 flex items-center justify-between rounded bg-black/80 px-1.5 py-0.5 text-[0.58rem] font-mono text-white">
+                  <span>Rec: {formatPreciseTime(timelinePlayheadSec)}</span>
+                  <span className="text-amber-300 font-bold">
+                    {getGameClockLabelAtSec(timelinePlayheadSec)}
+                  </span>
                 </div>
               </div>
 
-              {/* Quick Mark In / Out Buttons */}
-              <div className="flex flex-wrap items-center gap-1.5">
+              {/* Playhead Step & Snap 10s Box Controls */}
+              <div className="space-y-1.5">
+                <div className="grid grid-cols-4 gap-1">
+                  {[
+                    { label: "-5s", delta: -5 },
+                    { label: "-1s", delta: -1 },
+                    { label: "+1s", delta: 1 },
+                    { label: "+5s", delta: 5 },
+                  ].map((step) => (
+                    <button
+                      key={step.label}
+                      type="button"
+                      onClick={() => {
+                        const next = Math.max(
+                          0,
+                          Math.min(activeTimelineDuration, timelinePlayheadSec + step.delta)
+                        );
+                        handleScrubTimeline(next);
+                        scrollTimelineToSec(next);
+                      }}
+                      className="rounded bg-slate-800 hover:bg-slate-700 py-1 text-[0.62rem] font-black text-slate-200 cursor-pointer"
+                    >
+                      {step.label}
+                    </button>
+                  ))}
+                </div>
                 <button
                   type="button"
-                  onClick={() => setTrimStartSec(Math.min(timelinePlayheadSec, trimEndSec - 1))}
-                  className="rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 px-2.5 py-1 text-[0.65rem] font-black uppercase text-amber-300 cursor-pointer"
+                  onClick={() =>
+                    handleSnapBoxToSecond(timelinePlayheadSec, replayBoxDurationPreset)
+                  }
+                  className="w-full rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/60 py-1.5 text-[0.65rem] font-black uppercase text-amber-300 cursor-pointer"
                 >
-                  [ Mark In Here
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setTrimEndSec(Math.max(timelinePlayheadSec, trimStartSec + 1))}
-                  className="rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 px-2.5 py-1 text-[0.65rem] font-black uppercase text-amber-300 cursor-pointer"
-                >
-                  Mark Out Here ]
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const dur = activeTimelineDuration;
-                    setTrimStartSec(Math.max(0, dur - 5));
-                    setTrimEndSec(dur);
-                  }}
-                  className="rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 px-2.5 py-1 text-[0.65rem] font-bold text-slate-300 cursor-pointer"
-                >
-                  Last 5s
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const dur = activeTimelineDuration;
-                    setTrimStartSec(Math.max(0, dur - 10));
-                    setTrimEndSec(dur);
-                  }}
-                  className="rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 px-2.5 py-1 text-[0.65rem] font-bold text-slate-300 cursor-pointer"
-                >
-                  Last 10s
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setTrimStartSec(0);
-                    setTrimEndSec(activeTimelineDuration);
-                  }}
-                  className="rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 px-2.5 py-1 text-[0.65rem] font-bold text-slate-300 cursor-pointer"
-                >
-                  Full Clip
+                  📦 Snap {replayBoxDurationPreset}s Box to Playhead
                 </button>
               </div>
             </div>
 
-            {/* Right 6 cols: Slow-Mo Speed, Replay Name & Create Replay Scene Buttons */}
-            <div className="lg:col-span-6 flex flex-wrap items-center justify-end gap-2">
+            {/* RIGHT 9 COLS: UNCOMPRESSED HORIZONTAL SCROLLABLE MULTI-TRACK TIMELINE */}
+            <div className="lg:col-span-9 flex flex-col rounded-xl border border-slate-700 bg-[#080b11] overflow-hidden">
+              {/* Top Info Strip above Scrollbar Track */}
+              <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 bg-slate-900/90 border-b border-slate-800 text-[0.62rem]">
+                <div className="flex items-center gap-3">
+                  <span className="font-black text-rose-400">
+                    ▼ PLAYHEAD: {formatPreciseTime(timelinePlayheadSec)} ({getGameClockLabelAtSec(timelinePlayheadSec)})
+                  </span>
+                  <span className="font-black text-amber-400">
+                    📦 REPLAY BOX ({(trimEndSec - trimStartSec).toFixed(1)}s): Rec{" "}
+                    {formatPreciseTime(trimStartSec)} → {formatPreciseTime(trimEndSec)} | 🏀{" "}
+                    {getGameClockLabelAtSec(trimStartSec)} → {getGameClockLabelAtSec(trimEndSec)}
+                  </span>
+                </div>
+                <span className="text-slate-400 font-bold">
+                  Drag Playhead (Red) or Drag 10s Box (Amber) • Scroll Horizontally Below ↔
+                </span>
+              </div>
+
+              {/* HORIZONTAL SCROLLABLE CONTAINER (NEVER COMPRESSED IN SCREEN!) */}
+              <div
+                ref={timelineScrollContainerRef}
+                className="w-full overflow-x-scroll overflow-y-hidden pb-2 select-none"
+                style={{
+                  scrollbarWidth: "auto",
+                  scrollbarColor: "#f59e0b #0f172a",
+                }}
+              >
+                <div
+                  ref={timelineTrackInnerRef}
+                  className="relative"
+                  style={{
+                    width: `${totalTimelineWidthPx}px`,
+                    minWidth: "100%",
+                  }}
+                >
+                  {/* =========================================================
+                      TRACK 1: DUAL TIME & GAME CLOCK RULER (CLICK/DRAG TO SCRUB PLAYHEAD)
+                     ========================================================= */}
+                  <div
+                    onPointerDown={(e) => startTimelineDrag(e, "playhead")}
+                    onPointerMove={(e) => moveTimelineDrag(e, "playhead")}
+                    onPointerUp={endTimelineDrag}
+                    onLostPointerCapture={endTimelineDrag}
+                    className="relative h-8 w-full bg-slate-950 border-b border-slate-800 cursor-ew-resize touch-none select-none"
+                    style={{ WebkitUserSelect: "none", userSelect: "none" }}
+                    title="Click or drag anywhere on the ruler to move the Playhead"
+                  >
+                    {Array.from({ length: Math.ceil(activeTimelineDuration) + 1 }).map(
+                      (_, sec) => {
+                        const leftPx = sec * timelineZoomPxPerSec;
+                        const showFullLabel =
+                          timelineZoomPxPerSec >= 56 ||
+                          sec % Math.max(1, Math.ceil(56 / timelineZoomPxPerSec)) === 0;
+                        const frameAtSec = displayTimelineFrames.find(
+                          (f) => Math.round(f.timeSec) === sec
+                        );
+                        const gClock = frameAtSec?.gameClockLabel || getGameClockLabelAtSec(sec);
+
+                        return (
+                          <div
+                            key={sec}
+                            className="absolute top-0 bottom-0 border-l border-slate-800 flex flex-col justify-between pl-1 py-0.5 pointer-events-none"
+                            style={{ left: `${leftPx}px` }}
+                          >
+                            {showFullLabel && (
+                              <>
+                                <span className="text-[0.55rem] font-black text-amber-400/90 whitespace-nowrap leading-none">
+                                  🏀 {gClock}
+                                </span>
+                                <span className="text-[0.52rem] font-mono text-slate-400 whitespace-nowrap leading-none">
+                                  Rec {formatClock(sec)}
+                                </span>
+                              </>
+                            )}
+                          </div>
+                        );
+                      }
+                    )}
+                  </div>
+
+                  {/* =========================================================
+                      TRACK 2: GAME CLOCK BOOKMARK TAGS TRACK
+                     ========================================================= */}
+                  <div className="relative h-7 w-full bg-[#0e1420] border-b border-slate-800/90 flex items-center">
+                    <span className="sticky left-2 z-10 rounded bg-slate-900/90 border border-slate-700 px-1.5 py-0.5 text-[0.55rem] font-black uppercase text-emerald-400 pointer-events-none">
+                      🏷️ Game Clock Tags
+                    </span>
+
+                    {displayClockTags.map((tag) => {
+                      const leftPx = tag.recTimeSec * timelineZoomPxPerSec;
+                      return (
+                        <div
+                          key={tag.id}
+                          style={{ left: `${leftPx}px` }}
+                          className="absolute top-1 z-20 -translate-x-1/2 flex items-center gap-1 rounded-md bg-emerald-600 hover:bg-emerald-500 border border-emerald-300 px-1.5 py-0.5 text-[0.56rem] font-black text-white shadow cursor-pointer whitespace-nowrap"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleSnapBoxToSecond(tag.recTimeSec);
+                          }}
+                          title={`Click to jump Playhead & ${replayBoxDurationPreset}s Replay Box to ${tag.gameClockLabel} (${tag.label})`}
+                        >
+                          <span>🏀 {tag.gameClockLabel}</span>
+                          <span className="text-emerald-100">• {tag.label}</span>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleRemoveClockTag(tag.id);
+                            }}
+                            className="ml-0.5 text-emerald-200 hover:text-rose-200"
+                            title="Remove tag"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* =========================================================
+                      TRACK 3: UNCOMPRESSED CAMERA FILMSTRIP + 10-SECOND DRAGGABLE REPLAY BOX
+                     ========================================================= */}
+                  <div
+                    className="relative h-28 w-full bg-slate-900/80 overflow-hidden"
+                    onClick={(e) => {
+                      const sec = clientXToTimelineSec(e.clientX);
+                      handleScrubTimeline(sec);
+                    }}
+                    onDoubleClick={(e) => {
+                      const sec = clientXToTimelineSec(e.clientX);
+                      handleSnapBoxToSecond(sec, replayBoxDurationPreset);
+                    }}
+                  >
+                    {/* 1-Second Camera Thumbnail Tiles (Each tile is exactly timelineZoomPxPerSec wide!) */}
+                    {displayTimelineFrames.length > 0 ? (
+                      displayTimelineFrames.map((f, idx) => {
+                        const tileLeft = f.timeSec * timelineZoomPxPerSec;
+                        const gClock = f.gameClockLabel || getGameClockLabelAtSec(f.timeSec);
+                        return (
+                          <div
+                            key={idx}
+                            style={{
+                              left: `${tileLeft}px`,
+                              width: `${timelineZoomPxPerSec}px`,
+                            }}
+                            className="absolute top-0 bottom-0 border-r border-slate-800/80 overflow-hidden group cursor-pointer"
+                            title={`Rec ${formatClock(f.timeSec)} • Game Clock ${gClock} (Click = Move Playhead, Double-Click = Snap 10s Replay Box)`}
+                          >
+                            <img
+                              src={f.dataUrl}
+                              alt={`Frame ${f.timeSec}s`}
+                              draggable={false}
+                              className="h-full w-full object-cover opacity-85 group-hover:opacity-100 transition-opacity pointer-events-none"
+                            />
+                            {/* Game Clock Tag Badge on top of Frame */}
+                            <span className="absolute top-1 left-1 rounded bg-black/80 border border-amber-500/40 px-1 py-0.2 text-[0.52rem] font-black text-amber-300 pointer-events-none truncate max-w-[92%]">
+                              {gClock}
+                            </span>
+                            {/* Recording Timestamp Badge on bottom of Frame */}
+                            <span className="absolute bottom-1 left-1 rounded bg-black/75 px-1 py-0.2 text-[0.52rem] font-mono text-slate-200 pointer-events-none">
+                              {formatClock(f.timeSec)}
+                            </span>
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <div className="sticky left-0 flex h-full w-full max-w-2xl flex-col items-start justify-center px-6 text-slate-400 gap-1 pointer-events-none">
+                        <p className="text-xs font-black uppercase tracking-wider text-slate-300">
+                          Uncompressed Camera Timeline Track ({timelineZoomPxPerSec}px / sec)
+                        </p>
+                        <p className="text-[0.68rem] text-slate-400">
+                          Click &quot;Start Live Record&quot; to record the game with automatic Game Clock tags on every frame, or drag the 10-Second Replay Selection Box &amp; Playhead across the track!
+                        </p>
+                      </div>
+                    )}
+
+                    {/* =======================================================
+                        DRAGGABLE 10-SECOND REPLAY SELECTION BOX OVERLAY
+                       ======================================================= */}
+                    <div
+                      style={{
+                        left: `${trimStartSec * timelineZoomPxPerSec}px`,
+                        width: `${Math.max(
+                          24,
+                          (trimEndSec - trimStartSec) * timelineZoomPxPerSec
+                        )}px`,
+                      }}
+                      className="absolute top-0 bottom-0 z-20 bg-amber-500/20 border-y-2 border-amber-400 flex flex-col justify-between"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {/* Top Drag Grip Handle (Slide Entire 10-Second Box Left/Right!) */}
+                      <div
+                        tabIndex={0}
+                        role="slider"
+                        aria-label="Draggable 10-second Replay Selection Box (use Left/Right arrow keys or drag to move)"
+                        aria-valuemin={0}
+                        aria-valuemax={activeTimelineDuration}
+                        aria-valuenow={trimStartSec}
+                        onPointerDown={(e) => startTimelineDrag(e, "box_move")}
+                        onPointerMove={(e) => moveTimelineDrag(e, "box_move")}
+                        onPointerUp={endTimelineDrag}
+                        onLostPointerCapture={endTimelineDrag}
+                        onKeyDown={(e) => {
+                          if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+                            e.preventDefault();
+                            const step = e.shiftKey ? 2 : 0.5;
+                            const dir = e.key === "ArrowLeft" ? -step : step;
+                            const boxW = trimEndSec - trimStartSec;
+                            const nextStart = Math.max(
+                              0,
+                              Math.min(activeTimelineDuration - boxW, Number((trimStartSec + dir).toFixed(1)))
+                            );
+                            setTrimStartSec(nextStart);
+                            setTrimEndSec(Number((nextStart + boxW).toFixed(1)));
+                            handleScrubTimeline(nextStart);
+                          }
+                        }}
+                        style={{
+                          touchAction: "none",
+                          WebkitUserSelect: "none",
+                          userSelect: "none",
+                        }}
+                        className={`w-full bg-amber-400 hover:bg-amber-300 text-slate-950 px-2 py-1 flex items-center justify-between gap-1 shadow-md ${
+                          activeDragMode === "box_move" ? "cursor-grabbing" : "cursor-grab"
+                        }`}
+                        title="Drag this header bar left or right to slide the 10-second Replay Selection Box across the timeline"
+                      >
+                        <span className="text-[0.58rem] font-black uppercase tracking-wider truncate flex items-center gap-1">
+                          <GripHorizontal className="h-3 w-3 shrink-0" />
+                          <span>
+                            {(trimEndSec - trimStartSec).toFixed(1)}s REPLAY BOX •{" "}
+                            {formatClock(trimStartSec)}–{formatClock(trimEndSec)}
+                          </span>
+                        </span>
+                        <span className="rounded bg-slate-950/90 text-amber-300 px-1.5 py-0.2 text-[0.55rem] font-black whitespace-nowrap">
+                          🏀 {getGameClockLabelAtSec(trimStartSec)} → {getGameClockLabelAtSec(trimEndSec)}
+                        </span>
+                      </div>
+
+                      {/* Bottom Timestamp Readout inside Box */}
+                      <div className="px-2 pb-1 flex items-center justify-between text-[0.56rem] font-black text-amber-200 pointer-events-none drop-shadow">
+                        <span className="bg-black/75 px-1.5 py-0.5 rounded">
+                          [ IN: {formatPreciseTime(trimStartSec)}
+                        </span>
+                        <span className="bg-black/75 px-1.5 py-0.5 rounded">
+                          OUT: {formatPreciseTime(trimEndSec)} ]
+                        </span>
+                      </div>
+
+                      {/* Left Resize Handle ([ IN) */}
+                      <div
+                        onPointerDown={(e) => startTimelineDrag(e, "box_left")}
+                        onPointerMove={(e) => moveTimelineDrag(e, "box_left")}
+                        onPointerUp={endTimelineDrag}
+                        onLostPointerCapture={endTimelineDrag}
+                        style={{
+                          touchAction: "none",
+                          WebkitUserSelect: "none",
+                          userSelect: "none",
+                        }}
+                        className="absolute left-0 top-0 bottom-0 w-2.5 bg-amber-400 hover:bg-white cursor-ew-resize flex items-center justify-center shadow"
+                        title="Drag left edge to adjust Replay Start [IN]"
+                      >
+                        <div className="h-6 w-0.5 bg-slate-950 rounded" />
+                      </div>
+
+                      {/* Right Resize Handle (OUT ]) */}
+                      <div
+                        onPointerDown={(e) => startTimelineDrag(e, "box_right")}
+                        onPointerMove={(e) => moveTimelineDrag(e, "box_right")}
+                        onPointerUp={endTimelineDrag}
+                        onLostPointerCapture={endTimelineDrag}
+                        style={{
+                          touchAction: "none",
+                          WebkitUserSelect: "none",
+                          userSelect: "none",
+                        }}
+                        className="absolute right-0 top-0 bottom-0 w-2.5 bg-amber-400 hover:bg-white cursor-ew-resize flex items-center justify-center shadow"
+                        title="Drag right edge to adjust Replay End [OUT]"
+                      >
+                        <div className="h-6 w-0.5 bg-slate-950 rounded" />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* =========================================================
+                      FULL-HEIGHT INTERACTIVE PLAYHEAD (DRAGGABLE CAP + VERTICAL LINE)
+                     ========================================================= */}
+                  <div
+                    style={{
+                      left: `${timelinePlayheadSec * timelineZoomPxPerSec}px`,
+                    }}
+                    className="absolute top-0 bottom-0 z-30 w-0.5 bg-rose-500 pointer-events-none"
+                  >
+                    {/* Draggable Playhead Cap Handle */}
+                    <div
+                      tabIndex={0}
+                      role="slider"
+                      aria-label="Timeline Playhead (drag or use Left/Right arrow keys to scrub)"
+                      aria-valuemin={0}
+                      aria-valuemax={activeTimelineDuration}
+                      aria-valuenow={timelinePlayheadSec}
+                      onPointerDown={(e) => startTimelineDrag(e, "playhead")}
+                      onPointerMove={(e) => moveTimelineDrag(e, "playhead")}
+                      onPointerUp={endTimelineDrag}
+                      onLostPointerCapture={endTimelineDrag}
+                      onKeyDown={(e) => {
+                        if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+                          e.preventDefault();
+                          const step = e.shiftKey ? 2 : 0.5;
+                          const dir = e.key === "ArrowLeft" ? -step : step;
+                          handleScrubTimeline(timelinePlayheadSec + dir);
+                        }
+                      }}
+                      style={{
+                        touchAction: "none",
+                        WebkitUserSelect: "none",
+                        userSelect: "none",
+                      }}
+                      className={`pointer-events-auto -ml-14 mt-0.5 inline-flex items-center gap-1 rounded-full bg-rose-600 hover:bg-rose-500 border border-white px-2 py-0.5 text-[0.55rem] font-black text-white shadow-lg whitespace-nowrap ${
+                        activeDragMode === "playhead" ? "cursor-grabbing scale-105" : "cursor-grab"
+                      }`}
+                      title="Drag Playhead to scrub across the recording"
+                    >
+                      <span>▼ {formatPreciseTime(timelinePlayheadSec)}</span>
+                      <span className="text-amber-200">
+                        ({getGameClockLabelAtSec(timelinePlayheadSec)})
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* BOTTOM ACTION BAR: REPLAY BOX DURATION PRESETS (5s / 10s / 15s) + SLOW-MO SPEED + CREATE REPLAY SCENE */}
+          <div className="flex flex-wrap items-center justify-between gap-3 pt-1 border-t border-slate-800/80">
+            {/* Left: Replay Selection Box Size Presets (Default 10s Box!) */}
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-[0.65rem] font-black uppercase text-amber-400 mr-1">
+                📦 Replay Box Size:
+              </span>
+              {[5, 10, 15, 20].map((sec) => (
+                <button
+                  key={sec}
+                  type="button"
+                  onClick={() => handleSetReplayBoxPreset(sec)}
+                  className={`rounded-lg px-2.5 py-1 text-xs font-black cursor-pointer border transition-colors ${
+                    Math.round(trimEndSec - trimStartSec) === sec
+                      ? "bg-amber-400 border-amber-300 text-slate-950"
+                      : "bg-slate-900 border-slate-700 text-slate-300 hover:bg-slate-800"
+                  }`}
+                >
+                  {sec}s Box{sec === 10 ? " (Default)" : ""}
+                </button>
+              ))}
+
+              <button
+                type="button"
+                onClick={() => {
+                  const dur = activeTimelineDuration;
+                  const boxW = replayBoxDurationPreset || 10;
+                  const start = Math.max(0, dur - boxW);
+                  setTrimStartSec(start);
+                  setTrimEndSec(dur);
+                  handleScrubTimeline(start);
+                  scrollTimelineToSec(start);
+                }}
+                className="rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 px-2.5 py-1 text-[0.65rem] font-bold text-slate-200 cursor-pointer"
+              >
+                Last 10s of Rec
+              </button>
+            </div>
+
+            {/* Right: Slow-Mo Speed, Replay Scene Label & Create Replay Scene Buttons */}
+            <div className="flex flex-wrap items-center justify-end gap-2">
               {/* Slow Motion Speed Selector */}
               <div className="flex items-center gap-1 rounded-xl bg-slate-900 border border-slate-800 p-1">
                 <span className="text-[0.62rem] font-black uppercase text-slate-400 px-2">
@@ -2350,7 +3112,7 @@ function LiveBroadcastStudioContent() {
                 type="button"
                 onClick={() => handleCreateReplaySceneFromTimeline(false)}
                 className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 px-3.5 py-2 text-xs font-black uppercase tracking-wider text-white shadow-md cursor-pointer"
-                title="Create a selectable Replay Scene from this timeline segment and cue it on Left Preview"
+                title="Create a selectable Replay Scene from the 10s Box and cue it on Left Preview"
               >
                 <Scissors className="h-3.5 w-3.5" />
                 <span>Create Replay Scene (Preview)</span>
@@ -2360,7 +3122,7 @@ function LiveBroadcastStudioContent() {
                 type="button"
                 onClick={() => handleCreateReplaySceneFromTimeline(true)}
                 className="inline-flex items-center gap-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 px-3.5 py-2 text-xs font-black uppercase tracking-wider text-slate-950 shadow-md cursor-pointer"
-                title="Create Replay Scene and immediately air it on Right Live Output"
+                title="Create Replay Scene from the 10s Box and immediately air it on Right Live Output"
               >
                 <Zap className="h-3.5 w-3.5" />
                 <span>Instant Replay to Live</span>

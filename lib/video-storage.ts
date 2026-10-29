@@ -10,6 +10,19 @@ const DB_VERSION = 1;
 export interface TimelineFrame {
   timeSec: number;
   dataUrl: string;
+  gameClockLabel?: string;
+  period?: number;
+  gameClockSeconds?: number;
+  homeScore?: number;
+  awayScore?: number;
+}
+
+export interface TimelineClockTag {
+  id: string;
+  recTimeSec: number;
+  gameClockLabel: string;
+  scoreLabel: string;
+  label: string;
 }
 
 export interface StoredGameVideo {
@@ -24,6 +37,7 @@ export interface StoredGameVideo {
   createdAt: string;
   thumbnailDataUrl?: string;
   timelineFrames?: TimelineFrame[];
+  clockTags?: TimelineClockTag[];
   homeScore?: number;
   awayScore?: number;
   homeTeamName?: string;
