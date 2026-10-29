@@ -69,6 +69,18 @@ function getPeriodLabel(period: number, maxRegularPeriods = 4): string {
   return otIndex === 1 ? "OT" : `OT${otIndex}`;
 }
 
+function uint8ArrayToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const sub = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode(...sub);
+  }
+  return btoa(binary);
+}
+
+export type StreamPlatform = "facebook" | "youtube" | "custom";
+
 export type StorageLocation =
   | "browser_indexeddb"
   | "local_filesystem"
@@ -262,6 +274,21 @@ function LiveBroadcastStudioContent() {
   const [timelineNotice, setTimelineNotice] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
+  // Facebook Page / YouTube Live Direct RTMPS Streaming State
+  const [streamPlatform, setStreamPlatform] = useState<StreamPlatform>("facebook");
+  const [rtmpServerUrl, setRtmpServerUrl] = useState<string>(
+    "rtmps://live-api-s.facebook.com:443/rtmp/"
+  );
+  const [streamKey, setStreamKey] = useState<string>("");
+  const [showStreamKey, setShowStreamKey] = useState<boolean>(false);
+  const [isStreamingLive, setIsStreamingLive] = useState<boolean>(false);
+  const [isConnectingStream, setIsConnectingStream] = useState<boolean>(false);
+  const [streamError, setStreamError] = useState<string | null>(null);
+  const [streamDurationSec, setStreamDurationSec] = useState<number>(0);
+  const [streamFramesSent, setStreamFramesSent] = useState<number>(0);
+  const [streamBytesSent, setStreamBytesSent] = useState<number>(0);
+  const [showFbSetupModal, setShowFbSetupModal] = useState<boolean>(false);
+
   // Canvas & Video Refs
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const liveCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -273,6 +300,25 @@ function LiveBroadcastStudioContent() {
   const recordIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const liveCaptureFramesRef = useRef<TimelineFrame[]>([]);
   const recordStartTimeRef = useRef<number>(0);
+
+  // RTMP WebCodecs Encoder Refs
+  const rtmpSessionIdRef = useRef<string>(`rtmp-${generateUUID().slice(0, 8)}`);
+  const videoEncoderRef = useRef<{
+    encode: (frame: unknown, opts?: { keyFrame?: boolean }) => void;
+    close: () => void;
+    state: string;
+  } | null>(null);
+  const encoderLoopRef = useRef<NodeJS.Timeout | null>(null);
+  const flushLoopRef = useRef<NodeJS.Timeout | null>(null);
+  const streamTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const avcConfigBase64Ref = useRef<string | undefined>(undefined);
+  const pendingRtmpFramesRef = useRef<
+    Array<{ timestampMs: number; isKeyframe: boolean; dataBase64: string }>
+  >([]);
+  const isFlushingRtmpRef = useRef<boolean>(false);
+  const streamStartTimeRef = useRef<number>(0);
+  const streamFrameCountRef = useRef<number>(0);
+  const encoderCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   // Initialize DB, Realtime & Stored Videos
   const refreshStoredVideos = useCallback(async () => {
@@ -1338,6 +1384,307 @@ function LiveBroadcastStudioContent() {
     }
   };
 
+  // =====================================================================
+  // FACEBOOK PAGE & YOUTUBE LIVE DIRECT RTMPS STREAMING ENGINE
+  // =====================================================================
+  const handleSelectStreamPlatform = (platform: StreamPlatform) => {
+    setStreamPlatform(platform);
+    if (platform === "facebook") {
+      setRtmpServerUrl("rtmps://live-api-s.facebook.com:443/rtmp/");
+    } else if (platform === "youtube") {
+      setRtmpServerUrl("rtmp://a.rtmp.youtube.com/live2");
+    }
+  };
+
+  const stopRtmpLiveStream = useCallback(async () => {
+    if (encoderLoopRef.current) {
+      clearInterval(encoderLoopRef.current);
+      encoderLoopRef.current = null;
+    }
+    if (flushLoopRef.current) {
+      clearInterval(flushLoopRef.current);
+      flushLoopRef.current = null;
+    }
+    if (streamTimerRef.current) {
+      clearInterval(streamTimerRef.current);
+      streamTimerRef.current = null;
+    }
+    try {
+      if (videoEncoderRef.current && videoEncoderRef.current.state !== "closed") {
+        videoEncoderRef.current.close();
+      }
+    } catch {}
+    videoEncoderRef.current = null;
+    pendingRtmpFramesRef.current = [];
+    isFlushingRtmpRef.current = false;
+    setIsStreamingLive(false);
+    setIsConnectingStream(false);
+
+    try {
+      await fetch("/api/rtmp-stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "stop",
+          sessionId: rtmpSessionIdRef.current,
+        }),
+      });
+    } catch {}
+  }, []);
+
+  const startRtmpLiveStream = async () => {
+    setStreamError(null);
+
+    if (!streamKey.trim()) {
+      setStreamError(
+        "Paste your Facebook Stream Key (e.g. FB-177029...) from Facebook Live Producer first."
+      );
+      setShowFbSetupModal(true);
+      return;
+    }
+
+    const win = window as unknown as {
+      VideoEncoder?: new (init: {
+        output: (
+          chunk: {
+            type: "key" | "delta";
+            timestamp: number;
+            byteLength: number;
+            copyTo: (dest: Uint8Array) => void;
+          },
+          meta?: { decoderConfig?: { description?: ArrayBuffer } }
+        ) => void;
+        error: (e: Error) => void;
+      }) => {
+        configure: (cfg: Record<string, unknown>) => void;
+        encode: (frame: unknown, opts?: { keyFrame?: boolean }) => void;
+        close: () => void;
+        state: string;
+      };
+      VideoFrame?: new (
+        source: HTMLCanvasElement,
+        init: { timestamp: number }
+      ) => { close: () => void };
+    };
+
+    if (!win.VideoEncoder || !win.VideoFrame) {
+      setStreamError(
+        "Your browser requires WebCodecs (Google Chrome / Edge) for direct RTMPS streaming, or use the Pop-Out Clean Program Window."
+      );
+      return;
+    }
+
+    setIsConnectingStream(true);
+    const sessionId = `rtmp-${generateUUID().slice(0, 8)}`;
+    rtmpSessionIdRef.current = sessionId;
+    pendingRtmpFramesRef.current = [];
+    avcConfigBase64Ref.current = undefined;
+    streamFrameCountRef.current = 0;
+    streamStartTimeRef.current = performance.now();
+
+    try {
+      // 1. Prepare 1280x720 30fps Broadcast Encoder Canvas
+      if (!encoderCanvasRef.current) {
+        const c = document.createElement("canvas");
+        c.width = 1280;
+        c.height = 720;
+        encoderCanvasRef.current = c;
+      }
+
+      // 2. Configure Hardware H.264 Baseline Encoder (avc format for direct RTMP FLV muxing)
+      const encoder = new win.VideoEncoder({
+        output: (chunk, meta) => {
+          if (meta?.decoderConfig?.description) {
+            const descBytes = new Uint8Array(meta.decoderConfig.description);
+            if (descBytes.length > 0) {
+              avcConfigBase64Ref.current = uint8ArrayToBase64(descBytes);
+            }
+          }
+          const buf = new Uint8Array(chunk.byteLength);
+          chunk.copyTo(buf);
+          pendingRtmpFramesRef.current.push({
+            timestampMs: Math.max(0, Math.round(chunk.timestamp / 1000)),
+            isKeyframe: chunk.type === "key",
+            dataBase64: uint8ArrayToBase64(buf),
+          });
+          // Cap queue if network stalls
+          if (pendingRtmpFramesRef.current.length > 90) {
+            pendingRtmpFramesRef.current = pendingRtmpFramesRef.current.slice(-45);
+          }
+        },
+        error: (err) => {
+          setStreamError(`Encoder error: ${err.message}`);
+        },
+      });
+
+      encoder.configure({
+        codec: "avc1.42001f",
+        width: 1280,
+        height: 720,
+        bitrate: 2_500_000,
+        framerate: 30,
+        avc: { format: "avc" },
+      });
+      videoEncoderRef.current = encoder;
+
+      // Encode initial keyframe immediately so avcC sequence header is ready
+      if (liveCanvasRef.current && encoderCanvasRef.current) {
+        const eCtx = encoderCanvasRef.current.getContext("2d");
+        if (eCtx) {
+          eCtx.drawImage(liveCanvasRef.current, 0, 0, 1280, 720);
+          const firstVf = new win.VideoFrame(encoderCanvasRef.current, { timestamp: 0 });
+          encoder.encode(firstVf, { keyFrame: true });
+          firstVf.close();
+          streamFrameCountRef.current = 1;
+        }
+      }
+
+      // 3. Connect to Facebook Live / YouTube Live RTMPS Server
+      const startRes = await fetch("/api/rtmp-stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "start",
+          sessionId,
+          rtmpUrl: rtmpServerUrl,
+          streamKey: streamKey.trim(),
+          avcConfigBase64: avcConfigBase64Ref.current,
+        }),
+      });
+
+      const startJson = (await startRes.json()) as {
+        ok: boolean;
+        error?: string;
+      };
+
+      if (!startRes.ok || !startJson.ok) {
+        throw new Error(
+          startJson.error ||
+            "Could not connect to Facebook Live RTMPS server. Verify your Stream Key."
+        );
+      }
+
+      setIsConnectingStream(false);
+      setIsStreamingLive(true);
+      setStreamDurationSec(0);
+      setStreamFramesSent(0);
+      setStreamBytesSent(0);
+
+      // 4. Start 30fps Frame Encoding Loop from Right Live Program Canvas
+      encoderLoopRef.current = setInterval(() => {
+        const lCanvas = liveCanvasRef.current;
+        const eCanvas = encoderCanvasRef.current;
+        const enc = videoEncoderRef.current;
+        if (!lCanvas || !eCanvas || !enc || enc.state !== "configured") return;
+
+        const eCtx = eCanvas.getContext("2d");
+        if (!eCtx) return;
+        eCtx.drawImage(lCanvas, 0, 0, 1280, 720);
+
+        const elapsedUs = Math.round(
+          (performance.now() - streamStartTimeRef.current) * 1000
+        );
+        const isKey = streamFrameCountRef.current % 60 === 0; // Keyframe every 2s for Facebook Live
+        streamFrameCountRef.current += 1;
+
+        try {
+          const vf = new win.VideoFrame!(eCanvas, { timestamp: elapsedUs });
+          enc.encode(vf, { keyFrame: isKey });
+          vf.close();
+        } catch {}
+      }, 33);
+
+      // 5. Start Sequential RTMPS Packet Flush Loop (every 350ms, concurrency = 1)
+      flushLoopRef.current = setInterval(async () => {
+        if (isFlushingRtmpRef.current || pendingRtmpFramesRef.current.length === 0) {
+          return;
+        }
+        isFlushingRtmpRef.current = true;
+        const batch = pendingRtmpFramesRef.current.splice(0, 25);
+
+        try {
+          const pushRes = await fetch("/api/rtmp-stream", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              action: "push",
+              sessionId: rtmpSessionIdRef.current,
+              rtmpUrl: rtmpServerUrl,
+              streamKey: streamKey.trim(),
+              avcConfigBase64: avcConfigBase64Ref.current,
+              frames: batch,
+            }),
+          });
+          const pushJson = (await pushRes.json()) as {
+            ok: boolean;
+            bytesSent?: number;
+            framesSent?: number;
+            error?: string;
+          };
+          if (pushJson.ok) {
+            setStreamFramesSent((prev) => prev + (pushJson.framesSent || batch.length));
+            setStreamBytesSent((prev) => prev + (pushJson.bytesSent || 0));
+          } else if (pushJson.error) {
+            setStreamError(pushJson.error);
+          }
+        } catch {
+          // Network blip; next batch will auto-reconnect
+        } finally {
+          isFlushingRtmpRef.current = false;
+        }
+      }, 350);
+
+      // 6. Elapsed Stream Uptime Counter
+      streamTimerRef.current = setInterval(() => {
+        setStreamDurationSec((prev) => prev + 1);
+      }, 1000);
+    } catch (err) {
+      await stopRtmpLiveStream();
+      setStreamError(
+        err instanceof Error
+          ? err.message
+          : "Failed to start Facebook Live stream."
+      );
+    }
+  };
+
+  // Pop-Out Clean 16:9 Program Window (Alternative zero-latency capture for Facebook Screen Share / OBS)
+  const openCleanProgramWindow = () => {
+    const lCanvas = liveCanvasRef.current;
+    if (!lCanvas) return;
+    const popup = window.open(
+      "",
+      "BoxScoreCleanProgramOut",
+      "width=1280,height=720,menubar=no,toolbar=no,location=no,status=no"
+    );
+    if (!popup) {
+      alert("Please allow pop-ups to open the Clean 16:9 Live Program Window.");
+      return;
+    }
+    popup.document.write(`
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>BOX SCORE - Clean Live Program Feed (Share this window in Facebook Live)</title>
+          <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body { background: #000; width: 100vw; height: 100vh; overflow: hidden; display: flex; align-items: center; justify-content: center; }
+            video { width: 100%; height: 100%; object-fit: contain; }
+          </style>
+        </head>
+        <body>
+          <video id="cleanProgVideo" autoplay muted playsinline></video>
+        </body>
+      </html>
+    `);
+    popup.document.close();
+    const vid = popup.document.getElementById("cleanProgVideo") as HTMLVideoElement | null;
+    if (vid) {
+      vid.srcObject = lCanvas.captureStream(30);
+      vid.play().catch(() => {});
+    }
+  };
+
   // Create a Replay Scene from the selected Timeline In/Out range!
   const handleCreateReplaySceneFromTimeline = (pushImmediatelyToLive = false) => {
     if (!selectedTimelineVideo) {
@@ -1505,8 +1852,45 @@ function LiveBroadcastStudioContent() {
           </div>
         </div>
 
-        {/* Right: Quick Record & Storage Status */}
-        <div className="flex items-center gap-2">
+        {/* Right: Facebook Live Stream & Quick Record Controls */}
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Direct Facebook / YouTube Live Button */}
+          {!isStreamingLive ? (
+            <button
+              type="button"
+              onClick={() => setShowFbSetupModal(true)}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 px-3.5 py-1.5 text-xs font-black uppercase tracking-wider text-white shadow-sm cursor-pointer"
+            >
+              <Radio className="h-3.5 w-3.5" />
+              <span>Go Live on Facebook / YouTube</span>
+            </button>
+          ) : (
+            <div className="flex items-center gap-1.5 rounded-lg bg-emerald-950/90 border border-emerald-500 px-2.5 py-1">
+              <span className="h-2 w-2 rounded-full bg-emerald-400 animate-ping" />
+              <span className="text-[0.68rem] font-black uppercase text-emerald-300">
+                ON AIR • {streamPlatform.toUpperCase()} ({formatClock(streamDurationSec)})
+              </span>
+              <button
+                type="button"
+                onClick={stopRtmpLiveStream}
+                className="ml-1 rounded bg-rose-600 hover:bg-rose-500 px-2 py-0.5 text-[0.62rem] font-black uppercase text-white cursor-pointer"
+              >
+                End Stream
+              </button>
+            </div>
+          )}
+
+          {/* Clean 16:9 Program Window Pop-Out */}
+          <button
+            type="button"
+            onClick={openCleanProgramWindow}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 px-2.5 py-1.5 text-xs font-bold text-slate-200 cursor-pointer"
+            title="Pop out a clean 16:9 Live Program window (for Facebook Live Screen Share or external OBS)"
+          >
+            <Tv className="h-3.5 w-3.5 text-sky-400" />
+            <span className="hidden sm:inline">Clean Feed Pop-Out</span>
+          </button>
+
           {!isRecording ? (
             <button
               type="button"
@@ -2372,17 +2756,114 @@ function LiveBroadcastStudioContent() {
           </div>
         </div>
 
-        {/* DOCK 4: RECORD STORAGE DESTINATION & FB/YOUTUBE STREAM OUTPUT */}
+        {/* DOCK 4: FACEBOOK PAGE / YOUTUBE LIVE STREAM & RECORD STORAGE */}
         <div className="flex flex-col rounded-xl border border-slate-800 bg-[#131926] overflow-hidden">
           <div className="px-3 py-2 bg-slate-900 border-b border-slate-800 flex items-center justify-between">
             <span className="text-xs font-black uppercase tracking-wider text-white flex items-center gap-1.5">
-              <HardDrive className="h-3.5 w-3.5 text-rose-400" />
-              4. Storage &amp; Live Stream
+              <Radio className="h-3.5 w-3.5 text-blue-400" />
+              4. Facebook Live &amp; Storage
             </span>
+            <button
+              type="button"
+              onClick={() => setShowFbSetupModal(true)}
+              className="rounded bg-blue-600/20 border border-blue-500/40 px-2 py-0.5 text-[0.6rem] font-black uppercase text-blue-300 hover:bg-blue-600 hover:text-white cursor-pointer"
+            >
+              Setup Guide
+            </button>
           </div>
 
-          <div className="p-3 space-y-2.5 text-xs">
-            <label className="block text-[0.65rem] font-black uppercase text-slate-400">
+          <div className="p-3 space-y-2.5 text-xs overflow-y-auto max-h-80">
+            {/* Direct Facebook Page / YouTube Live Stream Key Box */}
+            <div className="rounded-xl border border-blue-500/40 bg-blue-950/20 p-2.5 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[0.68rem] font-black uppercase text-blue-300">
+                  Direct Stream Output (RTMPS)
+                </span>
+                <div className="flex gap-1">
+                  {(["facebook", "youtube"] as StreamPlatform[]).map((plat) => (
+                    <button
+                      key={plat}
+                      type="button"
+                      onClick={() => handleSelectStreamPlatform(plat)}
+                      className={`rounded px-2 py-0.5 text-[0.6rem] font-black uppercase cursor-pointer ${
+                        streamPlatform === plat
+                          ? "bg-blue-600 text-white"
+                          : "bg-slate-800 text-slate-400 hover:text-white"
+                      }`}
+                    >
+                      {plat === "facebook" ? "Facebook Page" : "YouTube"}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <label className="block text-[0.6rem] font-bold uppercase text-slate-400">
+                  {streamPlatform === "facebook"
+                    ? "Facebook Live Producer Stream Key (FB-...):"
+                    : "YouTube Stream Key:"}
+                </label>
+                <div className="flex items-center gap-1">
+                  <input
+                    type={showStreamKey ? "text" : "password"}
+                    value={streamKey}
+                    onChange={(e) => setStreamKey(e.target.value)}
+                    placeholder="Paste Stream Key (e.g. FB-1770291985...)"
+                    className="flex-1 rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-xs font-mono text-white focus:outline-none focus:border-blue-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowStreamKey((v) => !v)}
+                    className="rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 px-2 py-1.5 text-[0.62rem] font-bold text-slate-300 cursor-pointer"
+                  >
+                    {showStreamKey ? "Hide" : "Show"}
+                  </button>
+                </div>
+              </div>
+
+              {streamError && (
+                <div className="rounded-lg bg-rose-950/70 border border-rose-500/50 px-2.5 py-1.5 text-[0.65rem] font-bold text-rose-200">
+                  ⚠️ {streamError}
+                </div>
+              )}
+
+              {!isStreamingLive ? (
+                <button
+                  type="button"
+                  disabled={isConnectingStream}
+                  onClick={startRtmpLiveStream}
+                  className="w-full rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-60 px-3 py-2 text-xs font-black uppercase tracking-wider text-white shadow-md cursor-pointer flex items-center justify-center gap-1.5"
+                >
+                  <Radio className="h-3.5 w-3.5" />
+                  <span>
+                    {isConnectingStream
+                      ? "Connecting to Facebook Live..."
+                      : `Connect & Stream to ${streamPlatform === "facebook" ? "Facebook Live" : "YouTube"}`}
+                  </span>
+                </button>
+              ) : (
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between rounded-lg bg-emerald-950/70 border border-emerald-500/50 px-2.5 py-1.5 text-[0.65rem]">
+                    <span className="font-black text-emerald-300 flex items-center gap-1">
+                      <span className="h-2 w-2 rounded-full bg-emerald-400 animate-ping" />
+                      STREAMING LIVE ({formatClock(streamDurationSec)})
+                    </span>
+                    <span className="font-mono text-emerald-200">
+                      {streamFramesSent} frames • {(streamBytesSent / (1024 * 1024)).toFixed(1)} MB
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={stopRtmpLiveStream}
+                    className="w-full rounded-xl bg-rose-600 hover:bg-rose-500 px-3 py-1.5 text-xs font-black uppercase tracking-wider text-white cursor-pointer"
+                  >
+                    Stop Live Stream
+                  </button>
+                </div>
+              )}
+            </div>
+
+            <label className="block text-[0.65rem] font-black uppercase text-slate-400 pt-1">
               Where to Save Recorded Video:
             </label>
 
@@ -2424,45 +2905,179 @@ function LiveBroadcastStudioContent() {
                 </div>
               </label>
             ))}
+          </div>
+        </div>
+      </section>
 
-            {/* OBS Browser Source Link for FB / YouTube Live */}
-            <div className="pt-2 border-t border-slate-800 space-y-1">
-              <span className="text-[0.62rem] font-black uppercase text-amber-400">
-                Facebook / YouTube Live URL:
-              </span>
-              <div className="flex items-center gap-1">
+      {/* =====================================================================
+          5. FACEBOOK PAGE LIVE PRODUCER SETUP MODAL
+         ===================================================================== */}
+      {showFbSetupModal && (
+        <div
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
+          onClick={() => setShowFbSetupModal(false)}
+        >
+          <div
+            className="w-full max-w-xl rounded-2xl border border-blue-500/40 bg-[#131926] p-5 shadow-2xl space-y-4 text-slate-100"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-blue-600 text-white font-black">
+                  f
+                </span>
+                <div>
+                  <h2 className="text-sm font-black uppercase tracking-wider text-white">
+                    Go Live on Your Facebook Page
+                  </h2>
+                  <p className="text-xs text-slate-400">
+                    Connect Box Score OBS Studio directly to Facebook Live Producer
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowFbSetupModal(false)}
+                className="rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 px-2.5 py-1 text-xs font-bold text-slate-300 cursor-pointer"
+              >
+                ✕ Close
+              </button>
+            </div>
+
+            {/* Step-by-Step Instructions matching user's Facebook Live Producer screenshot */}
+            <div className="rounded-xl bg-slate-900/90 border border-slate-800 p-3.5 space-y-2.5 text-xs">
+              <p className="font-black uppercase text-amber-400 text-[0.68rem]">
+                How to Connect Your Facebook Page (3 Quick Steps):
+              </p>
+              <ol className="list-decimal list-inside space-y-1.5 text-slate-300 leading-relaxed">
+                <li>
+                  In your <strong>Facebook Live Producer</strong> tab (left sidebar under{" "}
+                  <span className="text-white font-bold">&ldquo;Choose where to post&rdquo;</span>),
+                  switch from <em>Post on profile</em> to{" "}
+                  <span className="text-blue-400 font-bold">&ldquo;Post to a Page you manage&rdquo;</span>{" "}
+                  and select your Facebook Page.
+                </li>
+                <li>
+                  Keep <span className="text-blue-400 font-bold">&ldquo;Streaming software&rdquo;</span>{" "}
+                  selected, click the blue <strong>Copy</strong> button next to{" "}
+                  <strong>Stream key</strong> (starts with <code className="text-amber-300">FB-1770...</code>),
+                  and paste it below.
+                </li>
+                <li>
+                  Click <strong>&ldquo;Connect &amp; Stream to Facebook Live&rdquo;</strong> below.
+                  Within ~3 seconds, your Right Live Program monitor (with Scorebug, cameras &amp; slow-mo replays) will appear inside Facebook&apos;s video preview — then click{" "}
+                  <strong className="text-blue-400">&ldquo;Go live&rdquo;</strong> on Facebook!
+                </li>
+              </ol>
+            </div>
+
+            {/* Platform & Server URL */}
+            <div className="space-y-3">
+              <div className="grid grid-cols-3 gap-2">
+                {(
+                  [
+                    { id: "facebook", label: "Facebook Page / Live" },
+                    { id: "youtube", label: "YouTube Live" },
+                    { id: "custom", label: "Custom RTMP" },
+                  ] as { id: StreamPlatform; label: string }[]
+                ).map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => handleSelectStreamPlatform(p.id)}
+                    className={`rounded-xl py-2 text-xs font-black uppercase border cursor-pointer ${
+                      streamPlatform === p.id
+                        ? "bg-blue-600 border-blue-400 text-white"
+                        : "bg-slate-900 border-slate-800 text-slate-400 hover:text-white"
+                    }`}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+
+              <div>
+                <label className="block text-[0.65rem] font-black uppercase text-slate-400 mb-1">
+                  Server URL (RTMPS):
+                </label>
                 <input
                   type="text"
-                  readOnly
-                  value={
-                    typeof window !== "undefined"
-                      ? `${window.location.origin}/scoreboard?leagueId=${selectedLeagueId}&matchId=${selectedMatchId}`
-                      : ""
-                  }
-                  className="flex-1 rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-[0.62rem] font-mono text-slate-300"
+                  value={rtmpServerUrl}
+                  onChange={(e) => setRtmpServerUrl(e.target.value)}
+                  className="w-full rounded-xl border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-mono text-slate-300 focus:outline-none focus:border-blue-500"
                 />
+              </div>
+
+              <div>
+                <label className="block text-[0.65rem] font-black uppercase text-amber-400 mb-1">
+                  Paste Your Facebook Stream Key (`FB-...`):
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type={showStreamKey ? "text" : "password"}
+                    value={streamKey}
+                    onChange={(e) => setStreamKey(e.target.value)}
+                    placeholder="FB-1770291985106628-0-Ab7g4J4HS0g..."
+                    className="flex-1 rounded-xl border border-blue-500/60 bg-slate-950 px-3 py-2.5 text-xs font-mono text-white focus:outline-none focus:border-blue-400"
+                    autoFocus
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowStreamKey((v) => !v)}
+                    className="rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 px-3 py-2.5 text-xs font-bold text-slate-200 cursor-pointer"
+                  >
+                    {showStreamKey ? "Hide" : "Show"}
+                  </button>
+                </div>
+              </div>
+
+              {streamError && (
+                <div className="rounded-xl bg-rose-950/80 border border-rose-500 px-3 py-2 text-xs font-bold text-rose-200">
+                  ⚠️ {streamError}
+                </div>
+              )}
+
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
                 <button
                   type="button"
-                  onClick={() =>
-                    handleCopyText(
-                      `${window.location.origin}/scoreboard?leagueId=${selectedLeagueId}&matchId=${selectedMatchId}`,
-                      "obs-link"
-                    )
-                  }
-                  className="rounded-lg bg-slate-800 hover:bg-slate-700 px-2 py-1 text-xs text-white cursor-pointer"
-                  title="Copy Scoreboard URL"
+                  onClick={openCleanProgramWindow}
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 px-3.5 py-2.5 text-xs font-bold text-slate-200 cursor-pointer"
                 >
-                  {copiedKey === "obs-link" ? (
-                    <Check className="h-3.5 w-3.5 text-emerald-400" />
-                  ) : (
-                    <Copy className="h-3.5 w-3.5" />
-                  )}
+                  <Tv className="h-4 w-4 text-sky-400" />
+                  <span>Or Pop-Out Clean 16:9 Window</span>
                 </button>
+
+                {!isStreamingLive ? (
+                  <button
+                    type="button"
+                    disabled={isConnectingStream}
+                    onClick={async () => {
+                      await startRtmpLiveStream();
+                    }}
+                    className="inline-flex items-center gap-2 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-60 px-5 py-2.5 text-xs font-black uppercase tracking-wider text-white shadow-lg cursor-pointer"
+                  >
+                    <Radio className="h-4 w-4" />
+                    <span>
+                      {isConnectingStream
+                        ? "Connecting to Facebook RTMPS..."
+                        : "Connect & Stream to Facebook Live"}
+                    </span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={stopRtmpLiveStream}
+                    className="inline-flex items-center gap-2 rounded-xl bg-rose-600 hover:bg-rose-500 px-5 py-2.5 text-xs font-black uppercase tracking-wider text-white shadow-lg cursor-pointer"
+                  >
+                    <Square className="h-4 w-4 fill-current" />
+                    <span>Stop Streaming ({formatClock(streamDurationSec)})</span>
+                  </button>
+                )}
               </div>
             </div>
           </div>
         </div>
-      </section>
+      )}
     </div>
   );
 }
