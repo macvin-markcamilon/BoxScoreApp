@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
+import Link from "next/link";
 import {
   Menu,
   ArrowLeft,
@@ -13,6 +14,7 @@ import {
   Users,
   BarChart3,
   GitBranch,
+  Radio,
 } from "lucide-react";
 import { BoxScoreLogo } from "@/components/brand/BoxScoreLogo";
 import { useBoxScoreStore } from "@/stores/useBoxScoreStore";
@@ -138,6 +140,18 @@ export function TopHeaderBar({ onOpenMobileMenu }: TopHeaderBarProps) {
 
       {/* Right Action Icons & Badges */}
       <div className="flex items-center gap-2.5">
+        {/* Direct Link to OBS Broadcast Studio */}
+        <Link
+          href={selectedLeagueId ? `/studio?leagueId=${selectedLeagueId}` : "/studio"}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="hidden sm:inline-flex items-center gap-1.5 rounded-xl border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-black uppercase text-rose-700 hover:bg-rose-100 hover:border-rose-300 transition-colors cursor-pointer shadow-2xs"
+          title="Open BoxScore OBS Broadcast Studio"
+        >
+          <Radio className="h-3.5 w-3.5 text-rose-600 animate-pulse" />
+          <span>OBS Live Studio</span>
+        </Link>
+
         {/* Quick League Switcher if more than 1 league */}
         {leagues.length > 0 && (
           <div className="hidden md:flex items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-2.5 py-1">

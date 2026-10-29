@@ -20,6 +20,8 @@ import {
   ArrowLeft,
   Menu,
   ChevronDown,
+  Radio,
+  Video,
 } from "lucide-react";
 import { BoxScoreLogo } from "@/components/brand/BoxScoreLogo";
 import { useBoxScoreStore } from "@/stores/useBoxScoreStore";
@@ -360,7 +362,31 @@ export function AppSidebar({ isMobileOpen, setIsMobileOpen }: AppSidebarProps) {
             )}
           </Link>
 
-          {/* 4. User Profile */}
+          {/* 4. OBS Live Broadcast Studio (Facebook/YouTube Live & Slow-Mo) */}
+          <Link
+            href={selectedLeagueId ? `/studio?leagueId=${selectedLeagueId}` : "/studio"}
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Open OBS Live Broadcast Studio with camera, scoreboard overlay & slow-mo replay"
+            className={`flex w-full items-center gap-3 rounded-xl px-3.5 py-3 text-xs font-black uppercase tracking-wider text-slate-200 hover:bg-white/10 hover:text-white transition-all cursor-pointer ${
+              isCollapsed ? "justify-center" : ""
+            }`}
+          >
+            <Radio className="h-4 w-4 shrink-0 text-rose-500 animate-pulse" />
+            {!isCollapsed && (
+              <div className="flex items-center justify-between flex-1">
+                <span className="flex items-center gap-1.5">
+                  <span>OBS Studio</span>
+                  <span className="rounded bg-rose-500/20 px-1.5 py-0.2 text-[0.6rem] font-black text-rose-400 border border-rose-500/30">
+                    LIVE
+                  </span>
+                </span>
+                <ExternalLink className="h-3 w-3 text-slate-400" />
+              </div>
+            )}
+          </Link>
+
+          {/* 5. User Profile */}
           <button
             type="button"
             onClick={() => {
