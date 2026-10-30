@@ -7,6 +7,7 @@ import {
   ArrowLeft,
   ArrowRight,
   ArrowLeftRight,
+  Bookmark,
   Camera,
   Check,
   Circle,
@@ -32,6 +33,7 @@ import {
   RefreshCw,
   Repeat,
   RotateCcw,
+  Save,
   Scissors,
   Search,
   Settings,
@@ -114,6 +116,17 @@ export type SceneLayoutMode =
   | "pip_top_right"
   | "quad_grid";
 
+export type WirelessDevicePlatform = "iphone" | "android";
+
+export interface SavedWirelessCamera {
+  id: string;
+  name: string;
+  platform: WirelessDevicePlatform;
+  roomCode: string;
+  ipUrl?: string;
+  createdAt: string;
+}
+
 export interface SceneCameraSlot {
   id: string;
   label: string;
@@ -122,6 +135,8 @@ export interface SceneCameraSlot {
   angleName: string;
   wirelessRoomCode?: string;
   wirelessIpUrl?: string;
+  wirelessPlatform?: WirelessDevicePlatform;
+  savedWirelessCamId?: string;
 }
 
 export interface ReplayClipConfig {
@@ -345,7 +360,7 @@ function LiveBroadcastStudioContent() {
   const gainNodeByIdRef = useRef<Record<string, GainNode>>({});
   const analyserByIdRef = useRef<Record<string, AnalyserNode>>({});
 
-  // Hardware Video Devices & Active Streams Map (keyed by slot.id)
+  // Hardware Video Devices & Active Streams Map (keyed by slot.id AND shared by wireless roomCode)
   const [videoDevices, setVideoDevices] = useState<MediaDeviceInfo[]>([]);
   const [activeSlotIds, setActiveSlotIds] = useState<Record<string, boolean>>({});
   const [cameraError, setCameraError] = useState<string | null>(null);
@@ -359,6 +374,27 @@ function LiveBroadcastStudioContent() {
   const [wirelessStatusBySlot, setWirelessStatusBySlot] = useState<
     Record<string, "waiting" | "webrtc" | "relay" | "ip">
   >({});
+
+  // Shared Wireless Camera Streams & Channels keyed by normalized Room Code (so any Scene can use a saved iPhone/Android camera simultaneously)
+  const wirelessStreamByRoomRef = useRef<Record<string, MediaStream>>({});
+  const wirelessVideoElByRoomRef = useRef<Record<string, HTMLVideoElement>>({});
+  const wirelessFrameImgByRoomRef = useRef<Record<string, HTMLImageElement>>({});
+  const wirelessPcByRoomRef = useRef<Record<string, RTCPeerConnection>>({});
+  const wirelessChannelByRoomRef = useRef<
+    Record<string, ReturnType<typeof supabase.channel>>
+  >({});
+  const [wirelessStatusByRoom, setWirelessStatusByRoom] = useState<
+    Record<string, "waiting" | "webrtc" | "relay" | "ip">
+  >({});
+
+  // Saved iPhone & Android Wireless Cameras (reusable across all Scenes & persisted in localStorage)
+  const [savedWirelessCameras, setSavedWirelessCameras] = useState<
+    SavedWirelessCamera[]
+  >([]);
+  const [wirelessCamNotice, setWirelessCamNotice] = useState<string | null>(
+    null
+  );
+
   const [pairingWirelessSlot, setPairingWirelessSlot] = useState<{
     sceneId: string;
     slotId: string;
@@ -1076,24 +1112,27 @@ function LiveBroadcastStudioContent() {
     return videoElBySlotRef.current[slotId];
   };
 
-  // Connect Wireless Phone Camera (iPhone / Android) via Supabase Realtime + WebRTC / Frame Relay
+  // Ensure shared hidden <video> element exists for a wireless Room Code so multiple Scenes can render the same iPhone/Android camera
+  const getOrCreateRoomVideoElement = (roomCode: string): HTMLVideoElement => {
+    const clean = roomCode.trim().toUpperCase();
+    if (!wirelessVideoElByRoomRef.current[clean]) {
+      const vid = document.createElement("video");
+      vid.playsInline = true;
+      vid.muted = true;
+      vid.autoplay = true;
+      wirelessVideoElByRoomRef.current[clean] = vid;
+    }
+    return wirelessVideoElByRoomRef.current[clean];
+  };
+
+  // Connect Wireless Phone Camera (iPhone / Android) via Supabase Realtime + WebRTC / Frame Relay (shared by Room Code across all Scenes)
   const connectWirelessPhoneSlot = useCallback(
-    (slot: SceneCameraSlot) => {
+    (slot: SceneCameraSlot, forceReconnect = false) => {
       const roomCode = (
         slot.wirelessRoomCode || `CAM${slot.id.slice(-4).toUpperCase()}`
       )
         .trim()
         .toUpperCase();
-
-      // Clean up existing channel / PeerConnection for this slot
-      if (wirelessPcBySlotRef.current[slot.id]) {
-        wirelessPcBySlotRef.current[slot.id].close();
-        delete wirelessPcBySlotRef.current[slot.id];
-      }
-      if (wirelessChannelBySlotRef.current[slot.id]) {
-        void supabase.removeChannel(wirelessChannelBySlotRef.current[slot.id]);
-        delete wirelessChannelBySlotRef.current[slot.id];
-      }
 
       // Optional Direct IP Camera MJPEG URL (e.g. Android IP Webcam http://192.168.1.50:8080/video)
       if (slot.wirelessIpUrl && slot.wirelessIpUrl.trim()) {
@@ -1101,20 +1140,105 @@ function LiveBroadcastStudioContent() {
         ipImg.crossOrigin = "anonymous";
         ipImg.src = slot.wirelessIpUrl.trim();
         wirelessFrameImgBySlotRef.current[slot.id] = ipImg;
+        wirelessFrameImgByRoomRef.current[roomCode] = ipImg;
         setActiveSlotIds((prev) => ({ ...prev, [slot.id]: true }));
         setWirelessStatusBySlot((prev) => ({ ...prev, [slot.id]: "ip" }));
+        setWirelessStatusByRoom((prev) => ({ ...prev, [roomCode]: "ip" }));
         return;
       }
 
-      setWirelessStatusBySlot((prev) => ({ ...prev, [slot.id]: "waiting" }));
       setActiveSlotIds((prev) => ({ ...prev, [slot.id]: true }));
+
+      // If this Room Code is already connected (e.g. from another Scene or Saved Wireless Cameras) and no forced reconnect is requested, reuse the live stream!
+      if (!forceReconnect && wirelessChannelByRoomRef.current[roomCode]) {
+        const existingStream = wirelessStreamByRoomRef.current[roomCode];
+        if (existingStream) {
+          streamBySlotRef.current[slot.id] = existingStream;
+          const vidEl = getOrCreateSlotVideoElement(slot.id);
+          if (vidEl.srcObject !== existingStream) {
+            vidEl.srcObject = existingStream;
+            void vidEl.play().catch(() => {});
+          }
+        }
+        const existingImg = wirelessFrameImgByRoomRef.current[roomCode];
+        if (existingImg) {
+          wirelessFrameImgBySlotRef.current[slot.id] = existingImg;
+        }
+        setWirelessStatusByRoom((prev) => {
+          const roomSt = prev[roomCode] || "waiting";
+          setWirelessStatusBySlot((sPrev) => ({ ...sPrev, [slot.id]: roomSt }));
+          return prev;
+        });
+        // Ping phone in case it is waiting to send a WebRTC offer
+        if (!wirelessStreamByRoomRef.current[roomCode]) {
+          void wirelessChannelByRoomRef.current[roomCode].send({
+            type: "broadcast",
+            event: "studio_ready",
+            payload: { roomCode },
+          });
+        }
+        return;
+      }
+
+      // Clean up existing channel / PeerConnection for this Room Code before creating a fresh connection
+      if (wirelessPcByRoomRef.current[roomCode]) {
+        wirelessPcByRoomRef.current[roomCode].close();
+        delete wirelessPcByRoomRef.current[roomCode];
+      }
+      if (wirelessChannelByRoomRef.current[roomCode]) {
+        void supabase.removeChannel(wirelessChannelByRoomRef.current[roomCode]);
+        delete wirelessChannelByRoomRef.current[roomCode];
+      }
+
+      setWirelessStatusBySlot((prev) => ({ ...prev, [slot.id]: "waiting" }));
+      setWirelessStatusByRoom((prev) => ({ ...prev, [roomCode]: "waiting" }));
+
+      const syncDetectedPhonePlatform = (rawPlatform?: unknown) => {
+        if (rawPlatform !== "iphone" && rawPlatform !== "android") return;
+        const validPlatform: WirelessDevicePlatform = rawPlatform;
+        setScenes((prev) =>
+          prev.map((sc) => ({
+            ...sc,
+            cameras: sc.cameras.map((c) =>
+              (c.wirelessRoomCode || "").trim().toUpperCase() === roomCode &&
+              c.wirelessPlatform !== validPlatform
+                ? { ...c, wirelessPlatform: validPlatform }
+                : c
+            ),
+          }))
+        );
+        setSavedWirelessCameras((prev) => {
+          const hasMatch = prev.some(
+            (w) =>
+              w.roomCode.toUpperCase() === roomCode &&
+              w.platform !== validPlatform
+          );
+          if (!hasMatch) return prev;
+          const updated: SavedWirelessCamera[] = prev.map((w) =>
+            w.roomCode.toUpperCase() === roomCode
+              ? { ...w, platform: validPlatform }
+              : w
+          );
+          try {
+            window.localStorage.setItem(
+              "boxscore_saved_wireless_cameras",
+              JSON.stringify(updated)
+            );
+          } catch {
+            // ignore
+          }
+          return updated;
+        });
+      };
 
       const ch = supabase.channel(`boxscore-wireless-cam-${roomCode}`, {
         config: { broadcast: { self: false } },
       });
+      wirelessChannelByRoomRef.current[roomCode] = ch;
       wirelessChannelBySlotRef.current[slot.id] = ch;
 
-      ch.on("broadcast", { event: "phone_joined" }, () => {
+      ch.on("broadcast", { event: "phone_joined" }, ({ payload }) => {
+        syncDetectedPhonePlatform(payload?.devicePlatform);
         void ch.send({
           type: "broadcast",
           event: "studio_ready",
@@ -1124,8 +1248,9 @@ function LiveBroadcastStudioContent() {
         .on("broadcast", { event: "webrtc_offer" }, async ({ payload }) => {
           try {
             if (!payload?.sdp) return;
-            if (wirelessPcBySlotRef.current[slot.id]) {
-              wirelessPcBySlotRef.current[slot.id].close();
+            syncDetectedPhonePlatform(payload?.devicePlatform);
+            if (wirelessPcByRoomRef.current[roomCode]) {
+              wirelessPcByRoomRef.current[roomCode].close();
             }
             const pc = new RTCPeerConnection({
               iceServers: [
@@ -1133,16 +1258,27 @@ function LiveBroadcastStudioContent() {
                 { urls: "stun:stun1.l.google.com:19302" },
               ],
             });
+            wirelessPcByRoomRef.current[roomCode] = pc;
             wirelessPcBySlotRef.current[slot.id] = pc;
 
             pc.ontrack = (ev) => {
               const remoteStream = ev.streams?.[0];
               if (remoteStream) {
+                wirelessStreamByRoomRef.current[roomCode] = remoteStream;
+                const roomVidEl = getOrCreateRoomVideoElement(roomCode);
+                roomVidEl.srcObject = remoteStream;
+                void roomVidEl.play().catch(() => {});
+
                 streamBySlotRef.current[slot.id] = remoteStream;
                 const vidEl = getOrCreateSlotVideoElement(slot.id);
                 vidEl.srcObject = remoteStream;
                 void vidEl.play().catch(() => {});
+
                 setActiveSlotIds((prev) => ({ ...prev, [slot.id]: true }));
+                setWirelessStatusByRoom((prev) => ({
+                  ...prev,
+                  [roomCode]: "webrtc",
+                }));
                 setWirelessStatusBySlot((prev) => ({
                   ...prev,
                   [slot.id]: "webrtc",
@@ -1184,7 +1320,9 @@ function LiveBroadcastStudioContent() {
           { event: "webrtc_ice_from_phone" },
           async ({ payload }) => {
             try {
-              const pc = wirelessPcBySlotRef.current[slot.id];
+              const pc =
+                wirelessPcByRoomRef.current[roomCode] ||
+                wirelessPcBySlotRef.current[slot.id];
               if (pc && payload?.candidate) {
                 await pc.addIceCandidate(new RTCIceCandidate(payload.candidate));
               }
@@ -1195,11 +1333,20 @@ function LiveBroadcastStudioContent() {
         )
         .on("broadcast", { event: "video_frame" }, ({ payload }) => {
           if (!payload?.frameDataUrl) return;
-          if (!wirelessFrameImgBySlotRef.current[slot.id]) {
-            wirelessFrameImgBySlotRef.current[slot.id] = new Image();
+          syncDetectedPhonePlatform(payload?.devicePlatform);
+          if (!wirelessFrameImgByRoomRef.current[roomCode]) {
+            wirelessFrameImgByRoomRef.current[roomCode] = new Image();
           }
-          wirelessFrameImgBySlotRef.current[slot.id].src = payload.frameDataUrl;
+          wirelessFrameImgByRoomRef.current[roomCode].src = payload.frameDataUrl;
+          wirelessFrameImgBySlotRef.current[slot.id] =
+            wirelessFrameImgByRoomRef.current[roomCode];
+
           setActiveSlotIds((prev) => ({ ...prev, [slot.id]: true }));
+          setWirelessStatusByRoom((prev) =>
+            prev[roomCode] === "webrtc"
+              ? prev
+              : { ...prev, [roomCode]: "relay" }
+          );
           setWirelessStatusBySlot((prev) =>
             prev[slot.id] === "webrtc" ? prev : { ...prev, [slot.id]: "relay" }
           );
@@ -1266,21 +1413,22 @@ function LiveBroadcastStudioContent() {
   };
 
   const stopCameraSlot = (slotId: string) => {
-    if (streamBySlotRef.current[slotId]) {
-      streamBySlotRef.current[slotId].getTracks().forEach((t) => t.stop());
+    const slotStream = streamBySlotRef.current[slotId];
+    if (slotStream) {
+      // Only stop underlying MediaStream tracks if it is NOT a shared wireless room stream
+      const isSharedWirelessStream = Object.values(
+        wirelessStreamByRoomRef.current
+      ).includes(slotStream);
+      if (!isSharedWirelessStream) {
+        slotStream.getTracks().forEach((t) => t.stop());
+      }
       delete streamBySlotRef.current[slotId];
     }
     if (videoElBySlotRef.current[slotId]) {
       videoElBySlotRef.current[slotId].srcObject = null;
     }
-    if (wirelessPcBySlotRef.current[slotId]) {
-      wirelessPcBySlotRef.current[slotId].close();
-      delete wirelessPcBySlotRef.current[slotId];
-    }
-    if (wirelessChannelBySlotRef.current[slotId]) {
-      void supabase.removeChannel(wirelessChannelBySlotRef.current[slotId]);
-      delete wirelessChannelBySlotRef.current[slotId];
-    }
+    delete wirelessPcBySlotRef.current[slotId];
+    delete wirelessChannelBySlotRef.current[slotId];
     delete wirelessFrameImgBySlotRef.current[slotId];
     setActiveSlotIds((prev) => ({ ...prev, [slotId]: false }));
   };
@@ -1407,16 +1555,34 @@ function LiveBroadcastStudioContent() {
       ctx.rect(rx, ry, rw, rh);
       ctx.clip();
 
-      const vidEl = videoElBySlotRef.current[slot.id];
-      const wirelessImgEl = wirelessFrameImgBySlotRef.current[slot.id];
+      const roomKey =
+        slot.sourceType === "wireless_phone"
+          ? (
+              slot.wirelessRoomCode || `CAM${slot.id.slice(-4).toUpperCase()}`
+            )
+              .trim()
+              .toUpperCase()
+          : "";
+      const vidEl =
+        (roomKey && wirelessVideoElByRoomRef.current[roomKey]) ||
+        videoElBySlotRef.current[slot.id];
+      const wirelessImgEl =
+        (roomKey && wirelessFrameImgByRoomRef.current[roomKey]) ||
+        wirelessFrameImgBySlotRef.current[slot.id];
+      const isWirelessSlotEnabled =
+        slot.sourceType === "wireless_phone" &&
+        activeSlotIds[slot.id] !== false &&
+        (Boolean(activeSlotIds[slot.id]) || Boolean(wirelessStatusByRoom[roomKey]));
       const isStreamReady =
         slot.sourceType !== "court_sim" &&
-        activeSlotIds[slot.id] &&
+        (slot.sourceType === "wireless_phone"
+          ? isWirelessSlotEnabled
+          : Boolean(activeSlotIds[slot.id])) &&
         vidEl &&
         vidEl.readyState >= 2;
       const isWirelessImgReady =
         slot.sourceType === "wireless_phone" &&
-        activeSlotIds[slot.id] &&
+        isWirelessSlotEnabled &&
         wirelessImgEl &&
         wirelessImgEl.complete &&
         wirelessImgEl.naturalWidth > 0;
@@ -1456,12 +1622,18 @@ function LiveBroadcastStudioContent() {
         const roomCode = (
           slot.wirelessRoomCode || `CAM${slot.id.slice(-4).toUpperCase()}`
         ).toUpperCase();
+        const platLabel =
+          slot.wirelessPlatform === "android"
+            ? "🤖 ANDROID WIRELESS CAM"
+            : slot.wirelessPlatform === "iphone"
+              ? "🍎 IPHONE WIRELESS CAM"
+              : "📱 WIRELESS PHONE CAM";
         ctx.fillStyle = "#38bdf8";
         ctx.font = "900 24px 'Inter', sans-serif";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
         ctx.fillText(
-          `📱 WIRELESS PHONE CAM (${roomCode})`,
+          `${platLabel} • ${slot.angleName || roomCode} (${roomCode})`,
           rx + rw / 2,
           ry + rh / 2 - 20
         );
@@ -1559,7 +1731,15 @@ function LiveBroadcastStudioContent() {
 
       ctx.restore();
     },
-    [activeSlotIds, awayTeamName, awayScore, homeScore, homeTeamName, clockSeconds]
+    [
+      activeSlotIds,
+      wirelessStatusByRoom,
+      awayTeamName,
+      awayScore,
+      homeScore,
+      homeTeamName,
+      clockSeconds,
+    ]
   );
 
   // Helper: Draw Scorebug Overlay (with Team Logos, Short Name/Initials, Timeout Pips, Penalty Indicator & Clean Shot Clock)
@@ -2696,20 +2876,340 @@ function LiveBroadcastStudioContent() {
     );
   };
 
+  // Load Saved Wireless Cameras (iPhone & Android) and Saved Camera Scenes on mount
+  const hasLoadedScenesFromStorageRef = useRef<boolean>(false);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const rawSavedCams = window.localStorage.getItem(
+        "boxscore_saved_wireless_cameras"
+      );
+      if (rawSavedCams) {
+        const parsedCams = JSON.parse(rawSavedCams) as SavedWirelessCamera[];
+        if (Array.isArray(parsedCams)) {
+          setSavedWirelessCameras(parsedCams);
+          parsedCams.forEach((wc) => {
+            if (wc.roomCode) {
+              connectWirelessPhoneSlot({
+                id: wc.id,
+                label: wc.name,
+                sourceType: "wireless_phone",
+                deviceId: "",
+                angleName: wc.name,
+                wirelessRoomCode: wc.roomCode,
+                wirelessIpUrl: wc.ipUrl || "",
+                wirelessPlatform: wc.platform,
+                savedWirelessCamId: wc.id,
+              });
+            }
+          });
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    try {
+      const rawScenes = window.localStorage.getItem(
+        "boxscore_studio_camera_scenes"
+      );
+      if (rawScenes) {
+        const parsedScenes = JSON.parse(rawScenes) as StudioScene[];
+        if (Array.isArray(parsedScenes) && parsedScenes.length > 0) {
+          setScenes(parsedScenes);
+          parsedScenes.forEach((sc) => {
+            sc.cameras?.forEach((slot) => {
+              if (slot.sourceType === "wireless_phone") {
+                connectWirelessPhoneSlot(slot);
+              }
+            });
+          });
+        }
+      }
+    } catch {
+      // ignore
+    }
+    hasLoadedScenesFromStorageRef.current = true;
+  }, [connectWirelessPhoneSlot]);
+
+  // Persist Camera Scenes (including saved wireless cameras assigned across Scenes) to localStorage
+  useEffect(() => {
+    if (
+      typeof window === "undefined" ||
+      !hasLoadedScenesFromStorageRef.current
+    ) {
+      return;
+    }
+    try {
+      const cameraScenesOnly = scenes.filter((s) => s.kind === "camera_scene");
+      if (cameraScenesOnly.length > 0) {
+        window.localStorage.setItem(
+          "boxscore_studio_camera_scenes",
+          JSON.stringify(cameraScenesOnly)
+        );
+      }
+    } catch {
+      // ignore
+    }
+  }, [scenes]);
+
+  // Save or Update an iPhone / Android Wireless Camera so it can be reused across any Scene
+  const handleSaveWirelessCameraFromSlot = (
+    slot: SceneCameraSlot,
+    customPlatform?: WirelessDevicePlatform
+  ) => {
+    const roomCode = (
+      slot.wirelessRoomCode || `CAM${slot.id.slice(-4).toUpperCase()}`
+    )
+      .trim()
+      .toUpperCase();
+    const ipUrl = (slot.wirelessIpUrl || "").trim();
+    const platform: WirelessDevicePlatform =
+      customPlatform ||
+      slot.wirelessPlatform ||
+      (slot.angleName.toLowerCase().includes("android") ? "android" : "iphone");
+    const name = (
+      slot.angleName ||
+      slot.label ||
+      (platform === "android" ? "Android Wireless Cam" : "iPhone Wireless Cam")
+    ).trim();
+
+    let savedEntry: SavedWirelessCamera | null = null;
+
+    setSavedWirelessCameras((prev) => {
+      const existingIdx = prev.findIndex(
+        (w) =>
+          (slot.savedWirelessCamId && w.id === slot.savedWirelessCamId) ||
+          w.roomCode.toUpperCase() === roomCode
+      );
+      let nextList: SavedWirelessCamera[];
+      if (existingIdx >= 0) {
+        const updated: SavedWirelessCamera = {
+          ...prev[existingIdx],
+          name,
+          platform,
+          roomCode,
+          ipUrl: ipUrl || undefined,
+        };
+        savedEntry = updated;
+        nextList = prev.map((w, i) => (i === existingIdx ? updated : w));
+      } else {
+        const created: SavedWirelessCamera = {
+          id: `wcam-${generateUUID().slice(0, 8)}`,
+          name,
+          platform,
+          roomCode,
+          ipUrl: ipUrl || undefined,
+          createdAt: new Date().toISOString(),
+        };
+        savedEntry = created;
+        nextList = [...prev, created];
+      }
+
+      try {
+        window.localStorage.setItem(
+          "boxscore_saved_wireless_cameras",
+          JSON.stringify(nextList)
+        );
+      } catch {
+        // ignore
+      }
+      return nextList;
+    });
+
+    const targetSavedId = savedEntry
+      ? (savedEntry as SavedWirelessCamera).id
+      : slot.savedWirelessCamId;
+
+    setScenes((prev) =>
+      prev.map((sc) => ({
+        ...sc,
+        cameras: sc.cameras.map((c) => {
+          const isSameSlotOrRoom =
+            c.id === slot.id ||
+            (c.sourceType === "wireless_phone" &&
+              (c.wirelessRoomCode || "").trim().toUpperCase() === roomCode);
+          if (!isSameSlotOrRoom) return c;
+          return {
+            ...c,
+            angleName: name,
+            wirelessRoomCode: roomCode,
+            wirelessIpUrl: ipUrl,
+            wirelessPlatform: platform,
+            savedWirelessCamId: targetSavedId,
+          };
+        }),
+      }))
+    );
+
+    connectWirelessPhoneSlot({
+      ...slot,
+      angleName: name,
+      wirelessRoomCode: roomCode,
+      wirelessIpUrl: ipUrl,
+      wirelessPlatform: platform,
+      savedWirelessCamId: targetSavedId,
+    });
+
+    setWirelessCamNotice(
+      `✓ Saved ${platform === "android" ? "🤖 Android" : "🍎 iPhone"} camera "${name}" (${roomCode})! You can now add or select it in any Scene.`
+    );
+    setTimeout(() => setWirelessCamNotice(null), 5000);
+  };
+
+  // Delete a Saved Wireless Camera from the reusable library
+  const handleDeleteSavedWirelessCamera = (savedCamId: string) => {
+    setSavedWirelessCameras((prev) => {
+      const nextList = prev.filter((w) => w.id !== savedCamId);
+      try {
+        window.localStorage.setItem(
+          "boxscore_saved_wireless_cameras",
+          JSON.stringify(nextList)
+        );
+      } catch {
+        // ignore
+      }
+      return nextList;
+    });
+  };
+
+  // Use a Saved iPhone / Android Wireless Camera in any target Scene (either assigning to a specific slot or adding to the Scene)
+  const handleUseSavedWirelessCameraInScene = (
+    savedCam: SavedWirelessCamera,
+    targetSceneId: string,
+    targetSlotId?: string
+  ) => {
+    const roomCode = savedCam.roomCode.trim().toUpperCase();
+    const targetSceneObj = scenes.find((s) => s.id === targetSceneId);
+    if (!targetSceneObj || targetSceneObj.kind !== "camera_scene") return;
+
+    // 1. If a specific camera slot ID was provided, assign the saved wireless camera to that slot
+    if (targetSlotId) {
+      const updatedSlot: SceneCameraSlot = {
+        id: targetSlotId,
+        label: savedCam.name,
+        sourceType: "wireless_phone",
+        deviceId: "",
+        angleName: savedCam.name,
+        wirelessRoomCode: roomCode,
+        wirelessIpUrl: savedCam.ipUrl || "",
+        wirelessPlatform: savedCam.platform,
+        savedWirelessCamId: savedCam.id,
+      };
+      setScenes((prev) =>
+        prev.map((sc) => {
+          if (sc.id !== targetSceneId) return sc;
+          return {
+            ...sc,
+            cameras: sc.cameras.map((c) =>
+              c.id === targetSlotId ? updatedSlot : c
+            ),
+          };
+        })
+      );
+      connectWirelessPhoneSlot(updatedSlot);
+      setWirelessCamNotice(
+        `📱 Assigned saved ${savedCam.platform === "android" ? "🤖 Android" : "🍎 iPhone"} camera "${savedCam.name}" (${roomCode}) to "${targetSceneObj.name}"!`
+      );
+      setTimeout(() => setWirelessCamNotice(null), 4000);
+      return;
+    }
+
+    // 2. Check if this saved wireless camera is already present in targetScene
+    const existingSlot = targetSceneObj.cameras.find(
+      (c) =>
+        c.sourceType === "wireless_phone" &&
+        ((c.wirelessRoomCode || "").trim().toUpperCase() === roomCode ||
+          c.savedWirelessCamId === savedCam.id)
+    );
+    if (existingSlot) {
+      connectWirelessPhoneSlot({
+        ...existingSlot,
+        angleName: savedCam.name,
+        wirelessRoomCode: roomCode,
+        wirelessIpUrl: savedCam.ipUrl || "",
+        wirelessPlatform: savedCam.platform,
+        savedWirelessCamId: savedCam.id,
+      });
+      setWirelessCamNotice(
+        `📱 "${savedCam.name}" (${roomCode}) is active in "${targetSceneObj.name}"!`
+      );
+      setTimeout(() => setWirelessCamNotice(null), 4000);
+      return;
+    }
+
+    // 3. If the scene has a single unactivated default placeholder slot, replace it; otherwise append as a new camera slot
+    const firstSlot = targetSceneObj.cameras[0];
+    const shouldReplaceSingleInactivePlaceholder =
+      targetSceneObj.cameras.length === 1 &&
+      firstSlot &&
+      firstSlot.sourceType === "camera" &&
+      !activeSlotIds[firstSlot.id];
+
+    const newSlotId = shouldReplaceSingleInactivePlaceholder
+      ? firstSlot.id
+      : `cam-${generateUUID().slice(0, 8)}`;
+
+    const newWirelessSlot: SceneCameraSlot = {
+      id: newSlotId,
+      label: savedCam.name,
+      sourceType: "wireless_phone",
+      deviceId: "",
+      angleName: savedCam.name,
+      wirelessRoomCode: roomCode,
+      wirelessIpUrl: savedCam.ipUrl || "",
+      wirelessPlatform: savedCam.platform,
+      savedWirelessCamId: savedCam.id,
+    };
+
+    setScenes((prev) =>
+      prev.map((sc) => {
+        if (sc.id !== targetSceneId) return sc;
+        const updatedCams = shouldReplaceSingleInactivePlaceholder
+          ? [newWirelessSlot]
+          : [...sc.cameras, newWirelessSlot];
+        const autoLayout: SceneLayoutMode =
+          updatedCams.length === 2 && sc.layout === "single"
+            ? "split_50_50"
+            : updatedCams.length >= 3 && sc.layout === "single"
+              ? "quad_grid"
+              : sc.layout;
+        return {
+          ...sc,
+          layout: autoLayout,
+          cameras: updatedCams,
+        };
+      })
+    );
+
+    connectWirelessPhoneSlot(newWirelessSlot);
+    setWirelessCamNotice(
+      `📱 Added saved ${savedCam.platform === "android" ? "🤖 Android" : "🍎 iPhone"} camera "${savedCam.name}" (${roomCode}) to "${targetSceneObj.name}"!`
+    );
+    setTimeout(() => setWirelessCamNotice(null), 4000);
+  };
+
   // Add an iPhone / Android Wireless Camera Slot to the Preview Scene and open the QR Pairing Modal
-  const handleAddWirelessPhoneCameraToPreviewScene = () => {
+  const handleAddWirelessPhoneCameraToPreviewScene = (
+    platform: WirelessDevicePlatform = "iphone"
+  ) => {
     if (!previewScene || previewScene.kind !== "camera_scene") return;
     const nextIdx = previewScene.cameras.length + 1;
     const slotId = `cam-${generateUUID().slice(0, 8)}`;
     const roomCode = `CAM${Math.floor(100 + Math.random() * 900)}`;
+    const defaultLabel =
+      platform === "android"
+        ? `Android Cam ${nextIdx}`
+        : `iPhone Cam ${nextIdx}`;
     const newSlot: SceneCameraSlot = {
       id: slotId,
-      label: `Phone Cam ${nextIdx}`,
+      label: defaultLabel,
       sourceType: "wireless_phone",
       deviceId: "",
-      angleName: `PHONE CAM ${nextIdx}`,
+      angleName: defaultLabel.toUpperCase(),
       wirelessRoomCode: roomCode,
       wirelessIpUrl: "",
+      wirelessPlatform: platform,
     };
 
     setScenes((prev) =>
@@ -5486,7 +5986,9 @@ function LiveBroadcastStudioContent() {
               <div className="flex items-center gap-1 shrink-0">
                 <button
                   type="button"
-                  onClick={handleAddWirelessPhoneCameraToPreviewScene}
+                  onClick={() =>
+                    handleAddWirelessPhoneCameraToPreviewScene("iphone")
+                  }
                   className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 px-2 py-0.5 text-[0.62rem] font-black uppercase text-white cursor-pointer"
                   title="Add iPhone or Android Phone as a Wireless Camera"
                 >
@@ -5506,6 +6008,19 @@ function LiveBroadcastStudioContent() {
           </div>
 
           <div className="p-2.5 flex-1 space-y-2.5 overflow-y-auto max-h-96">
+            {wirelessCamNotice && (
+              <div className="rounded-lg border border-emerald-500/50 bg-emerald-950/60 px-2.5 py-1.5 text-[0.62rem] font-bold text-emerald-200 flex items-center justify-between gap-2">
+                <span>{wirelessCamNotice}</span>
+                <button
+                  type="button"
+                  onClick={() => setWirelessCamNotice(null)}
+                  className="text-emerald-300 hover:text-white font-black cursor-pointer"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+
             {previewScene?.kind === "replay_scene" ? (
               <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 space-y-2 text-xs">
                 <p className="font-black text-amber-300 uppercase">
@@ -5661,27 +6176,253 @@ function LiveBroadcastStudioContent() {
                   </div>
                 </div>
 
+                {/* SAVED WIRELESS CAMERAS LIBRARY (REUSE IPHONE & ANDROID CAMERAS IN ANY SCENE) */}
+                <div className="rounded-xl border border-sky-500/30 bg-sky-950/15 p-2 space-y-1.5">
+                  <div className="flex items-center justify-between gap-1.5">
+                    <span className="text-[0.62rem] font-black uppercase tracking-wider text-sky-300 flex items-center gap-1">
+                      <Bookmark className="h-3 w-3 text-amber-400" />
+                      <span>
+                        Saved Wireless Cams ({savedWirelessCameras.length})
+                      </span>
+                    </span>
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleAddWirelessPhoneCameraToPreviewScene("iphone")
+                        }
+                        className="rounded bg-sky-600/25 hover:bg-sky-600/40 border border-sky-400/40 px-1.5 py-0.5 text-[0.55rem] font-black uppercase text-sky-200 cursor-pointer"
+                        title="Pair & Save a new iPhone Wireless Camera"
+                      >
+                        + 🍎 iPhone
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleAddWirelessPhoneCameraToPreviewScene("android")
+                        }
+                        className="rounded bg-emerald-600/25 hover:bg-emerald-600/40 border border-emerald-400/40 px-1.5 py-0.5 text-[0.55rem] font-black uppercase text-emerald-200 cursor-pointer"
+                        title="Pair & Save a new Android Wireless Camera"
+                      >
+                        + 🤖 Android
+                      </button>
+                    </div>
+                  </div>
+
+                  {savedWirelessCameras.length === 0 ? (
+                    <p className="text-[0.58rem] text-slate-400 leading-snug">
+                      No saved wireless cameras yet. Click{" "}
+                      <strong className="text-sky-300">Save Cam</strong> on any
+                      iPhone or Android wireless camera slot below (or in the QR
+                      modal) to reuse it across all Scenes.
+                    </p>
+                  ) : (
+                    <div className="space-y-1">
+                      {savedWirelessCameras.map((wc) => {
+                        const cleanRoom = wc.roomCode.toUpperCase();
+                        const roomStatus = wirelessStatusByRoom[cleanRoom];
+                        const isLiveConnected =
+                          roomStatus === "webrtc" ||
+                          roomStatus === "relay" ||
+                          roomStatus === "ip";
+                        const isInCurrentScene = Boolean(
+                          previewScene?.cameras.some(
+                            (c) =>
+                              c.sourceType === "wireless_phone" &&
+                              ((c.wirelessRoomCode || "")
+                                .trim()
+                                .toUpperCase() === cleanRoom ||
+                                c.savedWirelessCamId === wc.id)
+                          )
+                        );
+                        return (
+                          <div
+                            key={wc.id}
+                            className="flex items-center justify-between gap-1.5 rounded-lg bg-slate-900/95 border border-slate-800 px-2 py-1 text-[0.6rem]"
+                          >
+                            <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                              <span
+                                className={`h-2 w-2 rounded-full shrink-0 ${
+                                  isLiveConnected
+                                    ? "bg-emerald-400 animate-pulse"
+                                    : "bg-amber-400"
+                                }`}
+                                title={
+                                  isLiveConnected
+                                    ? "Wireless camera connected & streaming"
+                                    : "Ready / Waiting for phone stream"
+                                }
+                              />
+                              <span className="font-black text-white truncate">
+                                {wc.platform === "android" ? "🤖" : "🍎"}{" "}
+                                {wc.name}
+                              </span>
+                              <span className="rounded bg-slate-800 border border-slate-700 px-1 py-0.2 text-[0.54rem] font-mono font-bold text-amber-300 shrink-0">
+                                {cleanRoom}
+                              </span>
+                            </div>
+
+                            <div className="flex items-center gap-1 shrink-0">
+                              {previewScene && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleUseSavedWirelessCameraInScene(
+                                      wc,
+                                      previewScene.id
+                                    )
+                                  }
+                                  className={`rounded px-1.5 py-0.5 text-[0.55rem] font-black uppercase cursor-pointer border ${
+                                    isInCurrentScene
+                                      ? "bg-emerald-600/25 border-emerald-500/50 text-emerald-300"
+                                      : "bg-sky-600 hover:bg-sky-500 border-sky-400 text-white"
+                                  }`}
+                                  title={
+                                    isInCurrentScene
+                                      ? `Already active in ${previewScene.name} (click to refresh)`
+                                      : `Use "${wc.name}" in ${previewScene.name}`
+                                  }
+                                >
+                                  {isInCurrentScene
+                                    ? "✓ In Scene"
+                                    : "+ Use in Scene"}
+                                </button>
+                              )}
+
+                              {previewScene && previewScene.cameras.length > 0 && (
+                                <select
+                                  aria-label={`Assign ${wc.name} to camera slot`}
+                                  value=""
+                                  onChange={(e) => {
+                                    if (!e.target.value) return;
+                                    handleUseSavedWirelessCameraInScene(
+                                      wc,
+                                      previewScene.id,
+                                      e.target.value
+                                    );
+                                  }}
+                                  className="rounded border border-slate-700 bg-slate-800 px-1 py-0.5 text-[0.54rem] font-bold text-slate-300 cursor-pointer max-w-[66px]"
+                                  title="Replace a specific Camera Slot in this Scene with this Saved Wireless Camera"
+                                >
+                                  <option value="">Slot...</option>
+                                  {previewScene.cameras.map((c, cIdx) => (
+                                    <option key={c.id} value={c.id}>
+                                      Set Cam #{cIdx + 1}
+                                    </option>
+                                  ))}
+                                </select>
+                              )}
+
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleDeleteSavedWirelessCamera(wc.id)
+                                }
+                                className="p-0.5 text-slate-500 hover:text-rose-400 cursor-pointer"
+                                title="Remove from Saved Wireless Cameras"
+                              >
+                                <Trash2 className="h-3 w-3" />
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
                 {/* Camera Slots List */}
                 <div className="space-y-2">
                   {previewScene?.cameras.map((slot, idx) => {
-                    const isActive = Boolean(activeSlotIds[slot.id]);
+                    const roomKey =
+                      slot.sourceType === "wireless_phone"
+                        ? (
+                            slot.wirelessRoomCode ||
+                            `CAM${slot.id.slice(-4).toUpperCase()}`
+                          )
+                            .trim()
+                            .toUpperCase()
+                        : "";
+                    const effectiveWirelessStatus =
+                      (roomKey && wirelessStatusByRoom[roomKey]) ||
+                      wirelessStatusBySlot[slot.id];
+                    const isActive =
+                      slot.sourceType === "wireless_phone"
+                        ? activeSlotIds[slot.id] !== false &&
+                          (Boolean(activeSlotIds[slot.id]) ||
+                            Boolean(effectiveWirelessStatus))
+                        : Boolean(activeSlotIds[slot.id]);
+                    const matchingSavedCam =
+                      slot.sourceType === "wireless_phone"
+                        ? savedWirelessCameras.find(
+                            (w) =>
+                              (slot.savedWirelessCamId &&
+                                w.id === slot.savedWirelessCamId) ||
+                              w.roomCode.toUpperCase() === roomKey
+                          )
+                        : undefined;
+
                     return (
                       <div
                         key={slot.id}
                         className="rounded-xl border border-slate-700/80 bg-slate-900/90 p-2.5 space-y-2"
                       >
                         <div className="flex items-center justify-between gap-2">
-                          <input
-                            type="text"
-                            value={slot.angleName}
-                            onChange={(e) =>
-                              handleUpdateCameraSlot(previewScene.id, slot.id, {
-                                angleName: e.target.value,
-                              })
-                            }
-                            className="bg-transparent text-xs font-black text-white focus:outline-none border-b border-transparent focus:border-sky-400 w-40"
-                          />
-                          <div className="flex items-center gap-1">
+                          <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                            {slot.sourceType === "wireless_phone" && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleUpdateCameraSlot(
+                                    previewScene.id,
+                                    slot.id,
+                                    {
+                                      wirelessPlatform:
+                                        slot.wirelessPlatform === "android"
+                                          ? "iphone"
+                                          : "android",
+                                    }
+                                  )
+                                }
+                                className="rounded bg-slate-800 border border-slate-700 px-1.5 py-0.5 text-[0.58rem] font-black uppercase text-sky-300 shrink-0 cursor-pointer"
+                                title="Click to toggle iPhone / Android label"
+                              >
+                                {slot.wirelessPlatform === "android"
+                                  ? "🤖 Android"
+                                  : "🍎 iPhone"}
+                              </button>
+                            )}
+                            <input
+                              type="text"
+                              value={slot.angleName}
+                              onChange={(e) =>
+                                handleUpdateCameraSlot(previewScene.id, slot.id, {
+                                  angleName: e.target.value,
+                                })
+                              }
+                              className="bg-transparent text-xs font-black text-white focus:outline-none border-b border-transparent focus:border-sky-400 w-full min-w-0"
+                            />
+                          </div>
+                          <div className="flex items-center gap-1 shrink-0">
+                            {slot.sourceType === "wireless_phone" && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleSaveWirelessCameraFromSlot(slot)
+                                }
+                                className={`inline-flex items-center gap-1 rounded-lg px-2 py-0.5 text-[0.6rem] font-black uppercase cursor-pointer border ${
+                                  matchingSavedCam
+                                    ? "bg-amber-500/20 border-amber-400/50 text-amber-300 hover:bg-amber-500/30"
+                                    : "bg-sky-600 hover:bg-sky-500 border-sky-400 text-white"
+                                }`}
+                                title="Save this iPhone or Android wireless camera so you can use it in any other Scene"
+                              >
+                                <Save className="h-2.5 w-2.5" />
+                                <span>
+                                  {matchingSavedCam ? "Saved ✓" : "Save Cam"}
+                                </span>
+                              </button>
+                            )}
                             {!isActive ? (
                               <button
                                 type="button"
@@ -5714,12 +6455,31 @@ function LiveBroadcastStudioContent() {
                           </div>
                         </div>
 
-                        {/* Source Type & Hardware Device / Wireless Phone Dropdown */}
+                        {/* Source Type & Hardware Device / Saved Wireless Phone Dropdown */}
                         <div className="grid grid-cols-2 gap-1.5">
                           <select
                             value={slot.sourceType}
                             onChange={(e) => {
-                              const nextType = e.target.value as SceneCameraSlot["sourceType"];
+                              const rawVal = e.target.value;
+                              if (rawVal.startsWith("saved_wireless:")) {
+                                const savedId = rawVal.replace(
+                                  "saved_wireless:",
+                                  ""
+                                );
+                                const foundSaved = savedWirelessCameras.find(
+                                  (w) => w.id === savedId
+                                );
+                                if (foundSaved) {
+                                  handleUseSavedWirelessCameraInScene(
+                                    foundSaved,
+                                    previewScene.id,
+                                    slot.id
+                                  );
+                                }
+                                return;
+                              }
+                              const nextType =
+                                rawVal as SceneCameraSlot["sourceType"];
                               const defaultRoom =
                                 slot.wirelessRoomCode ||
                                 `CAM${Math.floor(100 + Math.random() * 900)}`;
@@ -5730,10 +6490,15 @@ function LiveBroadcastStudioContent() {
                                   nextType === "wireless_phone"
                                     ? defaultRoom
                                     : slot.wirelessRoomCode,
+                                wirelessPlatform:
+                                  nextType === "wireless_phone"
+                                    ? slot.wirelessPlatform || "iphone"
+                                    : slot.wirelessPlatform,
                               };
                               handleUpdateCameraSlot(previewScene.id, slot.id, {
                                 sourceType: nextType,
                                 wirelessRoomCode: updatedSlot.wirelessRoomCode,
+                                wirelessPlatform: updatedSlot.wirelessPlatform,
                               });
                               if (nextType === "wireless_phone") {
                                 connectWirelessPhoneSlot(updatedSlot);
@@ -5751,6 +6516,19 @@ function LiveBroadcastStudioContent() {
                             </option>
                             <option value="screen">🖥️ Capture Card / Screen</option>
                             <option value="court_sim">🏀 Simulated Court Cam #{idx + 1}</option>
+                            {savedWirelessCameras.length > 0 && (
+                              <optgroup label="📲 Saved Wireless Cameras (iPhone / Android)">
+                                {savedWirelessCameras.map((wc) => (
+                                  <option
+                                    key={wc.id}
+                                    value={`saved_wireless:${wc.id}`}
+                                  >
+                                    {wc.platform === "android" ? "🤖" : "🍎"}{" "}
+                                    {wc.name} ({wc.roomCode})
+                                  </option>
+                                ))}
+                              </optgroup>
+                            )}
                           </select>
 
                           {slot.sourceType === "camera" && (
@@ -5796,19 +6574,60 @@ function LiveBroadcastStudioContent() {
                           )}
                         </div>
 
+                        {/* Saved Wireless Camera Switcher when slot is Wireless Phone */}
+                        {slot.sourceType === "wireless_phone" &&
+                          savedWirelessCameras.length > 0 && (
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-[0.58rem] font-black uppercase text-slate-400 shrink-0">
+                                Saved Cam:
+                              </span>
+                              <select
+                                aria-label="Select Saved Wireless Camera for this slot"
+                                value={matchingSavedCam?.id || ""}
+                                onChange={(e) => {
+                                  const selectedId = e.target.value;
+                                  if (!selectedId) return;
+                                  const found = savedWirelessCameras.find(
+                                    (w) => w.id === selectedId
+                                  );
+                                  if (found) {
+                                    handleUseSavedWirelessCameraInScene(
+                                      found,
+                                      previewScene.id,
+                                      slot.id
+                                    );
+                                  }
+                                }}
+                                className="flex-1 rounded-lg border border-slate-700 bg-slate-950 px-2 py-1 text-[0.62rem] font-bold text-amber-300"
+                              >
+                                <option value="">
+                                  -- Custom Room ({roomKey}) --
+                                </option>
+                                {savedWirelessCameras.map((wc) => (
+                                  <option key={wc.id} value={wc.id}>
+                                    {wc.platform === "android"
+                                      ? "🤖 Android:"
+                                      : "🍎 iPhone:"}{" "}
+                                    {wc.name} ({wc.roomCode})
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          )}
+
                         {slot.sourceType === "wireless_phone" && (
                           <div className="flex items-center justify-between rounded-lg bg-slate-950/90 border border-slate-800 px-2 py-1 text-[0.6rem]">
                             <span className="font-bold text-slate-300">
                               Status:{" "}
-                              {wirelessStatusBySlot[slot.id] === "webrtc" ? (
+                              {effectiveWirelessStatus === "webrtc" ? (
                                 <strong className="text-emerald-400">
                                   🟢 Connected (WebRTC HD)
                                 </strong>
-                              ) : wirelessStatusBySlot[slot.id] === "relay" ? (
+                              ) : effectiveWirelessStatus === "relay" ? (
                                 <strong className="text-emerald-400">
                                   🟢 Connected (Cloud Stream)
                                 </strong>
-                              ) : wirelessStatusBySlot[slot.id] === "ip" ? (
+                              ) : effectiveWirelessStatus === "ip" ? (
                                 <strong className="text-emerald-400">
                                   🟢 Connected (IP Stream)
                                 </strong>
@@ -5818,18 +6637,29 @@ function LiveBroadcastStudioContent() {
                                 </strong>
                               )}
                             </span>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setPairingWirelessSlot({
-                                  sceneId: previewScene.id,
-                                  slotId: slot.id,
-                                })
-                              }
-                              className="text-sky-400 hover:underline font-black uppercase cursor-pointer"
-                            >
-                              Show QR
-                            </button>
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleSaveWirelessCameraFromSlot(slot)
+                                }
+                                className="text-amber-300 hover:underline font-black uppercase cursor-pointer"
+                              >
+                                {matchingSavedCam ? "Update Saved" : "Save Cam"}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setPairingWirelessSlot({
+                                    sceneId: previewScene.id,
+                                    slotId: slot.id,
+                                  })
+                                }
+                                className="text-sky-400 hover:underline font-black uppercase cursor-pointer"
+                              >
+                                Show QR
+                              </button>
+                            </div>
                           </div>
                         )}
                       </div>
@@ -6707,7 +7537,7 @@ function LiveBroadcastStudioContent() {
       )}
 
       {/* =====================================================================
-          6. PAIR IPHONE / ANDROID WIRELESS CAMERA MODAL (QR + LINK + IP CAM)
+          6. PAIR & SAVE IPHONE / ANDROID WIRELESS CAMERA MODAL (QR + LINK + IP CAM + MULTI-SCENE)
          ===================================================================== */}
       {pairingWirelessSlot &&
         (() => {
@@ -6722,24 +7552,45 @@ function LiveBroadcastStudioContent() {
           const roomCode = (
             targetSlot.wirelessRoomCode ||
             `CAM${targetSlot.id.slice(-4).toUpperCase()}`
-          ).toUpperCase();
+          )
+            .trim()
+            .toUpperCase();
+          const targetPlatform: WirelessDevicePlatform =
+            targetSlot.wirelessPlatform ||
+            (targetSlot.angleName.toLowerCase().includes("android")
+              ? "android"
+              : "iphone");
           const origin =
             typeof window !== "undefined" ? window.location.origin : "";
           const mobileCamUrl = `${origin}/studio/mobile-cam?room=${encodeURIComponent(
             roomCode
-          )}&name=${encodeURIComponent(targetSlot.angleName || targetSlot.label)}`;
+          )}&name=${encodeURIComponent(
+            targetSlot.angleName || targetSlot.label
+          )}&platform=${encodeURIComponent(targetPlatform)}`;
           const qrImageUrl = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&margin=8&data=${encodeURIComponent(
             mobileCamUrl
           )}`;
-          const status = wirelessStatusBySlot[targetSlot.id] || "waiting";
+          const status =
+            wirelessStatusByRoom[roomCode] ||
+            wirelessStatusBySlot[targetSlot.id] ||
+            "waiting";
+          const existingSavedCam = savedWirelessCameras.find(
+            (w) =>
+              (targetSlot.savedWirelessCamId &&
+                w.id === targetSlot.savedWirelessCamId) ||
+              w.roomCode.toUpperCase() === roomCode
+          );
+          const cameraScenesList = scenes.filter(
+            (s) => s.kind === "camera_scene"
+          );
 
           return (
             <div
-              className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
+              className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto"
               onClick={() => setPairingWirelessSlot(null)}
             >
               <div
-                className="w-full max-w-lg rounded-2xl border border-sky-500/40 bg-[#131926] p-5 shadow-2xl space-y-4 text-slate-100"
+                className="w-full max-w-xl rounded-2xl border border-sky-500/40 bg-[#131926] p-5 shadow-2xl space-y-3.5 text-slate-100 my-auto max-h-[92vh] overflow-y-auto"
                 onClick={(e) => e.stopPropagation()}
               >
                 <div className="flex items-center justify-between border-b border-slate-800 pb-3">
@@ -6749,10 +7600,10 @@ function LiveBroadcastStudioContent() {
                     </span>
                     <div>
                       <h2 className="text-sm font-black uppercase tracking-wider text-white">
-                        Connect iPhone or Android as Wireless Camera
+                        Pair &amp; Save iPhone or Android Wireless Camera
                       </h2>
                       <p className="text-xs text-slate-400">
-                        Scan QR code with your phone camera — no app install required
+                        Scan QR code once, save camera, and reuse it across any Scene
                       </p>
                     </div>
                   </div>
@@ -6765,6 +7616,181 @@ function LiveBroadcastStudioContent() {
                   </button>
                 </div>
 
+                {/* Device Type (iPhone / Android), Camera Name & Room Code + SAVE BUTTON */}
+                <div className="rounded-xl border border-sky-500/30 bg-slate-900/90 p-3 space-y-2.5 text-xs">
+                  <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-end">
+                    <div className="sm:col-span-4">
+                      <label className="block text-[0.6rem] font-black uppercase text-slate-400 mb-1">
+                        Phone Type:
+                      </label>
+                      <div className="grid grid-cols-2 gap-1">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleUpdateCameraSlot(
+                              targetScene.id,
+                              targetSlot.id,
+                              { wirelessPlatform: "iphone" }
+                            )
+                          }
+                          className={`rounded-lg py-1.5 px-2 text-[0.62rem] font-black uppercase border cursor-pointer ${
+                            targetPlatform === "iphone"
+                              ? "bg-sky-600 border-sky-400 text-white"
+                              : "bg-slate-950 border-slate-800 text-slate-400 hover:text-white"
+                          }`}
+                        >
+                          🍎 iPhone
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleUpdateCameraSlot(
+                              targetScene.id,
+                              targetSlot.id,
+                              { wirelessPlatform: "android" }
+                            )
+                          }
+                          className={`rounded-lg py-1.5 px-2 text-[0.62rem] font-black uppercase border cursor-pointer ${
+                            targetPlatform === "android"
+                              ? "bg-emerald-600 border-emerald-400 text-white"
+                              : "bg-slate-950 border-slate-800 text-slate-400 hover:text-white"
+                          }`}
+                        >
+                          🤖 Android
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="sm:col-span-5">
+                      <label className="block text-[0.6rem] font-black uppercase text-slate-400 mb-1">
+                        Camera Label / Name:
+                      </label>
+                      <input
+                        type="text"
+                        value={targetSlot.angleName}
+                        onChange={(e) =>
+                          handleUpdateCameraSlot(
+                            targetScene.id,
+                            targetSlot.id,
+                            {
+                              angleName: e.target.value,
+                              label: e.target.value,
+                            }
+                          )
+                        }
+                        placeholder={
+                          targetPlatform === "android"
+                            ? "Android Baseline Cam"
+                            : "iPhone Center Court"
+                        }
+                        className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-xs font-bold text-white focus:outline-none focus:border-sky-400"
+                      />
+                    </div>
+
+                    <div className="sm:col-span-3">
+                      <label className="block text-[0.6rem] font-black uppercase text-slate-400 mb-1">
+                        Room Code:
+                      </label>
+                      <input
+                        type="text"
+                        value={roomCode}
+                        onChange={(e) => {
+                          const nextCode = e.target.value.toUpperCase();
+                          handleUpdateCameraSlot(
+                            targetScene.id,
+                            targetSlot.id,
+                            { wirelessRoomCode: nextCode }
+                          );
+                          if (nextCode.trim().length >= 3) {
+                            connectWirelessPhoneSlot({
+                              ...targetSlot,
+                              wirelessRoomCode: nextCode,
+                            });
+                          }
+                        }}
+                        className="w-full rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-xs font-black uppercase tracking-wider text-amber-300 focus:outline-none focus:border-amber-400"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                    <span className="text-[0.62rem] text-slate-400">
+                      {existingSavedCam
+                        ? `✓ Saved as "${existingSavedCam.name}" (${existingSavedCam.roomCode}) — available in all Scenes`
+                        : "Save this wireless camera to quickly select or add it in other Scenes:"}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleSaveWirelessCameraFromSlot(
+                          targetSlot,
+                          targetPlatform
+                        )
+                      }
+                      className="inline-flex items-center gap-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 px-3.5 py-1.5 text-xs font-black uppercase tracking-wider text-slate-950 shadow cursor-pointer"
+                    >
+                      <Save className="h-3.5 w-3.5" />
+                      <span>
+                        {existingSavedCam
+                          ? "Update Saved Wireless Camera"
+                          : "Save Wireless Camera for All Scenes"}
+                      </span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Quick-Select Previously Saved Wireless Cameras */}
+                {savedWirelessCameras.length > 0 && (
+                  <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-2.5 space-y-1.5 text-xs">
+                    <span className="block text-[0.6rem] font-black uppercase text-sky-300">
+                      📲 Saved iPhone &amp; Android Cameras (Click to Load into This Slot):
+                    </span>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {savedWirelessCameras.map((wc) => {
+                        const isSelected =
+                          wc.roomCode.toUpperCase() === roomCode;
+                        const wcStatus =
+                          wirelessStatusByRoom[wc.roomCode.toUpperCase()];
+                        const isLive =
+                          wcStatus === "webrtc" ||
+                          wcStatus === "relay" ||
+                          wcStatus === "ip";
+                        return (
+                          <button
+                            key={wc.id}
+                            type="button"
+                            onClick={() =>
+                              handleUseSavedWirelessCameraInScene(
+                                wc,
+                                targetScene.id,
+                                targetSlot.id
+                              )
+                            }
+                            className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[0.62rem] font-black border cursor-pointer transition-all ${
+                              isSelected
+                                ? "bg-sky-600 border-sky-400 text-white shadow"
+                                : "bg-slate-950 border-slate-700 text-slate-200 hover:border-sky-400"
+                            }`}
+                          >
+                            <span>
+                              {wc.platform === "android" ? "🤖" : "🍎"}{" "}
+                              {wc.name}
+                            </span>
+                            <span className="font-mono text-[0.55rem] text-amber-300">
+                              ({wc.roomCode})
+                            </span>
+                            <span
+                              className={`h-1.5 w-1.5 rounded-full ${
+                                isLive ? "bg-emerald-400" : "bg-amber-400"
+                              }`}
+                            />
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
                 {/* QR Code + Room Code Card */}
                 <div className="grid grid-cols-1 sm:grid-cols-5 gap-4 items-center rounded-xl bg-slate-900/90 border border-slate-800 p-4">
                   <div className="sm:col-span-2 flex flex-col items-center justify-center">
@@ -6772,7 +7798,7 @@ function LiveBroadcastStudioContent() {
                       <img
                         src={qrImageUrl}
                         alt="Scan QR Code with iPhone or Android"
-                        className="h-40 w-40 object-contain"
+                        className="h-36 w-36 object-contain"
                       />
                     </div>
                     <span className="mt-2 text-[0.62rem] font-black uppercase text-amber-300">
@@ -6803,8 +7829,8 @@ function LiveBroadcastStudioContent() {
                         Tap <strong>&ldquo;Start Wireless Camera&rdquo;</strong> on your phone and allow Camera access.
                       </li>
                       <li>
-                        Your phone&apos;s live video feed will immediately appear in{" "}
-                        <strong className="text-sky-300">{targetSlot.angleName}</strong>!
+                        Click <strong>&ldquo;Save Wireless Camera for All Scenes&rdquo;</strong> above to use{" "}
+                        <strong className="text-sky-300">{targetSlot.angleName}</strong> in any Scene!
                       </li>
                     </ol>
 
@@ -6836,6 +7862,72 @@ function LiveBroadcastStudioContent() {
                   </div>
                 </div>
 
+                {/* One-Click Apply to Other Scenes */}
+                {cameraScenesList.length > 1 && (
+                  <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/15 p-3 space-y-2 text-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[0.62rem] font-black uppercase text-emerald-300">
+                        🎬 Use This Wireless Camera in Other Scenes:
+                      </span>
+                      <span className="text-[0.58rem] text-slate-400">
+                        Shares live feed across scenes without re-pairing
+                      </span>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {cameraScenesList.map((sc) => {
+                        const isInScene = sc.cameras.some(
+                          (c) =>
+                            c.sourceType === "wireless_phone" &&
+                            (c.wirelessRoomCode || "")
+                              .trim()
+                              .toUpperCase() === roomCode
+                        );
+                        return (
+                          <button
+                            key={sc.id}
+                            type="button"
+                            onClick={() => {
+                              const camObj: SavedWirelessCamera =
+                                existingSavedCam || {
+                                  id:
+                                    targetSlot.savedWirelessCamId ||
+                                    `wcam-${generateUUID().slice(0, 8)}`,
+                                  name:
+                                    targetSlot.angleName ||
+                                    targetSlot.label ||
+                                    "Wireless Phone Cam",
+                                  platform: targetPlatform,
+                                  roomCode,
+                                  ipUrl: targetSlot.wirelessIpUrl || undefined,
+                                  createdAt: new Date().toISOString(),
+                                };
+                              if (!existingSavedCam) {
+                                handleSaveWirelessCameraFromSlot(
+                                  targetSlot,
+                                  targetPlatform
+                                );
+                              }
+                              handleUseSavedWirelessCameraInScene(
+                                camObj,
+                                sc.id
+                              );
+                            }}
+                            className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-[0.6rem] font-black uppercase border cursor-pointer transition-colors ${
+                              isInScene
+                                ? "bg-emerald-600/25 border-emerald-500/50 text-emerald-300"
+                                : "bg-slate-900 hover:bg-slate-800 border-slate-700 text-slate-200 hover:border-emerald-400"
+                            }`}
+                          >
+                            <span>
+                              {isInScene ? "✓ In" : "+ Use in"} {sc.name}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
                 {/* Optional: Direct IP Webcam MJPEG URL (DroidCam / IP Webcam App) */}
                 <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-3 space-y-2 text-xs">
                   <label className="block text-[0.62rem] font-black uppercase text-slate-400">
@@ -6855,7 +7947,7 @@ function LiveBroadcastStudioContent() {
                     />
                     <button
                       type="button"
-                      onClick={() => connectWirelessPhoneSlot(targetSlot)}
+                      onClick={() => connectWirelessPhoneSlot(targetSlot, true)}
                       className="rounded-lg bg-emerald-600 hover:bg-emerald-500 px-3 py-1.5 text-xs font-black uppercase text-white cursor-pointer shrink-0"
                     >
                       Connect

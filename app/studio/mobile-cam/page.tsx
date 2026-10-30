@@ -28,10 +28,14 @@ const RTC_CONFIG: RTCConfiguration = {
 function MobileCameraSenderContent() {
   const searchParams = useSearchParams();
   const initialRoom = (searchParams.get("room") || "").trim().toUpperCase();
-  const initialName = searchParams.get("name") || "Mobile Cam";
+  const initialName = searchParams.get("name") || "";
+  const initialPlatformParam = searchParams.get("platform");
 
   const [roomCode, setRoomCode] = useState<string>(initialRoom);
-  const [camName, setCamName] = useState<string>(initialName);
+  const [camName, setCamName] = useState<string>(initialName || "Mobile Cam");
+  const [devicePlatform, setDevicePlatform] = useState<"iphone" | "android">(
+    initialPlatformParam === "android" ? "android" : "iphone"
+  );
   const [facingMode, setFacingMode] = useState<"environment" | "user">("environment");
   const [resolution, setResolution] = useState<"720p" | "1080p">("720p");
   const [videoDevices, setVideoDevices] = useState<MediaDeviceInfo[]>([]);
@@ -184,13 +188,14 @@ function MobileCameraSenderContent() {
         payload: {
           roomCode,
           camName,
+          devicePlatform,
           sdp: pc.localDescription,
         },
       });
     } catch {
       setConnectionState("streaming_relay");
     }
-  }, [roomCode, camName]);
+  }, [roomCode, camName, devicePlatform]);
 
   // Connect to Supabase Realtime Signaling & Relay Channel whenever roomCode + camera are active
   useEffect(() => {
@@ -236,7 +241,7 @@ function MobileCameraSenderContent() {
           void ch.send({
             type: "broadcast",
             event: "phone_joined",
-            payload: { roomCode: cleanRoom, camName },
+            payload: { roomCode: cleanRoom, camName, devicePlatform },
           });
           void initiateWebRtcOffer();
         }
@@ -269,6 +274,7 @@ function MobileCameraSenderContent() {
             payload: {
               roomCode: cleanRoom,
               camName,
+              devicePlatform,
               frameDataUrl: dataUrl,
               ts: Date.now(),
             },
@@ -286,11 +292,55 @@ function MobileCameraSenderContent() {
       void supabase.removeChannel(ch);
       channelRef.current = null;
     };
-  }, [roomCode, camName, isCameraActive, initiateWebRtcOffer]);
+  }, [roomCode, camName, devicePlatform, isCameraActive, initiateWebRtcOffer]);
 
-  // Auto-start camera on mount if room code is in URL
+  // Auto-detect phone platform & restore saved roomCode/camName if not passed via URL, then auto-start camera
   useEffect(() => {
-    if (initialRoom) {
+    let detectedPlatform: "iphone" | "android" =
+      initialPlatformParam === "android" ? "android" : "iphone";
+    if (typeof navigator !== "undefined" && !initialPlatformParam) {
+      const ua = navigator.userAgent.toLowerCase();
+      if (ua.includes("android")) {
+        detectedPlatform = "android";
+      } else if (ua.includes("iphone") || ua.includes("ipad") || ua.includes("ipod")) {
+        detectedPlatform = "iphone";
+      }
+    }
+
+    let restoredRoom = initialRoom;
+    let restoredName = initialName;
+    if (typeof window !== "undefined") {
+      try {
+        const raw = window.localStorage.getItem("boxscore_mobile_cam_config");
+        if (raw) {
+          const parsed = JSON.parse(raw) as {
+            roomCode?: string;
+            camName?: string;
+            devicePlatform?: "iphone" | "android";
+          };
+          if (!restoredRoom && parsed.roomCode) {
+            restoredRoom = parsed.roomCode.toUpperCase();
+            setRoomCode(restoredRoom);
+          }
+          if (!restoredName && parsed.camName) {
+            restoredName = parsed.camName;
+            setCamName(restoredName);
+          }
+          if (!initialPlatformParam && parsed.devicePlatform) {
+            detectedPlatform = parsed.devicePlatform;
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    setDevicePlatform(detectedPlatform);
+    if (!restoredName) {
+      setCamName(detectedPlatform === "android" ? "Android Cam" : "iPhone Cam");
+    }
+
+    if (restoredRoom) {
       void startPhoneCamera("environment", "720p", "");
     }
     return () => {
@@ -300,6 +350,23 @@ function MobileCameraSenderContent() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Persist mobile cam config locally on phone so user can reconnect anytime
+  useEffect(() => {
+    if (typeof window === "undefined" || !roomCode.trim()) return;
+    try {
+      window.localStorage.setItem(
+        "boxscore_mobile_cam_config",
+        JSON.stringify({
+          roomCode: roomCode.trim().toUpperCase(),
+          camName,
+          devicePlatform,
+        })
+      );
+    } catch {
+      // ignore
+    }
+  }, [roomCode, camName, devicePlatform]);
 
   const handleFlipCamera = () => {
     const next = facingMode === "environment" ? "user" : "environment";
@@ -426,6 +493,36 @@ function MobileCameraSenderContent() {
 
         {/* Room Code & Camera Controls Card */}
         <div className="rounded-2xl border border-slate-800 bg-[#131926] p-4 space-y-3">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[0.62rem] font-black uppercase text-slate-400">
+              Wireless Device Type:
+            </span>
+            <div className="grid grid-cols-2 gap-1.5 w-52">
+              <button
+                type="button"
+                onClick={() => setDevicePlatform("iphone")}
+                className={`rounded-lg py-1.5 px-2.5 text-[0.65rem] font-black uppercase border cursor-pointer transition-colors ${
+                  devicePlatform === "iphone"
+                    ? "bg-sky-600 border-sky-400 text-white"
+                    : "bg-slate-900 border-slate-700 text-slate-400"
+                }`}
+              >
+                🍎 iPhone (iOS)
+              </button>
+              <button
+                type="button"
+                onClick={() => setDevicePlatform("android")}
+                className={`rounded-lg py-1.5 px-2.5 text-[0.65rem] font-black uppercase border cursor-pointer transition-colors ${
+                  devicePlatform === "android"
+                    ? "bg-emerald-600 border-emerald-400 text-white"
+                    : "bg-slate-900 border-slate-700 text-slate-400"
+                }`}
+              >
+                🤖 Android
+              </button>
+            </div>
+          </div>
+
           <div className="grid grid-cols-2 gap-2.5">
             <div>
               <label className="block text-[0.62rem] font-black uppercase text-slate-400 mb-1">
