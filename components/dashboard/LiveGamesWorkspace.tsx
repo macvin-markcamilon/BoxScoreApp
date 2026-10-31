@@ -37,6 +37,29 @@ interface LiveMatchItem {
   isClockRunning: boolean;
 }
 
+// Helper to normalize Facebook URLs so plugins/video.php can reliably load and play them
+function normalizeFacebookEmbedUrl(url: string, autoplay: boolean, mute: boolean): string {
+  let clean = url.trim();
+
+  // If user pasted a URL with /watch/live/?v= or /watch/?v= or facebook.com/live/producer/..., normalize to canonical video permalink
+  const vMatch = clean.match(/[?&]v=([0-9]+)/);
+  if (vMatch && vMatch[1]) {
+    clean = `https://www.facebook.com/watch/?v=${vMatch[1]}`;
+  } else {
+    const videoPathMatch = clean.match(/facebook\.com\/[^/]+\/videos\/([0-9]+)/);
+    if (videoPathMatch && videoPathMatch[1]) {
+      clean = `https://www.facebook.com/watch/?v=${videoPathMatch[1]}`;
+    }
+  }
+
+  // Meta plugin expects autoplay=true / false, mute=0 / 1 or muted=true
+  const encodedHref = encodeURIComponent(clean);
+  const autoplayParam = autoplay ? "true" : "false";
+  const muteParam = mute ? "1" : "0";
+
+  return `https://www.facebook.com/plugins/video.php?href=${encodedHref}&show_text=false&autoplay=${autoplayParam}&mute=${muteParam}&t=0`;
+}
+
 export function LiveGamesWorkspace() {
   const {
     leagues,
@@ -54,7 +77,7 @@ export function LiveGamesWorkspace() {
   const [selectedStreamMatchId, setSelectedStreamMatchId] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [isPlaying, setIsPlaying] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(true);
   const [isMuted, setIsMuted] = useState(true);
   const videoContainerRef = useRef<HTMLDivElement | null>(null);
 
@@ -385,9 +408,7 @@ export function LiveGamesWorkspace() {
                 >
                   <iframe
                     key={activeFocusItem.match.id + activeFocusItem.streamUrl + (isPlaying ? "_play" : "_init") + (isMuted ? "_muted" : "_unmuted")}
-                    src={`https://www.facebook.com/plugins/video.php?href=${encodeURIComponent(
-                      activeFocusItem.streamUrl
-                    )}&show_text=0&autoplay=${isPlaying ? 1 : 0}&mute=${isMuted ? 1 : 0}`}
+                    src={normalizeFacebookEmbedUrl(activeFocusItem.streamUrl, isPlaying, isMuted)}
                     className="absolute inset-0 h-full w-full border-0"
                     allow="autoplay; clipboard-write; encrypted-media; picture-in-picture; web-share; fullscreen"
                     allowFullScreen
