@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useMemo } from "react";
 import Link from "next/link";
 import {
   LayoutDashboard,
@@ -46,6 +46,8 @@ export function AppSidebar({
     selectedLeagueId,
     selectedLeagueTab,
     notifications,
+    tournamentsByLeagueId,
+    gameSessionsByMatchId,
     setActiveSection,
     setSelectedLeagueId,
     setSelectedLeagueTab,
@@ -83,6 +85,23 @@ export function AppSidebar({
       setIsLeaguesExpanded(true);
     }
   }, [selectedLeagueId]);
+
+  // Count active Facebook live games across all tournaments
+  const liveGamesCount = useMemo(() => {
+    let count = 0;
+    for (const lg of leagues) {
+      const tourney = tournamentsByLeagueId[lg.id];
+      const matches = tourney?.matches ?? [];
+      for (const m of matches) {
+        const session = gameSessionsByMatchId[m.id];
+        const streamUrl = m.streamUrl || session?.streamUrl;
+        if (streamUrl && streamUrl.trim().length > 0) {
+          count++;
+        }
+      }
+    }
+    return count;
+  }, [leagues, tournamentsByLeagueId, gameSessionsByMatchId]);
 
   const normalizedUserEmail = userProfile?.email?.trim().toLowerCase() ?? "";
 
@@ -246,6 +265,41 @@ export function AppSidebar({
           >
             <LayoutDashboard className="h-4 w-4 shrink-0" />
             {!isCollapsed && <span>App Dashboard</span>}
+          </button>
+
+          {/* 1.5. Live Games (Facebook Live Arena) */}
+          <button
+            type="button"
+            onClick={() => {
+              setSelectedLeagueId(null);
+              setActiveSection("live_games");
+              setIsMobileOpen(false);
+            }}
+            title="Watch games live on Facebook Live"
+            className={`flex w-full items-center gap-3 rounded-xl px-3.5 py-3 text-xs font-black uppercase tracking-wider transition-all cursor-pointer ${
+              activeSection === "live_games"
+                ? "bg-red-600 text-white shadow-sm ring-1 ring-white/20"
+                : "text-slate-200 hover:bg-white/10 hover:text-white"
+            } ${isCollapsed ? "justify-center" : ""}`}
+          >
+            <div className="relative">
+              <Video className="h-4 w-4 shrink-0 text-red-400" />
+              {liveGamesCount > 0 && (
+                <span className="absolute -top-1 -right-1 flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
+                </span>
+              )}
+            </div>
+            {!isCollapsed && (
+              <div className="flex items-center justify-between flex-1">
+                <span>Live Games</span>
+                <span className="rounded-md bg-red-500/20 px-2 py-0.5 text-[0.62rem] font-black text-red-300 border border-red-500/30 flex items-center gap-1">
+                  <span className="h-1.5 w-1.5 rounded-full bg-red-400 animate-pulse"></span>
+                  {liveGamesCount}
+                </span>
+              </div>
+            )}
           </button>
 
           {/* 2. League Page (Hub & Selection) */}

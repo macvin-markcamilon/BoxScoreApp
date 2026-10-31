@@ -5,6 +5,7 @@ import { AuthScreens } from "@/components/auth/AuthScreens";
 import { BoxScoreLogo } from "@/components/brand/BoxScoreLogo";
 import { AppDashboardBlank } from "@/components/dashboard/AppDashboardBlank";
 import { LeagueDashboard } from "@/components/dashboard/LeagueDashboard";
+import { LiveGamesWorkspace } from "@/components/dashboard/LiveGamesWorkspace";
 import { UserProfileWorkspace } from "@/components/profile/UserProfileWorkspace";
 import { AppSidebar } from "@/components/layout/AppSidebar";
 import { TopHeaderBar } from "@/components/layout/TopHeaderBar";
@@ -96,6 +97,8 @@ export default function HomePage() {
         <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-[1600px] w-full mx-auto">
           {activeSection === "dashboard" ? (
             <AppDashboardBlank />
+          ) : activeSection === "live_games" ? (
+            <LiveGamesWorkspace />
           ) : activeSection === "profile" ? (
             <UserProfileWorkspace />
           ) : (

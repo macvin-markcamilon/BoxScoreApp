@@ -395,4 +395,4 @@ export interface LeagueRecord {
   createdAt: string;
 }
 
-export type AppSection = "dashboard" | "leagues" | "profile";
+export type AppSection = "dashboard" | "live_games" | "leagues" | "profile";

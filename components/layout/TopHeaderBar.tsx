@@ -40,6 +40,16 @@ export function TopHeaderBar({ onOpenMobileMenu }: TopHeaderBarProps) {
 
   // Friendly title calculation
   const getContextInfo = () => {
+    if (activeSection === "live_games") {
+      return {
+        title: "Facebook Live Broadcasts & Streaming Arena",
+        category: "Live Games",
+        canBack: true,
+        backLabel: "Back to Dashboard",
+        onBack: () => setActiveSection("dashboard"),
+      };
+    }
+
     if (activeSection === "profile") {
       return {
         title: "Account & Profile Settings",
