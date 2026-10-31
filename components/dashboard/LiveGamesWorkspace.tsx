@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useMemo, useState, useEffect } from "react";
+import React, { useMemo, useState, useEffect, useRef } from "react";
 import {
   Video,
   Tv,
@@ -53,12 +53,49 @@ export function LiveGamesWorkspace() {
 
   const [selectedStreamMatchId, setSelectedStreamMatchId] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [isMuted, setIsMuted] = useState(true);
+  const videoContainerRef = useRef<HTMLDivElement | null>(null);
 
   // Sync on mount and refresh interval
   useEffect(() => {
     syncFromLocalStorage();
     void fetchLeaguesAndTeams();
   }, [syncFromLocalStorage, fetchLeaguesAndTeams]);
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setIsFullscreen(Boolean(document.fullscreenElement));
+    };
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    document.addEventListener("webkitfullscreenchange", handleFullscreenChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", handleFullscreenChange);
+      document.removeEventListener("webkitfullscreenchange", handleFullscreenChange);
+    };
+  }, []);
+
+  const toggleFullscreen = async () => {
+    if (!videoContainerRef.current) return;
+    try {
+      if (!document.fullscreenElement) {
+        if (videoContainerRef.current.requestFullscreen) {
+          await videoContainerRef.current.requestFullscreen();
+        } else if ((videoContainerRef.current as any).webkitRequestFullscreen) {
+          (videoContainerRef.current as any).webkitRequestFullscreen();
+        }
+      } else {
+        if (document.exitFullscreen) {
+          await document.exitFullscreen();
+        } else if ((document as any).webkitExitFullscreen) {
+          (document as any).webkitExitFullscreen();
+        }
+      }
+    } catch {
+      // Fallback
+    }
+  };
 
   const handleManualRefresh = async () => {
     setIsRefreshing(true);
@@ -309,6 +346,16 @@ export function LiveGamesWorkspace() {
                   </div>
 
                   <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={toggleFullscreen}
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 px-3 py-1.5 text-xs font-bold text-white transition-colors cursor-pointer"
+                      title={isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen"}
+                    >
+                      <Maximize2 className="h-3.5 w-3.5" />
+                      <span className="hidden sm:inline">{isFullscreen ? "Exit Fullscreen" : "Fullscreen"}</span>
+                    </button>
+
                     <a
                       href={activeFocusItem.streamUrl}
                       target="_blank"
@@ -331,17 +378,56 @@ export function LiveGamesWorkspace() {
                   </div>
                 </div>
 
-                {/* 16:9 Embedded Facebook Player */}
-                <div className="relative aspect-video w-full bg-black">
+                {/* 16:9 Embedded Facebook Player Container with Fullscreen Ref & Direct Controls */}
+                <div
+                  ref={videoContainerRef}
+                  className="relative aspect-video w-full bg-black group overflow-hidden"
+                >
                   <iframe
-                    key={activeFocusItem.match.id + activeFocusItem.streamUrl}
+                    key={activeFocusItem.match.id + activeFocusItem.streamUrl + (isPlaying ? "_play" : "_init") + (isMuted ? "_muted" : "_unmuted")}
                     src={`https://www.facebook.com/plugins/video.php?href=${encodeURIComponent(
                       activeFocusItem.streamUrl
-                    )}&show_text=0&autoplay=1`}
+                    )}&show_text=0&autoplay=${isPlaying ? 1 : 0}&mute=${isMuted ? 1 : 0}`}
                     className="absolute inset-0 h-full w-full border-0"
-                    allow="autoplay; clipboard-write; encrypted-media; picture-in-picture; web-share"
+                    allow="autoplay; clipboard-write; encrypted-media; picture-in-picture; web-share; fullscreen"
                     allowFullScreen
                   />
+
+                  {/* Top-Right Floating Fullscreen Button inside Video for Instant Fullscreen */}
+                  <div className="absolute top-3 right-3 z-20 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <button
+                      type="button"
+                      onClick={toggleFullscreen}
+                      className="inline-flex items-center gap-1.5 rounded-xl bg-black/80 hover:bg-black border border-white/20 px-3 py-1.5 text-xs font-black uppercase text-white shadow-lg backdrop-blur-md cursor-pointer"
+                    >
+                      <Maximize2 className="h-3.5 w-3.5" />
+                      <span>{isFullscreen ? "Exit Fullscreen" : "Fullscreen"}</span>
+                    </button>
+                  </div>
+
+                  {/* Audio Mute/Unmute Toggle Button */}
+                  <div className="absolute bottom-3 right-3 z-20 flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsMuted((prev) => !prev);
+                        setIsPlaying(true);
+                      }}
+                      className="inline-flex items-center gap-1.5 rounded-xl bg-black/80 hover:bg-black border border-white/20 px-3 py-1.5 text-xs font-black text-white shadow-lg backdrop-blur-md cursor-pointer"
+                    >
+                      <Volume2 className="h-3.5 w-3.5 text-amber-400" />
+                      <span>{isMuted ? "Unmute Audio" : "Mute Audio"}</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={toggleFullscreen}
+                      className="inline-flex items-center gap-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 border border-blue-400 px-3 py-1.5 text-xs font-black text-white shadow-lg backdrop-blur-md cursor-pointer"
+                    >
+                      <Maximize2 className="h-3.5 w-3.5" />
+                      <span>Full Screen</span>
+                    </button>
+                  </div>
                 </div>
 
                 {/* Live Match Scoreboard Bottom Bar */}
