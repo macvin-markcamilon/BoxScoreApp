@@ -541,6 +541,14 @@ function LiveBroadcastStudioContent() {
     fetchLeaguesAndTeams();
     refreshStoredVideos();
 
+    // Restore saved stream key & public URL from localStorage so browser refresh retains live setup
+    try {
+      const savedKey = localStorage.getItem("boxscore_studio_stream_key");
+      if (savedKey) setStreamKey(savedKey);
+      const savedUrl = localStorage.getItem("boxscore_studio_fb_live_url");
+      if (savedUrl) setFbLivePublicUrl(savedUrl);
+    } catch {}
+
     const handleStorage = (e: StorageEvent) => {
       if (e.key && e.key.includes("boxscore")) {
         syncFromLocalStorage();
@@ -3714,6 +3722,8 @@ function LiveBroadcastStudioContent() {
         height: 720,
         bitrate: 2_500_000,
         framerate: 30,
+        bitrateMode: "constant",
+        latencyMode: "realtime",
         avc: { format: "avc" },
       });
       videoEncoderRef.current = encoder;
@@ -3785,13 +3795,13 @@ function LiveBroadcastStudioContent() {
         } catch {}
       }, 33);
 
-      // 5. Start Sequential RTMPS Packet Flush Loop (every 350ms, concurrency = 1)
+      // 5. Start Sequential RTMPS Packet Flush Loop (every 180ms, pushing ~5-6 frames per batch for real-time delivery)
       flushLoopRef.current = setInterval(async () => {
         if (isFlushingRtmpRef.current || pendingRtmpFramesRef.current.length === 0) {
           return;
         }
         isFlushingRtmpRef.current = true;
-        const batch = pendingRtmpFramesRef.current.splice(0, 25);
+        const batch = pendingRtmpFramesRef.current.splice(0, 12);
 
         try {
           const pushRes = await fetch("/api/rtmp-stream", {
@@ -3823,7 +3833,7 @@ function LiveBroadcastStudioContent() {
         } finally {
           isFlushingRtmpRef.current = false;
         }
-      }, 350);
+      }, 180);
 
       // 6. Elapsed Stream Uptime Counter
       streamTimerRef.current = setInterval(() => {
@@ -7371,7 +7381,13 @@ function LiveBroadcastStudioContent() {
                   <input
                     type={showStreamKey ? "text" : "password"}
                     value={streamKey}
-                    onChange={(e) => setStreamKey(e.target.value)}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setStreamKey(val);
+                      try {
+                        localStorage.setItem("boxscore_studio_stream_key", val);
+                      } catch {}
+                    }}
                     placeholder="Paste Stream Key (e.g. FB-1770291985...)"
                     className="flex-1 rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-xs font-mono text-white focus:outline-none focus:border-blue-500"
                   />
@@ -7396,7 +7412,13 @@ function LiveBroadcastStudioContent() {
                   <input
                     type="url"
                     value={fbLivePublicUrl}
-                    onChange={(e) => setFbLivePublicUrl(e.target.value)}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setFbLivePublicUrl(val);
+                      try {
+                        localStorage.setItem("boxscore_studio_fb_live_url", val);
+                      } catch {}
+                    }}
                     placeholder="https://www.facebook.com/yourpage/videos/123456789/ or watch link"
                     className="flex-1 rounded-xl border border-blue-500/40 bg-slate-950 px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-blue-400"
                   />
@@ -7611,7 +7633,13 @@ function LiveBroadcastStudioContent() {
                   <input
                     type={showStreamKey ? "text" : "password"}
                     value={streamKey}
-                    onChange={(e) => setStreamKey(e.target.value)}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setStreamKey(val);
+                      try {
+                        localStorage.setItem("boxscore_studio_stream_key", val);
+                      } catch {}
+                    }}
                     placeholder="FB-1770291985106628-0-Ab7g4J4HS0g..."
                     className="flex-1 rounded-xl border border-blue-500/60 bg-slate-950 px-3 py-2.5 text-xs font-mono text-white focus:outline-none focus:border-blue-400"
                     autoFocus
@@ -7637,7 +7665,13 @@ function LiveBroadcastStudioContent() {
                   <input
                     type="url"
                     value={fbLivePublicUrl}
-                    onChange={(e) => setFbLivePublicUrl(e.target.value)}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setFbLivePublicUrl(val);
+                      try {
+                        localStorage.setItem("boxscore_studio_fb_live_url", val);
+                      } catch {}
+                    }}
                     placeholder="https://www.facebook.com/yourpage/videos/123456789/ or watch link"
                     className="flex-1 rounded-xl border border-blue-500/40 bg-slate-950 px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-blue-400"
                   />
