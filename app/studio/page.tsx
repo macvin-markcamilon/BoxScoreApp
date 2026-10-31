@@ -511,6 +511,7 @@ function LiveBroadcastStudioContent() {
     encode: (frame: unknown, opts?: { keyFrame?: boolean }) => void;
     close: () => void;
     state: string;
+    encodeQueueSize?: number;
   } | null>(null);
   const encoderLoopRef = useRef<NodeJS.Timeout | null>(null);
   const flushLoopRef = useRef<NodeJS.Timeout | null>(null);
@@ -3659,10 +3660,11 @@ function LiveBroadcastStudioContent() {
         encode: (frame: unknown, opts?: { keyFrame?: boolean }) => void;
         close: () => void;
         state: string;
+        encodeQueueSize?: number;
       };
       VideoFrame?: new (
         source: HTMLCanvasElement,
-        init: { timestamp: number }
+        init: { timestamp: number; duration?: number }
       ) => { close: () => void };
     };
 
@@ -3771,37 +3773,45 @@ function LiveBroadcastStudioContent() {
       setStreamFramesSent(0);
       setStreamBytesSent(0);
 
-      // 4. Start 30fps Frame Encoding Loop from Right Live Program Canvas
+      // 4. Start 30fps Frame Encoding Loop from Right Live Program Canvas with Monotonic Clock
+      const frameDurationUs = 33333; // 1,000,000 us / 30 fps
       encoderLoopRef.current = setInterval(() => {
         const lCanvas = liveCanvasRef.current;
         const eCanvas = encoderCanvasRef.current;
         const enc = videoEncoderRef.current;
         if (!lCanvas || !eCanvas || !enc || enc.state !== "configured") return;
 
+        // Skip encoding if backpressure is high to keep FPS steady
+        if (typeof enc.encodeQueueSize === "number" && enc.encodeQueueSize > 15) {
+          return;
+        }
+
         const eCtx = eCanvas.getContext("2d");
         if (!eCtx) return;
         eCtx.drawImage(lCanvas, 0, 0, 1280, 720);
 
-        const elapsedUs = Math.round(
-          (performance.now() - streamStartTimeRef.current) * 1000
-        );
-        const isKey = streamFrameCountRef.current % 60 === 0; // Keyframe every 2s for Facebook Live
+        const currentFrameIndex = streamFrameCountRef.current;
+        const frameTimestampUs = currentFrameIndex * frameDurationUs;
+        const isKey = currentFrameIndex % 60 === 0; // Keyframe every 2 seconds (60 frames)
         streamFrameCountRef.current += 1;
 
         try {
-          const vf = new win.VideoFrame!(eCanvas, { timestamp: elapsedUs });
+          const vf = new win.VideoFrame!(eCanvas, {
+            timestamp: frameTimestampUs,
+            duration: frameDurationUs,
+          });
           enc.encode(vf, { keyFrame: isKey });
           vf.close();
         } catch {}
       }, 33);
 
-      // 5. Start Sequential RTMPS Packet Flush Loop (every 180ms, pushing ~5-6 frames per batch for real-time delivery)
+      // 5. Start Sequential RTMPS Packet Flush Loop (every 100ms, pushing available frames in real-time)
       flushLoopRef.current = setInterval(async () => {
         if (isFlushingRtmpRef.current || pendingRtmpFramesRef.current.length === 0) {
           return;
         }
         isFlushingRtmpRef.current = true;
-        const batch = pendingRtmpFramesRef.current.splice(0, 12);
+        const batch = pendingRtmpFramesRef.current.splice(0, 15);
 
         try {
           const pushRes = await fetch("/api/rtmp-stream", {
@@ -3833,7 +3843,7 @@ function LiveBroadcastStudioContent() {
         } finally {
           isFlushingRtmpRef.current = false;
         }
-      }, 180);
+      }, 100);
 
       // 6. Elapsed Stream Uptime Counter
       streamTimerRef.current = setInterval(() => {
