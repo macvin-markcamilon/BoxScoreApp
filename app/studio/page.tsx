@@ -3531,20 +3531,49 @@ function LiveBroadcastStudioContent() {
     const targetUrl = (customUrl !== undefined ? customUrl : fbLivePublicUrl).trim();
     if (!activeLeague || !activeMatch) return;
 
+    // 1. Update Match Details in tournament bracket / schedule
     updateMatchDetailsInLeague(activeLeague.id, activeMatch.id, {
       streamUrl: targetUrl,
       isStreaming: Boolean(targetUrl),
     });
 
-    if (liveSession) {
-      saveGameSession(activeMatch.id, {
-        ...liveSession,
-        streamUrl: targetUrl,
-        isStreaming: Boolean(targetUrl),
-        updatedAt: new Date().toISOString(),
-      });
-    }
+    // 2. Build or update LiveGameSession so live scores, timer and video link are tightly coupled
+    const baseSession: LiveGameSession = liveSession ?? {
+      matchId: activeMatch.id,
+      leagueId: activeLeague.id,
+      currentPeriod: 1,
+      clockSecondsRemaining: (activeLeague.rulesConfig?.periodLengthMinutes || 10) * 60,
+      shotClockSeconds: activeLeague.rulesConfig?.shotClockSeconds || 24,
+      isClockRunning: false,
+      possessionArrow: "HOME",
+      activeBallPossession: "HOME",
+      homeScore: activeMatch.homeScore ?? 0,
+      awayScore: activeMatch.awayScore ?? 0,
+      homeQuarterScores: [activeMatch.homeScore ?? 0, 0, 0, 0],
+      awayQuarterScores: [activeMatch.awayScore ?? 0, 0, 0, 0],
+      homeTeamFoulsByPeriod: [0, 0, 0, 0],
+      awayTeamFoulsByPeriod: [0, 0, 0, 0],
+      homeTimeoutsRemaining: 5,
+      awayTimeoutsRemaining: 5,
+      assignedRefereeIds: [],
+      homePlayerStats: {},
+      awayPlayerStats: {},
+      homeRunningScore: {},
+      awayRunningScore: {},
+      playEvents: [],
+      updatedAt: new Date().toISOString(),
+    };
 
+    const updatedSession: LiveGameSession = {
+      ...baseSession,
+      streamUrl: targetUrl,
+      isStreaming: Boolean(targetUrl),
+      updatedAt: new Date().toISOString(),
+    };
+
+    saveGameSession(activeMatch.id, updatedSession);
+
+    // 3. Supabase Realtime Broadcast across remote devices (iOS, Android, Spectator web)
     try {
       const syncChannel = supabase.channel("boxscore_realtime_sync");
       syncChannel.send({
@@ -3553,11 +3582,36 @@ function LiveBroadcastStudioContent() {
         payload: {
           matchId: activeMatch.id,
           leagueId: activeLeague.id,
+          session: updatedSession,
           streamUrl: targetUrl,
           isStreaming: Boolean(targetUrl),
         },
       });
+      syncChannel.send({
+        type: "broadcast",
+        event: "NOTIFICATION_EVENT",
+        payload: { type: "TOURNAMENT_UPDATED", leagueId: activeLeague.id },
+      });
     } catch {}
+
+    // 4. Intra-browser BroadcastChannels for 0ms instant tab sync
+    if (typeof window !== "undefined" && "BroadcastChannel" in window) {
+      try {
+        const bcGames = new BroadcastChannel("boxscore_game_sessions_sync");
+        bcGames.postMessage({
+          type: "GAME_SESSION_UPDATE",
+          matchId: activeMatch.id,
+          session: updatedSession,
+        });
+        bcGames.close();
+      } catch {}
+
+      try {
+        const bcNotif = new BroadcastChannel("boxscore_notifications_sync");
+        bcNotif.postMessage({ type: "TOURNAMENT_UPDATED", leagueId: activeLeague.id });
+        bcNotif.close();
+      } catch {}
+    }
 
     void persistLeagueGamesToCloud(activeLeague.id);
 

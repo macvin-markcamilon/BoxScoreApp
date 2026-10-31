@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useEffect } from "react";
 import {
   Video,
   Tv,
@@ -15,6 +15,7 @@ import {
   Volume2,
   Maximize2,
   Share2,
+  RefreshCw,
 } from "lucide-react";
 import { useBoxScoreStore } from "@/stores/useBoxScoreStore";
 import { TournamentMatch, LiveGameSession, LeagueTeam } from "@/types/boxscore";
@@ -42,6 +43,8 @@ export function LiveGamesWorkspace() {
     teams,
     tournamentsByLeagueId,
     gameSessionsByMatchId,
+    fetchLeaguesAndTeams,
+    syncFromLocalStorage,
     setSelectedLeagueId,
     setSelectedLeagueTab,
     setActiveManageMatchId,
@@ -49,10 +52,25 @@ export function LiveGamesWorkspace() {
   } = useBoxScoreStore();
 
   const [selectedStreamMatchId, setSelectedStreamMatchId] = useState<string | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  // Sync on mount and refresh interval
+  useEffect(() => {
+    syncFromLocalStorage();
+    void fetchLeaguesAndTeams();
+  }, [syncFromLocalStorage, fetchLeaguesAndTeams]);
+
+  const handleManualRefresh = async () => {
+    setIsRefreshing(true);
+    syncFromLocalStorage();
+    await fetchLeaguesAndTeams();
+    setTimeout(() => setIsRefreshing(false), 600);
+  };
 
   // Aggregate all matches across all leagues that have a streamUrl or active session stream
   const liveStreamGames: LiveMatchItem[] = useMemo(() => {
     const list: LiveMatchItem[] = [];
+    const addedMatchIds = new Set<string>();
 
     for (const league of leagues) {
       const tourney = tournamentsByLeagueId[league.id];
@@ -66,6 +84,7 @@ export function LiveGamesWorkspace() {
 
         // Check if game has a streamUrl OR is marked as streaming
         if (streamUrl && streamUrl.trim().length > 0) {
+          addedMatchIds.add(m.id);
           const homeTeam = m.homeTeamId ? teamMap.get(m.homeTeamId) ?? null : null;
           const awayTeam = m.awayTeamId ? teamMap.get(m.awayTeamId) ?? null : null;
           const homeTeamName = homeTeam?.name || m.homeTeamPlaceholder || "Home Team";
@@ -102,6 +121,65 @@ export function LiveGamesWorkspace() {
             isClockRunning: session?.isClockRunning ?? false,
           });
         }
+      }
+    }
+
+    // Secondary scan: check if any gameSessionsByMatchId has a streamUrl not yet in list
+    for (const [mId, session] of Object.entries(gameSessionsByMatchId)) {
+      if (session?.streamUrl && session.streamUrl.trim().length > 0 && !addedMatchIds.has(mId)) {
+        addedMatchIds.add(mId);
+        const league = leagues.find((l) => l.id === session.leagueId);
+        const leagueTeams = teams.filter((t) => t.leagueId === session.leagueId);
+        const teamMap = new Map<string, LeagueTeam>(leagueTeams.map((t) => [t.id, t]));
+
+        const dummyMatch: TournamentMatch = {
+          id: mId,
+          leagueId: session.leagueId || league?.id || "",
+          gameNumber: 1,
+          stage: "FINALS",
+          roundNumber: 1,
+          roundLabel: "Live Stream Match",
+          homeTeamId: null,
+          awayTeamId: null,
+          homeTeamPlaceholder: "Home Team",
+          awayTeamPlaceholder: "Away Team",
+          homeScore: session.homeScore ?? 0,
+          awayScore: session.awayScore ?? 0,
+          status: "LIVE",
+          winnerTeamId: null,
+          loserTeamId: null,
+          scheduledDate: "",
+          scheduledTime: "",
+          courtId: "",
+          courtName: "",
+          streamUrl: session.streamUrl,
+          isStreaming: true,
+        };
+
+        const homeTeam = dummyMatch.homeTeamId ? teamMap.get(dummyMatch.homeTeamId) ?? null : null;
+        const awayTeam = dummyMatch.awayTeamId ? teamMap.get(dummyMatch.awayTeamId) ?? null : null;
+
+        const seconds = session.clockSecondsRemaining ?? 0;
+        const mm = Math.floor(seconds / 60);
+        const ss = seconds % 60;
+        const clockText = `${mm}:${ss < 10 ? "0" : ""}${ss}`;
+
+        list.push({
+          match: dummyMatch,
+          session,
+          leagueId: league?.id || session.leagueId || "",
+          leagueName: league?.name || "Active Basketball League",
+          homeTeam,
+          awayTeam,
+          homeTeamName: homeTeam?.name || "Home Team",
+          awayTeamName: awayTeam?.name || "Away Team",
+          homeScore: session.homeScore ?? 0,
+          awayScore: session.awayScore ?? 0,
+          streamUrl: session.streamUrl.trim(),
+          periodText: `Q${session.currentPeriod}`,
+          clockText,
+          isClockRunning: session.isClockRunning ?? false,
+        });
       }
     }
 
@@ -155,6 +233,17 @@ export function LiveGamesWorkspace() {
           </div>
 
           <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={handleManualRefresh}
+              disabled={isRefreshing}
+              className="inline-flex items-center gap-1.5 rounded-2xl border border-white/20 bg-white/10 hover:bg-white/20 px-3.5 py-2.5 backdrop-blur-md text-xs font-bold text-white transition-all cursor-pointer"
+              title="Refresh Live Streams"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${isRefreshing ? "animate-spin text-amber-300" : ""}`} />
+              <span className="hidden sm:inline">Refresh</span>
+            </button>
+
             <div className="rounded-2xl border border-white/10 bg-white/10 px-4 py-2.5 backdrop-blur-md text-center">
               <span className="block text-2xl font-black text-white">
                 {liveStreamGames.length}

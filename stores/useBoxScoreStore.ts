@@ -1621,9 +1621,13 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
       .on("broadcast", { event: "NOTIFICATION_EVENT" }, () => {
         void get().fetchLeaguesAndTeams();
       })
-      .on("broadcast", { event: "GAME_SESSION_UPDATE" }, (payload: { payload?: { matchId?: string; session?: LiveGameSession } }) => {
+      .on("broadcast", { event: "GAME_SESSION_UPDATE" }, (payload: { payload?: { matchId?: string; session?: LiveGameSession; leagueId?: string; streamUrl?: string; isStreaming?: boolean } }) => {
         const matchId = payload?.payload?.matchId;
         const incomingSession = payload?.payload?.session;
+        const leagueId = payload?.payload?.leagueId;
+        const streamUrl = payload?.payload?.streamUrl;
+        const isStreaming = payload?.payload?.isStreaming;
+
         if (matchId && incomingSession) {
           const currentSessions = get().gameSessionsByMatchId;
           const current = currentSessions[matchId];
@@ -1639,20 +1643,66 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
             writeLocalCache(STORAGE_KEYS.GAME_SESSIONS, next);
           }
         }
+
+        // Also ensure match streamUrl in tournamentsByLeagueId is immediately updated
+        if (leagueId && matchId && streamUrl !== undefined) {
+          const currentTourney = get().tournamentsByLeagueId[leagueId];
+          if (currentTourney) {
+            const updatedMatches = currentTourney.matches.map((m) =>
+              m.id === matchId ? { ...m, streamUrl, isStreaming: Boolean(isStreaming) } : m
+            );
+            const nextTourney = { ...currentTourney, matches: updatedMatches, updatedAt: new Date().toISOString() };
+            const nextTournaments = { ...get().tournamentsByLeagueId, [leagueId]: nextTourney };
+            set({ tournamentsByLeagueId: nextTournaments });
+            writeLocalCache(STORAGE_KEYS.TOURNAMENTS, nextTournaments);
+          }
+        }
       })
       .subscribe();
 
-    // 2. BroadcastChannel for fast intra-browser tab communication
-    let localBc: BroadcastChannel | null = null;
+    // 2. Intra-browser fast synchronization via BroadcastChannel
+    let notifBc: BroadcastChannel | null = null;
+    let gamesBc: BroadcastChannel | null = null;
     if (typeof window !== "undefined" && "BroadcastChannel" in window) {
       try {
-        localBc = new BroadcastChannel("boxscore_notifications_sync");
-        localBc.onmessage = () => {
+        notifBc = new BroadcastChannel("boxscore_notifications_sync");
+        notifBc.onmessage = () => {
+          get().syncFromLocalStorage();
           void get().fetchLeaguesAndTeams();
         };
       } catch {
         // Ignore
       }
+
+      try {
+        gamesBc = new BroadcastChannel("boxscore_game_sessions_sync");
+        gamesBc.onmessage = (event) => {
+          const data = event.data;
+          if (data?.type === "GAME_SESSION_UPDATE" && data.matchId && data.session) {
+            const currentSessions = get().gameSessionsByMatchId;
+            set({
+              gameSessionsByMatchId: {
+                ...currentSessions,
+                [data.matchId]: data.session,
+              },
+            });
+          } else {
+            get().syncFromLocalStorage();
+          }
+        };
+      } catch {
+        // Ignore
+      }
+    }
+
+    // 3. Listen to window storage events (cross-tab / cross-window sync fallback)
+    const handleStorageEvent = (e: StorageEvent) => {
+      if (e.key && e.key.includes("boxscore")) {
+        get().syncFromLocalStorage();
+      }
+    };
+    if (typeof window !== "undefined") {
+      window.addEventListener("storage", handleStorageEvent);
     }
 
     // 3. Periodic fallback poll every 3 seconds to ensure seamless sync even if WebSocket reconnects
@@ -1668,9 +1718,17 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
         // Ignore
       }
       try {
-        localBc?.close();
+        notifBc?.close();
       } catch {
         // Ignore
+      }
+      try {
+        gamesBc?.close();
+      } catch {
+        // Ignore
+      }
+      if (typeof window !== "undefined") {
+        window.removeEventListener("storage", handleStorageEvent);
       }
     };
   },
