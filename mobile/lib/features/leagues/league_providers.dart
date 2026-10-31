@@ -32,13 +32,17 @@ class LeagueSections {
 final leagueSectionsProvider = FutureProvider<LeagueSections>((ref) async {
   final uid = ref.watch(currentUserIdProvider);
   final profile = ref.watch(profileProvider).valueOrNull;
-  final leagues = await ref.watch(leaguesProvider.future);
-  final follows = await ref.watch(followsProvider.future);
+  final leagues = await ref
+      .watch(leaguesProvider.future)
+      .timeout(const Duration(seconds: 4), onTimeout: () => ref.read(leaguesProvider).valueOrNull ?? const []);
+  final follows = await ref
+      .watch(followsProvider.future)
+      .timeout(const Duration(seconds: 4), onTimeout: () => ref.read(followsProvider).valueOrNull ?? const <String>{});
   final counts = ref.watch(followerCountsProvider).valueOrNull ?? const {};
 
   final normalizedEmail = profile?.email.trim().toLowerCase();
 
-  // User is owner if ownerId == uid OR user is an accepted Admin/Manager in members
+  // User is affiliated if ownerId == uid OR user is an accepted member/admin OR on any team roster
   bool isUserAffiliated(League l) {
     if (uid != null && l.ownerId == uid) return true;
     for (final m in l.members) {
@@ -46,6 +50,26 @@ final leagueSectionsProvider = FutureProvider<LeagueSections>((ref) async {
       if (uid != null && m.userId != null && m.userId == uid) return true;
       if (normalizedEmail != null && m.email.trim().toLowerCase() == normalizedEmail) {
         return true;
+      }
+      if (profile != null &&
+          profile.fullName.trim().isNotEmpty &&
+          m.displayName.trim().toLowerCase() == profile.fullName.trim().toLowerCase()) {
+        return true;
+      }
+    }
+    // Check if user is a roster player on any embedded team
+    if (profile != null) {
+      final pFirst = profile.firstName.trim().toLowerCase();
+      final pLast = profile.lastName.trim().toLowerCase();
+      for (final t in l.embeddedTeams) {
+        for (final p in t.roster) {
+          if (uid != null && p.userId != null && p.userId == uid) return true;
+          if (pFirst.isNotEmpty && pLast.isNotEmpty &&
+              p.firstName.trim().toLowerCase() == pFirst &&
+              p.lastName.trim().toLowerCase() == pLast) {
+            return true;
+          }
+        }
       }
     }
     return false;

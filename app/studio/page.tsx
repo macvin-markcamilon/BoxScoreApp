@@ -308,6 +308,9 @@ function LiveBroadcastStudioContent() {
     fetchLeaguesAndTeams,
     syncFromLocalStorage,
     updateTeamInLeague,
+    updateMatchDetailsInLeague,
+    saveGameSession,
+    persistLeagueGamesToCloud,
   } = useBoxScoreStore();
 
   // Selected League & Match
@@ -464,6 +467,8 @@ function LiveBroadcastStudioContent() {
   const [streamFramesSent, setStreamFramesSent] = useState<number>(0);
   const [streamBytesSent, setStreamBytesSent] = useState<number>(0);
   const [showFbSetupModal, setShowFbSetupModal] = useState<boolean>(false);
+  const [fbLivePublicUrl, setFbLivePublicUrl] = useState<string>("");
+  const [streamSavedNotice, setStreamSavedNotice] = useState<string | null>(null);
 
   // Canvas & Video Refs
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -3515,6 +3520,54 @@ function LiveBroadcastStudioContent() {
       });
     } catch {}
   }, []);
+
+  useEffect(() => {
+    if (activeMatch?.streamUrl) {
+      setFbLivePublicUrl(activeMatch.streamUrl);
+    }
+  }, [activeMatch?.id, activeMatch?.streamUrl]);
+
+  const handleSaveAndBroadcastStreamUrl = (customUrl?: string) => {
+    const targetUrl = (customUrl !== undefined ? customUrl : fbLivePublicUrl).trim();
+    if (!activeLeague || !activeMatch) return;
+
+    updateMatchDetailsInLeague(activeLeague.id, activeMatch.id, {
+      streamUrl: targetUrl,
+      isStreaming: Boolean(targetUrl),
+    });
+
+    if (liveSession) {
+      saveGameSession(activeMatch.id, {
+        ...liveSession,
+        streamUrl: targetUrl,
+        isStreaming: Boolean(targetUrl),
+        updatedAt: new Date().toISOString(),
+      });
+    }
+
+    try {
+      const syncChannel = supabase.channel("boxscore_realtime_sync");
+      syncChannel.send({
+        type: "broadcast",
+        event: "GAME_SESSION_UPDATE",
+        payload: {
+          matchId: activeMatch.id,
+          leagueId: activeLeague.id,
+          streamUrl: targetUrl,
+          isStreaming: Boolean(targetUrl),
+        },
+      });
+    } catch {}
+
+    void persistLeagueGamesToCloud(activeLeague.id);
+
+    setStreamSavedNotice(
+      targetUrl
+        ? "Facebook Live link broadcasted to iOS & mobile app!"
+        : "Stream link cleared."
+    );
+    setTimeout(() => setStreamSavedNotice(null), 4000);
+  };
 
   const startRtmpLiveStream = async () => {
     setStreamError(null);
@@ -7278,6 +7331,37 @@ function LiveBroadcastStudioContent() {
                 </div>
               </div>
 
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-[0.65rem] font-black uppercase text-blue-400">
+                    Facebook Live Public URL (For iOS & Mobile In-App Watching):
+                  </label>
+                  <span className="text-[0.6rem] text-slate-400">e.g. facebook.com/.../videos/...</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="url"
+                    value={fbLivePublicUrl}
+                    onChange={(e) => setFbLivePublicUrl(e.target.value)}
+                    placeholder="https://www.facebook.com/yourpage/videos/123456789/ or watch link"
+                    className="flex-1 rounded-xl border border-blue-500/40 bg-slate-950 px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-blue-400"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => handleSaveAndBroadcastStreamUrl()}
+                    className="rounded-xl border border-blue-500 bg-blue-600 hover:bg-blue-500 px-3 py-2 text-xs font-black uppercase tracking-wider text-white cursor-pointer shrink-0"
+                    title="Broadcast this Facebook Live URL to all iOS and mobile devices in real-time"
+                  >
+                    Sync to iOS
+                  </button>
+                </div>
+                {streamSavedNotice && (
+                  <p className="mt-1 text-[0.68rem] font-bold text-emerald-400 animate-pulse">
+                    ✓ {streamSavedNotice}
+                  </p>
+                )}
+              </div>
+
               {streamError && (
                 <div className="rounded-lg bg-rose-950/70 border border-rose-500/50 px-2.5 py-1.5 text-[0.65rem] font-bold text-rose-200">
                   ⚠️ {streamError}
@@ -7486,6 +7570,37 @@ function LiveBroadcastStudioContent() {
                     {showStreamKey ? "Hide" : "Show"}
                   </button>
                 </div>
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-[0.65rem] font-black uppercase text-blue-400">
+                    Facebook Live Public URL (For iOS & Mobile In-App Watching):
+                  </label>
+                  <span className="text-[0.6rem] text-slate-400">e.g. facebook.com/.../videos/...</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="url"
+                    value={fbLivePublicUrl}
+                    onChange={(e) => setFbLivePublicUrl(e.target.value)}
+                    placeholder="https://www.facebook.com/yourpage/videos/123456789/ or watch link"
+                    className="flex-1 rounded-xl border border-blue-500/40 bg-slate-950 px-3 py-2 text-xs font-mono text-white focus:outline-none focus:border-blue-400"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => handleSaveAndBroadcastStreamUrl()}
+                    className="rounded-xl border border-blue-500 bg-blue-600 hover:bg-blue-500 px-3 py-2 text-xs font-black uppercase tracking-wider text-white cursor-pointer shrink-0"
+                    title="Broadcast this Facebook Live URL to all iOS and mobile devices in real-time"
+                  >
+                    Sync to iOS
+                  </button>
+                </div>
+                {streamSavedNotice && (
+                  <p className="mt-1 text-[0.68rem] font-bold text-emerald-400 animate-pulse">
+                    ✓ {streamSavedNotice}
+                  </p>
+                )}
               </div>
 
               {streamError && (

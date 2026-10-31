@@ -29,6 +29,8 @@ import {
   Users,
   Image as ImageIcon,
   RotateCcw,
+  ExternalLink,
+  Video,
 } from "lucide-react";
 import {
   canEditLeagueDetails,
@@ -1290,6 +1292,42 @@ export function GameDetailsWorkspace({
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
           {/* Left Column (2/3 -> 8 cols): AI Sports News Story on Top with Edit Mode */}
           <div className="lg:col-span-8 space-y-6">
+            {/* Live Facebook Stream Embed (if available) */}
+            {(selectedMatch?.streamUrl || session.streamUrl) && (
+              <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4 shadow-lg text-white space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="flex h-3 w-3 relative">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-3 w-3 bg-red-500"></span>
+                    </span>
+                    <span className="text-xs font-black uppercase tracking-wider text-red-400 flex items-center gap-1.5">
+                      <Video className="h-4 w-4" />
+                      Live Stream Broadcast
+                    </span>
+                  </div>
+                  <a
+                    href={selectedMatch?.streamUrl || session.streamUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 text-xs font-bold text-blue-400 hover:text-blue-300 hover:underline"
+                  >
+                    Open on Facebook <ExternalLink className="h-3.5 w-3.5" />
+                  </a>
+                </div>
+                <div className="relative aspect-video w-full overflow-hidden rounded-xl bg-black">
+                  <iframe
+                    src={`https://www.facebook.com/plugins/video.php?href=${encodeURIComponent(
+                      selectedMatch?.streamUrl || session.streamUrl || ""
+                    )}&show_text=0&autoplay=1`}
+                    className="absolute inset-0 h-full w-full border-0"
+                    allow="autoplay; clipboard-write; encrypted-media; picture-in-picture; web-share"
+                    allowFullScreen
+                  />
+                </div>
+              </div>
+            )}
+
             <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-xs space-y-5">
               <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-200">
                 <div>

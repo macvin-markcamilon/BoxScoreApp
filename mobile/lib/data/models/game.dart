@@ -109,6 +109,7 @@ class PlayerGameStats {
     this.blk = 0,
     this.pf = 0,
     this.tov = 0,
+    this.rawReb = 0,
     this.jerseyNumber,
     this.firstName,
     this.lastName,
@@ -117,14 +118,17 @@ class PlayerGameStats {
   });
 
   final String playerId;
-  final int points, fgm, fga, tpm, tpa, ftm, fta, oreb, dreb, ast, stl, blk, pf, tov;
+  final int points, fgm, fga, tpm, tpa, ftm, fta, oreb, dreb, ast, stl, blk, pf, tov, rawReb;
   final int? jerseyNumber;
   final String? firstName;
   final String? lastName;
   final String? position;
   final String? minutesPlayed;
 
-  int get reb => oreb + dreb;
+  int get reb {
+    final sum = oreb + dreb;
+    return sum > 0 ? sum : rawReb;
+  }
   String get playerName {
     final fn = firstName ?? '';
     final ln = lastName ?? '';
@@ -148,6 +152,7 @@ class PlayerGameStats {
         blk: readInt(j['blk']),
         pf: readInt(j['pf']),
         tov: readInt(j['tov']),
+        rawReb: readInt(j['reb'] ?? j['rebounds']),
         jerseyNumber: readIntOrNull(j['jerseyNumber']),
         firstName: readStringOrNull(j['firstName']),
         lastName: readStringOrNull(j['lastName']),

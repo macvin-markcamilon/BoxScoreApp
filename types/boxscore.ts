@@ -197,6 +197,8 @@ export interface LiveGameSession {
   homeRunningScore: Record<number, RunningScoreEntry>;
   awayRunningScore: Record<number, RunningScoreEntry>;
   playEvents: ScorebookPlayEvent[];
+  streamUrl?: string;
+  isStreaming?: boolean;
   updatedAt: string;
 }
 
@@ -344,6 +346,8 @@ export interface TournamentMatch {
   recapArticle?: string;
   recapTakeaways?: string[];
   recapUpdatedAt?: string;
+  streamUrl?: string;
+  isStreaming?: boolean;
 }
 
 export interface LeagueTournamentData {

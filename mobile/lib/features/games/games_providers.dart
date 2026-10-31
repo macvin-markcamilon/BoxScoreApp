@@ -95,9 +95,15 @@ int compareLatest(GameItem a, GameItem b) {
 
 final gamesFeedProvider = FutureProvider<GamesFeed>((ref) async {
   final uid = ref.watch(currentUserIdProvider);
-  final leagues = await ref.watch(leaguesProvider.future);
-  final follows = await ref.watch(followsProvider.future);
-  final teams = await ref.watch(teamsByIdProvider.future);
+  final leagues = await ref
+      .watch(leaguesProvider.future)
+      .timeout(const Duration(seconds: 4), onTimeout: () => ref.read(leaguesProvider).valueOrNull ?? const []);
+  final follows = await ref
+      .watch(followsProvider.future)
+      .timeout(const Duration(seconds: 4), onTimeout: () => ref.read(followsProvider).valueOrNull ?? const <String>{});
+  final teams = await ref
+      .watch(teamsByIdProvider.future)
+      .timeout(const Duration(seconds: 4), onTimeout: () => ref.read(teamsByIdProvider).valueOrNull ?? const <String, Team>{});
 
   List<GameItem> build(Iterable<League> source, GameSource kind) => [
         for (final l in source)
