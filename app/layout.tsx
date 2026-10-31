@@ -5,6 +5,14 @@ export const metadata: Metadata = {
   title: "BOX SCORE | Basketball League Management & Courtside Engine",
   description:
     "Production-grade basketball league management, zero-latency courtside stat-keeping engine, AI awardee analytics, and OBS livestream overlays.",
+  icons: {
+    icon: [
+      { url: "/favicon.png", sizes: "any" },
+      { url: "/favicon.ico", sizes: "any" },
+    ],
+    shortcut: "/favicon.png",
+    apple: "/favicon.png",
+  },
 };
 
 export default function RootLayout({
