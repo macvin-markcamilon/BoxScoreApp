@@ -68,6 +68,11 @@ import {
 } from "@/lib/video-storage";
 import { generateUUID } from "@/lib/uuid";
 import { LiveGameSession, PlayerGameStats } from "@/types/boxscore";
+import {
+  RTC_CONFIG,
+  addIceCandidateSafely,
+  flushBufferedIceCandidates,
+} from "@/lib/webrtc-config";
 
 function formatClock(seconds: number): string {
   const safe = Math.max(0, Math.floor(seconds));
@@ -386,6 +391,7 @@ function LiveBroadcastStudioContent() {
   const wirelessChannelByRoomRef = useRef<
     Record<string, ReturnType<typeof supabase.channel>>
   >({});
+  const pendingIceCandidatesByRoomRef = useRef<Record<string, RTCIceCandidateInit[]>>({});
   const [wirelessStatusByRoom, setWirelessStatusByRoom] = useState<
     Record<string, "waiting" | "webrtc" | "relay" | "ip">
   >({});
@@ -1196,9 +1202,12 @@ function LiveBroadcastStudioContent() {
 
       // Clean up existing channel / PeerConnection for this Room Code before creating a fresh connection
       if (wirelessPcByRoomRef.current[roomCode]) {
-        wirelessPcByRoomRef.current[roomCode].close();
+        try {
+          wirelessPcByRoomRef.current[roomCode].close();
+        } catch {}
         delete wirelessPcByRoomRef.current[roomCode];
       }
+      delete pendingIceCandidatesByRoomRef.current[roomCode];
       if (wirelessChannelByRoomRef.current[roomCode]) {
         void supabase.removeChannel(wirelessChannelByRoomRef.current[roomCode]);
         delete wirelessChannelByRoomRef.current[roomCode];
@@ -1206,6 +1215,7 @@ function LiveBroadcastStudioContent() {
 
       setWirelessStatusBySlot((prev) => ({ ...prev, [slot.id]: "waiting" }));
       setWirelessStatusByRoom((prev) => ({ ...prev, [roomCode]: "waiting" }));
+      pendingIceCandidatesByRoomRef.current[roomCode] = [];
 
       const syncDetectedPhonePlatform = (rawPlatform?: unknown) => {
         if (rawPlatform !== "iphone" && rawPlatform !== "android") return;
@@ -1264,30 +1274,55 @@ function LiveBroadcastStudioContent() {
             if (!payload?.sdp) return;
             syncDetectedPhonePlatform(payload?.devicePlatform);
             if (wirelessPcByRoomRef.current[roomCode]) {
-              wirelessPcByRoomRef.current[roomCode].close();
+              try {
+                wirelessPcByRoomRef.current[roomCode].close();
+              } catch {
+                // ignore
+              }
             }
-            const pc = new RTCPeerConnection({
-              iceServers: [
-                { urls: "stun:stun.l.google.com:19302" },
-                { urls: "stun:stun1.l.google.com:19302" },
-              ],
-            });
+
+            if (!pendingIceCandidatesByRoomRef.current[roomCode]) {
+              pendingIceCandidatesByRoomRef.current[roomCode] = [];
+            }
+
+            const pc = new RTCPeerConnection(RTC_CONFIG);
             wirelessPcByRoomRef.current[roomCode] = pc;
             wirelessPcBySlotRef.current[slot.id] = pc;
 
             pc.ontrack = (ev) => {
-              const remoteStream = ev.streams?.[0];
-              if (remoteStream) {
-                wirelessStreamByRoomRef.current[roomCode] = remoteStream;
-                const roomVidEl = getOrCreateRoomVideoElement(roomCode);
-                roomVidEl.srcObject = remoteStream;
-                void roomVidEl.play().catch(() => {});
+              const remoteStream =
+                ev.streams && ev.streams[0]
+                  ? ev.streams[0]
+                  : new MediaStream([ev.track]);
 
-                streamBySlotRef.current[slot.id] = remoteStream;
-                const vidEl = getOrCreateSlotVideoElement(slot.id);
-                vidEl.srcObject = remoteStream;
-                void vidEl.play().catch(() => {});
+              wirelessStreamByRoomRef.current[roomCode] = remoteStream;
+              const roomVidEl = getOrCreateRoomVideoElement(roomCode);
+              roomVidEl.srcObject = remoteStream;
+              roomVidEl.playsInline = true;
+              roomVidEl.muted = true;
+              void roomVidEl.play().catch(() => {});
 
+              streamBySlotRef.current[slot.id] = remoteStream;
+              const vidEl = getOrCreateSlotVideoElement(slot.id);
+              vidEl.srcObject = remoteStream;
+              vidEl.playsInline = true;
+              vidEl.muted = true;
+              void vidEl.play().catch(() => {});
+
+              setActiveSlotIds((prev) => ({ ...prev, [slot.id]: true }));
+              setWirelessStatusByRoom((prev) => ({
+                ...prev,
+                [roomCode]: "webrtc",
+              }));
+              setWirelessStatusBySlot((prev) => ({
+                ...prev,
+                [slot.id]: "webrtc",
+              }));
+            };
+
+            const handleStateChange = () => {
+              const state = pc.connectionState;
+              if (state === "connected") {
                 setActiveSlotIds((prev) => ({ ...prev, [slot.id]: true }));
                 setWirelessStatusByRoom((prev) => ({
                   ...prev,
@@ -1299,6 +1334,9 @@ function LiveBroadcastStudioContent() {
                 }));
               }
             };
+
+            pc.onconnectionstatechange = handleStateChange;
+            pc.oniceconnectionstatechange = handleStateChange;
 
             pc.onicecandidate = (ev) => {
               if (ev.candidate) {
@@ -1314,6 +1352,11 @@ function LiveBroadcastStudioContent() {
             };
 
             await pc.setRemoteDescription(new RTCSessionDescription(payload.sdp));
+            await flushBufferedIceCandidates(
+              pc,
+              pendingIceCandidatesByRoomRef.current[roomCode]
+            );
+
             const answer = await pc.createAnswer();
             await pc.setLocalDescription(answer);
 
@@ -1325,8 +1368,8 @@ function LiveBroadcastStudioContent() {
                 sdp: pc.localDescription,
               },
             });
-          } catch {
-            // Fallback to frame relay automatically
+          } catch (err) {
+            console.error("[WebRTC Studio] Error handling offer:", err);
           }
         })
         .on(
@@ -1337,9 +1380,14 @@ function LiveBroadcastStudioContent() {
               const pc =
                 wirelessPcByRoomRef.current[roomCode] ||
                 wirelessPcBySlotRef.current[slot.id];
-              if (pc && payload?.candidate) {
-                await pc.addIceCandidate(new RTCIceCandidate(payload.candidate));
+              if (!pendingIceCandidatesByRoomRef.current[roomCode]) {
+                pendingIceCandidatesByRoomRef.current[roomCode] = [];
               }
+              await addIceCandidateSafely(
+                pc,
+                payload?.candidate,
+                pendingIceCandidatesByRoomRef.current[roomCode]
+              );
             } catch {
               // ignore
             }
@@ -1348,6 +1396,13 @@ function LiveBroadcastStudioContent() {
         .on("broadcast", { event: "video_frame" }, ({ payload }) => {
           if (!payload?.frameDataUrl) return;
           syncDetectedPhonePlatform(payload?.devicePlatform);
+
+          // If direct WebRTC P2P is already established and streaming, ignore fallback relay frames
+          const isAlreadyWebRtc =
+            Boolean(wirelessStreamByRoomRef.current[roomCode]?.active) ||
+            wirelessPcByRoomRef.current[roomCode]?.connectionState === "connected";
+          if (isAlreadyWebRtc) return;
+
           if (!wirelessFrameImgByRoomRef.current[roomCode]) {
             wirelessFrameImgByRoomRef.current[roomCode] = new Image();
           }

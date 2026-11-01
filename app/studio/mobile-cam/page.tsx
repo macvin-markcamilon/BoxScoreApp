@@ -16,14 +16,11 @@ import {
   VideoOff,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase-client";
-
-const RTC_CONFIG: RTCConfiguration = {
-  iceServers: [
-    { urls: "stun:stun.l.google.com:19302" },
-    { urls: "stun:stun1.l.google.com:19302" },
-    { urls: "stun:stun2.l.google.com:19302" },
-  ],
-};
+import {
+  RTC_CONFIG,
+  addIceCandidateSafely,
+  flushBufferedIceCandidates,
+} from "@/lib/webrtc-config";
 
 function MobileCameraSenderContent() {
   const searchParams = useSearchParams();
@@ -53,6 +50,8 @@ function MobileCameraSenderContent() {
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const webrtcConnectedRef = useRef<boolean>(false);
+  const isNegotiatingRef = useRef<boolean>(false);
+  const pendingIceCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
   const relayCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   // Enumerate phone cameras (Ultra-Wide, Main, Telephoto, Front)
@@ -131,79 +130,101 @@ function MobileCameraSenderContent() {
   );
 
   // Create WebRTC Offer and send to Studio via Supabase Realtime
-  const initiateWebRtcOffer = useCallback(async () => {
-    const stream = streamRef.current;
-    const ch = channelRef.current;
-    if (!stream || !ch) return;
+  const initiateWebRtcOffer = useCallback(
+    async (forceRestart: boolean = false) => {
+      const stream = streamRef.current;
+      const ch = channelRef.current;
+      if (!stream || !ch) return;
 
-    try {
-      if (pcRef.current) {
-        pcRef.current.close();
+      // Prevent race conditions / glare if already negotiating or stably connected
+      if (!forceRestart) {
+        if (isNegotiatingRef.current) return;
+        if (pcRef.current && pcRef.current.connectionState === "connected") return;
       }
 
-      const pc = new RTCPeerConnection(RTC_CONFIG);
-      pcRef.current = pc;
-
-      stream.getTracks().forEach((track) => {
-        pc.addTrack(track, stream);
-      });
-
-      pc.onicecandidate = (ev) => {
-        if (ev.candidate && channelRef.current) {
-          void channelRef.current.send({
-            type: "broadcast",
-            event: "webrtc_ice_from_phone",
-            payload: {
-              roomCode,
-              candidate: ev.candidate.toJSON(),
-            },
-          });
+      isNegotiatingRef.current = true;
+      try {
+        if (pcRef.current) {
+          try {
+            pcRef.current.close();
+          } catch {
+            // ignore
+          }
         }
-      };
 
-      pc.onconnectionstatechange = () => {
-        if (pc.connectionState === "connected") {
-          webrtcConnectedRef.current = true;
-          setConnectionState("streaming_webrtc");
-        } else if (
-          pc.connectionState === "disconnected" ||
-          pc.connectionState === "failed" ||
-          pc.connectionState === "closed"
-        ) {
-          webrtcConnectedRef.current = false;
-          setConnectionState("streaming_relay");
-        }
-      };
+        pendingIceCandidatesRef.current = [];
+        const pc = new RTCPeerConnection(RTC_CONFIG);
+        pcRef.current = pc;
 
-      setConnectionState("webrtc_connecting");
-      const offer = await pc.createOffer({
-        offerToReceiveAudio: false,
-        offerToReceiveVideo: false,
-      });
-      await pc.setLocalDescription(offer);
+        stream.getTracks().forEach((track) => {
+          pc.addTrack(track, stream);
+        });
 
-      await ch.send({
-        type: "broadcast",
-        event: "webrtc_offer",
-        payload: {
-          roomCode,
-          camName,
-          devicePlatform,
-          sdp: pc.localDescription,
-        },
-      });
-    } catch {
-      setConnectionState("streaming_relay");
-    }
-  }, [roomCode, camName, devicePlatform]);
+        pc.onicecandidate = (ev) => {
+          if (ev.candidate && channelRef.current) {
+            void channelRef.current.send({
+              type: "broadcast",
+              event: "webrtc_ice_from_phone",
+              payload: {
+                roomCode,
+                candidate: ev.candidate.toJSON(),
+              },
+            });
+          }
+        };
 
-  // Connect to Supabase Realtime Signaling & Relay Channel whenever roomCode + camera are active
+        const handleConnectionChange = () => {
+          const state = pc.connectionState;
+          if (state === "connected") {
+            webrtcConnectedRef.current = true;
+            isNegotiatingRef.current = false;
+            setConnectionState("streaming_webrtc");
+          } else if (state === "disconnected" || state === "failed" || state === "closed") {
+            webrtcConnectedRef.current = false;
+            isNegotiatingRef.current = false;
+            if (state === "failed") {
+              setConnectionState("streaming_relay");
+            }
+          }
+        };
+
+        pc.onconnectionstatechange = handleConnectionChange;
+        pc.oniceconnectionstatechange = handleConnectionChange;
+
+        setConnectionState("webrtc_connecting");
+        const offer = await pc.createOffer({
+          offerToReceiveAudio: false,
+          offerToReceiveVideo: false,
+        });
+        await pc.setLocalDescription(offer);
+
+        await ch.send({
+          type: "broadcast",
+          event: "webrtc_offer",
+          payload: {
+            roomCode,
+            camName,
+            devicePlatform,
+            sdp: pc.localDescription,
+          },
+        });
+      } catch (err) {
+        console.error("[WebRTC Phone] Failed to initiate offer:", err);
+        isNegotiatingRef.current = false;
+        setConnectionState("streaming_relay");
+      }
+    },
+    [roomCode, camName, devicePlatform]
+  );
+
+  // Connect to Supabase Realtime Signaling Channel whenever roomCode + camera are active
   useEffect(() => {
     const cleanRoom = roomCode.trim().toUpperCase();
     if (!cleanRoom || !isCameraActive) return;
 
     setConnectionState("waiting_studio");
     webrtcConnectedRef.current = false;
+    isNegotiatingRef.current = false;
 
     const ch = supabase.channel(`boxscore-wireless-cam-${cleanRoom}`, {
       config: { broadcast: { self: false } },
@@ -211,7 +232,10 @@ function MobileCameraSenderContent() {
     channelRef.current = ch;
 
     ch.on("broadcast", { event: "studio_ready" }, () => {
-      void initiateWebRtcOffer();
+      // Studio is listening: connect WebRTC P2P if not already connected
+      if (!webrtcConnectedRef.current && !isNegotiatingRef.current) {
+        void initiateWebRtcOffer();
+      }
     })
       .on("broadcast", { event: "webrtc_answer" }, async ({ payload }) => {
         try {
@@ -219,16 +243,24 @@ function MobileCameraSenderContent() {
             await pcRef.current.setRemoteDescription(
               new RTCSessionDescription(payload.sdp)
             );
+            await flushBufferedIceCandidates(
+              pcRef.current,
+              pendingIceCandidatesRef.current
+            );
+            isNegotiatingRef.current = false;
           }
-        } catch {
-          // ignore
+        } catch (err) {
+          console.warn("[WebRTC Phone] Remote answer error:", err);
+          isNegotiatingRef.current = false;
         }
       })
       .on("broadcast", { event: "webrtc_ice_from_studio" }, async ({ payload }) => {
         try {
-          if (pcRef.current && payload?.candidate) {
-            await pcRef.current.addIceCandidate(
-              new RTCIceCandidate(payload.candidate)
+          if (payload?.candidate) {
+            await addIceCandidateSafely(
+              pcRef.current,
+              payload.candidate,
+              pendingIceCandidatesRef.current
             );
           }
         } catch {
@@ -237,7 +269,7 @@ function MobileCameraSenderContent() {
       })
       .subscribe((status) => {
         if (status === "SUBSCRIBED") {
-          // Announce phone presence and send initial WebRTC offer
+          // Announce phone presence and trigger P2P handshake
           void ch.send({
             type: "broadcast",
             event: "phone_joined",
@@ -247,41 +279,48 @@ function MobileCameraSenderContent() {
         }
       });
 
-    // High-compatibility Low-Latency Frame Relay (active whenever WebRTC P2P isn't connected yet)
+    // Emergency Low-Bandwidth Frame Relay:
+    // Only fires if WebRTC P2P has NOT connected after an initial 5s grace period
+    // AND throttled to 1 frame every 2.5 seconds (0.4 fps) at low resolution (320x180)
+    // to strictly preserve Supabase egress bandwidth.
+    const connectionStartTime = Date.now();
     const relayInterval = setInterval(() => {
       const vid = videoRef.current;
       if (!vid || vid.readyState < 2 || !channelRef.current) return;
 
-      // Even if WebRTC is connected, send a lightweight heartbeat or relay frame if needed
-      if (!webrtcConnectedRef.current) {
-        if (!relayCanvasRef.current) {
-          relayCanvasRef.current = document.createElement("canvas");
-        }
-        const c = relayCanvasRef.current;
-        c.width = 640;
-        c.height = 360;
-        const ctx = c.getContext("2d");
-        if (ctx) {
-          ctx.drawImage(vid, 0, 0, c.width, c.height);
-          const dataUrl = c.toDataURL("image/jpeg", 0.56);
-          setConnectionState((prev) =>
-            prev === "streaming_webrtc" ? prev : "streaming_relay"
-          );
-          setFramesSent((n) => n + 1);
-          void channelRef.current.send({
-            type: "broadcast",
-            event: "video_frame",
-            payload: {
-              roomCode: cleanRoom,
-              camName,
-              devicePlatform,
-              frameDataUrl: dataUrl,
-              ts: Date.now(),
-            },
-          });
-        }
+      // When WebRTC P2P is connected, send ZERO relay frames over Supabase!
+      if (webrtcConnectedRef.current) return;
+
+      // Grace period: allow WebRTC 5 seconds to establish direct P2P first
+      if (Date.now() - connectionStartTime < 5000) return;
+
+      if (!relayCanvasRef.current) {
+        relayCanvasRef.current = document.createElement("canvas");
       }
-    }, 125);
+      const c = relayCanvasRef.current;
+      c.width = 320;
+      c.height = 180;
+      const ctx = c.getContext("2d");
+      if (ctx) {
+        ctx.drawImage(vid, 0, 0, c.width, c.height);
+        const dataUrl = c.toDataURL("image/jpeg", 0.32);
+        setConnectionState((prev) =>
+          prev === "streaming_webrtc" ? prev : "streaming_relay"
+        );
+        setFramesSent((n) => n + 1);
+        void channelRef.current.send({
+          type: "broadcast",
+          event: "video_frame",
+          payload: {
+            roomCode: cleanRoom,
+            camName,
+            devicePlatform,
+            frameDataUrl: dataUrl,
+            ts: Date.now(),
+          },
+        });
+      }
+    }, 2500);
 
     return () => {
       clearInterval(relayInterval);
@@ -424,11 +463,11 @@ function MobileCameraSenderContent() {
             )}
             <div className="text-xs font-black uppercase tracking-wide">
               {connectionState === "streaming_webrtc"
-                ? `🟢 LIVE ON STUDIO (WebRTC HD • Room ${roomCode})`
+                ? `🟢 DIRECT P2P LIVE (WebRTC HD • 0 Egress • Room ${roomCode})`
                 : connectionState === "streaming_relay"
-                ? `🟢 LIVE ON STUDIO (Cloud Relay • Room ${roomCode})`
+                ? `🟠 BACKUP RELAY (Low Bandwidth • Room ${roomCode})`
                 : isCameraActive
-                ? `🟡 Camera Ready • Connecting to Room ${roomCode || "..."}`
+                ? `🟡 Connecting P2P • Room ${roomCode || "..."}`
                 : "⚪ Tap 'Start Wireless Camera' below"}
             </div>
           </div>
@@ -437,10 +476,11 @@ function MobileCameraSenderContent() {
             connectionState === "streaming_relay") && (
             <button
               type="button"
-              onClick={() => void initiateWebRtcOffer()}
-              className="rounded-lg bg-emerald-600/30 border border-emerald-400/40 px-2 py-1 text-[0.6rem] font-black uppercase text-emerald-200"
+              onClick={() => void initiateWebRtcOffer(true)}
+              className="rounded-lg bg-emerald-600/30 hover:bg-emerald-600/50 border border-emerald-400/40 px-2.5 py-1 text-[0.6rem] font-black uppercase text-emerald-200 transition-colors"
+              title="Force reconnect direct WebRTC peer-to-peer connection"
             >
-              Sync HD
+              {connectionState === "streaming_webrtc" ? "P2P Active" : "Force WebRTC P2P"}
             </button>
           )}
         </div>
