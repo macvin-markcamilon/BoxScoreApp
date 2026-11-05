@@ -12,9 +12,28 @@
   --text-color: var(--text-light);
   --accent-color: var(--brand-crimson);
 
-  color-scheme: light;
+  @media (prefers-color-scheme: dark) {
+    --surface-color: var(--surface-dark);
+    --text-color: var(--text-dark);
+    --accent-color: #F87171;
+  }
+
+  color-scheme: light dark;
   accent-color: var(--accent-color);
   color: var(--text-color);
+
+  &:has(> head > meta[name="color-scheme"][content="dark"]) {
+    color-scheme: dark;
+    --surface-color: var(--surface-dark);
+    --text-color: var(--text-dark);
+    --accent-color: #F87171;
+  }
+  &:has(> head > meta[name="color-scheme"][content="light"]) {
+    color-scheme: light;
+    --surface-color: var(--surface-light);
+    --text-color: var(--text-light);
+    --accent-color: var(--brand-crimson);
+  }
 }
 
 @supports (color: light-dark(white, black)) {
@@ -92,4 +111,170 @@ dialog::backdrop {
     linear-gradient(-45deg, transparent 75%, #0F172A 75%);
   background-size: 24px 24px;
   background-position: 0 0, 0 12px, 12px -12px, -12px 0;
+}
+
+/* Broadcast Studio Dark & Light Theme Scopes */
+.studio-dark-mode {
+  color-scheme: dark;
+  background-color: #0b0e14;
+  color: var(--text-color);
+  accent-color: var(--accent-color);
+}
+
+.studio-light-mode {
+  color-scheme: light;
+  background-color: #f1f5f9;
+  color: var(--text-color);
+  accent-color: var(--accent-color);
+}
+
+/* Keep 16:9 broadcast video monitors in dark color-scheme even in light mode */
+.studio-video-viewport {
+  color-scheme: only dark;
+  background-color: #000000;
+  color: #f8fafc;
+  accent-color: var(--accent-color);
+}
+
+/* Light Mode surface, border, and high-contrast text mappings for Studio panels */
+.studio-light-mode:is(.bg-\[\#0b0e14\]),
+.studio-light-mode :is(.bg-\[\#0b0e14\], .bg-\[\#101520\], .bg-\[\#0d111a\], .bg-\[\#0b0e15\]) {
+  background-color: #f1f5f9 !important;
+}
+
+.studio-light-mode :is(.bg-\[\#111622\], .bg-\[\#131926\], .bg-\[\#121722\]) {
+  background-color: #ffffff !important;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
+}
+
+.studio-light-mode :is(.bg-\[\#0d121c\], .bg-\[\#0e1420\], .bg-\[\#080b11\]) {
+  background-color: #f8fafc !important;
+}
+
+.studio-light-mode :is(
+  .bg-slate-950,
+  .bg-slate-950\/95,
+  .bg-slate-950\/90,
+  .bg-slate-950\/80,
+  .bg-slate-900,
+  .bg-slate-900\/95,
+  .bg-slate-900\/90,
+  .bg-slate-900\/80,
+  .bg-slate-900\/70,
+  .bg-slate-900\/60
+) {
+  background-color: #f8fafc !important;
+}
+
+.studio-light-mode :is(.bg-slate-800, .bg-slate-800\/90, .bg-slate-800\/80, .bg-slate-700) {
+  background-color: #e2e8f0 !important;
+}
+
+.studio-light-mode :is(.hover\:bg-slate-700:hover, .hover\:bg-slate-800\/80:hover, .hover\:bg-slate-800:hover) {
+  background-color: #cbd5e1 !important;
+}
+
+.studio-light-mode :is(
+  .bg-emerald-950\/90,
+  .bg-emerald-950\/70,
+  .bg-emerald-950\/60,
+  .bg-emerald-950\/50,
+  .bg-emerald-950\/40,
+  .bg-emerald-950\/30,
+  .bg-emerald-950\/20,
+  .bg-emerald-950\/15
+) {
+  background-color: #ecfdf5 !important;
+}
+
+.studio-light-mode :is(.bg-amber-950\/70, .bg-amber-950\/60, .bg-amber-950\/40, .bg-amber-950\/15) {
+  background-color: #fffbeb !important;
+}
+
+.studio-light-mode :is(.bg-sky-950\/15, .bg-blue-950\/20) {
+  background-color: #eff6ff !important;
+}
+
+.studio-light-mode :is(
+  .bg-rose-950\/80,
+  .bg-rose-950\/70,
+  .bg-rose-950\/50,
+  .bg-rose-950\/40,
+  .bg-rose-950\/30,
+  .bg-rose-950\/20
+) {
+  background-color: #fff1f2 !important;
+}
+
+.studio-light-mode :is(
+  .border-slate-800,
+  .border-slate-800\/90,
+  .border-slate-800\/80,
+  .border-slate-700,
+  .border-slate-700\/90,
+  .border-slate-700\/80,
+  .border-slate-700\/60
+) {
+  border-color: #cbd5e1 !important;
+}
+
+/* Text contrast adjustments in Studio Light Mode (excluding solid buttons & dark video viewports) */
+.studio-light-mode :is(.text-white, .text-slate-100, .text-slate-200):not(
+  .bg-rose-600, .bg-rose-600 *,
+  .bg-blue-600, .bg-blue-600 *,
+  .bg-emerald-600, .bg-emerald-600 *,
+  .bg-sky-600, .bg-sky-600 *,
+  .bg-purple-600, .bg-purple-600 *,
+  .studio-video-viewport, .studio-video-viewport *
+) {
+  color: #0f172a !important;
+}
+
+.studio-light-mode :is(.text-slate-300):not(.studio-video-viewport, .studio-video-viewport *) {
+  color: #1e293b !important;
+}
+
+.studio-light-mode :is(.text-slate-400, .text-slate-500):not(.studio-video-viewport, .studio-video-viewport *) {
+  color: #475569 !important;
+}
+
+.studio-light-mode :is(.text-emerald-200, .text-emerald-300, .text-emerald-400):not(
+  .bg-emerald-600, .bg-emerald-600 *,
+  .studio-video-viewport, .studio-video-viewport *
+) {
+  color: #047857 !important;
+}
+
+.studio-light-mode :is(.text-amber-200, .text-amber-300, .text-amber-400):not(
+  .studio-video-viewport, .studio-video-viewport *
+) {
+  color: #b45309 !important;
+}
+
+.studio-light-mode :is(.text-sky-200, .text-sky-300, .text-sky-400):not(
+  .bg-sky-600, .bg-sky-600 *,
+  .studio-video-viewport, .studio-video-viewport *
+) {
+  color: #0369a1 !important;
+}
+
+.studio-light-mode :is(.text-blue-300, .text-blue-400):not(
+  .bg-blue-600, .bg-blue-600 *,
+  .studio-video-viewport, .studio-video-viewport *
+) {
+  color: #1d4ed8 !important;
+}
+
+.studio-light-mode :is(.text-rose-200, .text-rose-300, .text-rose-400):not(
+  .bg-rose-600, .bg-rose-600 *,
+  .studio-video-viewport, .studio-video-viewport *
+) {
+  color: #be123c !important;
+}
+
+.studio-light-mode :is(.text-purple-300, .text-purple-400):not(
+  .bg-purple-600, .bg-purple-600 *,
+  .studio-video-viewport, .studio-video-viewport *
+) {
+  color: #6d28d9 !important;
 }

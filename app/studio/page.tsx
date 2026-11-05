@@ -4,15 +4,17 @@ import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } fr
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import {
+  ArrowDown,
   ArrowLeft,
   ArrowRight,
   ArrowLeftRight,
+  ArrowUp,
+  ArrowUpDown,
   Bookmark,
   Camera,
   Check,
   Circle,
   Clock,
-  Columns2,
   Copy,
   Download,
   Eye,
@@ -27,6 +29,7 @@ import {
   Mic,
   MicOff,
   Monitor,
+  Moon,
   Music,
   Pause,
   Play,
@@ -36,7 +39,6 @@ import {
   RefreshCw,
   Repeat,
   RotateCcw,
-  Rows2,
   Save,
   Scissors,
   Search,
@@ -46,6 +48,7 @@ import {
   Smartphone,
   Sparkles,
   Square,
+  Sun,
   Tag,
   Trash2,
   Tv,
@@ -480,17 +483,17 @@ function LiveBroadcastStudioContent() {
   const [fbLivePublicUrl, setFbLivePublicUrl] = useState<string>("");
   const [streamSavedNotice, setStreamSavedNotice] = useState<string | null>(null);
 
-  // Camera Timeline & Scenes Workspace Layout Options (Columns vs Rows + Hide/Show)
-  const [timelineLayoutMode, setTimelineLayoutMode] = useState<"columns" | "rows">("columns");
+  // Section Ordering (Camera Timeline vs Scenes and Live), Visibility & Theme Mode
+  const [topSection, setTopSection] = useState<"timeline" | "scenes_and_live">("timeline");
   const [showTimeline, setShowTimeline] = useState<boolean>(true);
-  const [showScenesPanel, setShowScenesPanel] = useState<boolean>(true);
+  const [showScenesAndLive, setShowScenesAndLive] = useState<boolean>(true);
   const [showPreviewScenesStrip, setShowPreviewScenesStrip] = useState<boolean>(true);
+  const [studioTheme, setStudioTheme] = useState<"dark" | "light">("dark");
 
   // Canvas & Video Refs
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const liveCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const sceneThumbCanvasByIdRef = useRef<Record<string, HTMLCanvasElement | null>>({});
-  const columnSceneThumbCanvasByIdRef = useRef<Record<string, HTMLCanvasElement | null>>({});
   const previewReplayVideoRef = useRef<HTMLVideoElement | null>(null);
   const liveReplayVideoRef = useRef<HTMLVideoElement | null>(null);
   const previewMediaVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -565,21 +568,29 @@ function LiveBroadcastStudioContent() {
       if (savedKey) setStreamKey(savedKey);
       const savedUrl = localStorage.getItem("boxscore_studio_fb_live_url");
       if (savedUrl) setFbLivePublicUrl(savedUrl);
-      const savedLayout = localStorage.getItem("boxscore_studio_timeline_layout");
-      if (savedLayout === "columns" || savedLayout === "rows") {
-        setTimelineLayoutMode(savedLayout);
+      const savedTopSection = localStorage.getItem("boxscore_studio_top_section");
+      if (savedTopSection === "timeline" || savedTopSection === "scenes_and_live") {
+        setTopSection(savedTopSection);
       }
       const savedShowTimeline = localStorage.getItem("boxscore_studio_show_timeline");
       if (savedShowTimeline !== null) {
         setShowTimeline(savedShowTimeline === "true");
       }
-      const savedShowScenes = localStorage.getItem("boxscore_studio_show_scenes");
-      if (savedShowScenes !== null) {
-        setShowScenesPanel(savedShowScenes === "true");
+      const savedShowScenesLive = localStorage.getItem("boxscore_studio_show_scenes_live");
+      if (savedShowScenesLive !== null) {
+        setShowScenesAndLive(savedShowScenesLive === "true");
       }
       const savedShowPreviewStrip = localStorage.getItem("boxscore_studio_show_preview_scenes");
       if (savedShowPreviewStrip !== null) {
         setShowPreviewScenesStrip(savedShowPreviewStrip === "true");
+      }
+      const savedTheme =
+        localStorage.getItem("boxscore_studio_theme") ||
+        localStorage.getItem("color-scheme");
+      if (savedTheme === "light" || savedTheme === "dark") {
+        setStudioTheme(savedTheme);
+        const meta = document.querySelector<HTMLMetaElement>('meta[name="color-scheme"]');
+        if (meta) meta.content = savedTheme;
       }
     } catch {}
 
@@ -2798,41 +2809,36 @@ function LiveBroadcastStudioContent() {
         }
       }
 
-      // 3. Render Miniature Scene Preview Thumbnails in Both Preview Strip and Scenes Column (10fps)
+      // 3. Render Miniature Scene Preview Thumbnails in Preview Strip (10fps)
       if (nowMs - lastThumbRenderMs >= 100) {
         lastThumbRenderMs = nowMs;
         for (const sceneItem of scenes) {
-          const targetCanvases = [
-            sceneThumbCanvasByIdRef.current[sceneItem.id],
-            columnSceneThumbCanvasByIdRef.current[sceneItem.id],
-          ].filter(Boolean) as HTMLCanvasElement[];
-
-          for (const tCanvas of targetCanvases) {
-            const tCtx = tCanvas.getContext("2d");
-            if (!tCtx) continue;
-            tCtx.save();
-            tCtx.scale(tCanvas.width / 1920, tCanvas.height / 1080);
-            renderSceneToCanvas(
-              tCtx,
-              1920,
-              1080,
-              sceneItem,
-              sceneItem.id === previewScene?.id
-                ? previewReplayVideoRef.current
-                : sceneItem.id === liveScene?.id
-                  ? liveReplayVideoRef.current
-                  : null,
-              sceneItem.id === previewScene?.id
-                ? previewMediaVideoRef.current
-                : sceneItem.id === liveScene?.id
-                  ? liveMediaVideoRef.current
-                  : null,
-              false,
-              false,
-              nowMs
-            );
-            tCtx.restore();
-          }
+          const tCanvas = sceneThumbCanvasByIdRef.current[sceneItem.id];
+          if (!tCanvas) continue;
+          const tCtx = tCanvas.getContext("2d");
+          if (!tCtx) continue;
+          tCtx.save();
+          tCtx.scale(tCanvas.width / 1920, tCanvas.height / 1080);
+          renderSceneToCanvas(
+            tCtx,
+            1920,
+            1080,
+            sceneItem,
+            sceneItem.id === previewScene?.id
+              ? previewReplayVideoRef.current
+              : sceneItem.id === liveScene?.id
+                ? liveReplayVideoRef.current
+                : null,
+            sceneItem.id === previewScene?.id
+              ? previewMediaVideoRef.current
+              : sceneItem.id === liveScene?.id
+                ? liveMediaVideoRef.current
+                : null,
+            false,
+            false,
+            nowMs
+          );
+          tCtx.restore();
         }
       }
 
@@ -2853,12 +2859,15 @@ function LiveBroadcastStudioContent() {
     drawLogoStingerOverlay,
   ]);
 
-  // Layout & Visibility Toggle Handlers for Camera Timeline and Scenes
-  const toggleTimelineLayoutMode = (mode: "columns" | "rows") => {
-    setTimelineLayoutMode(mode);
-    try {
-      localStorage.setItem("boxscore_studio_timeline_layout", mode);
-    } catch {}
+  // Section Order, Visibility & Light/Dark Theme Toggle Handlers
+  const handleSwapTopSection = (target?: "timeline" | "scenes_and_live") => {
+    setTopSection((prev) => {
+      const next = target ?? (prev === "timeline" ? "scenes_and_live" : "timeline");
+      try {
+        localStorage.setItem("boxscore_studio_top_section", next);
+      } catch {}
+      return next;
+    });
   };
 
   const toggleShowTimeline = (val?: boolean) => {
@@ -2871,11 +2880,11 @@ function LiveBroadcastStudioContent() {
     });
   };
 
-  const toggleShowScenesPanel = (val?: boolean) => {
-    setShowScenesPanel((prev) => {
+  const toggleShowScenesAndLive = (val?: boolean) => {
+    setShowScenesAndLive((prev) => {
       const next = typeof val === "boolean" ? val : !prev;
       try {
-        localStorage.setItem("boxscore_studio_show_scenes", String(next));
+        localStorage.setItem("boxscore_studio_show_scenes_live", String(next));
       } catch {}
       return next;
     });
@@ -2886,6 +2895,27 @@ function LiveBroadcastStudioContent() {
       const next = typeof val === "boolean" ? val : !prev;
       try {
         localStorage.setItem("boxscore_studio_show_preview_scenes", String(next));
+      } catch {}
+      return next;
+    });
+  };
+
+  const toggleStudioTheme = (targetTheme?: "dark" | "light") => {
+    setStudioTheme((prev) => {
+      const next = targetTheme ?? (prev === "dark" ? "light" : "dark");
+      try {
+        localStorage.setItem("boxscore_studio_theme", next);
+        const meta = document.querySelector<HTMLMetaElement>('meta[name="color-scheme"]');
+        if (meta) {
+          meta.content = next;
+        }
+        const prefersDark = matchMedia("(prefers-color-scheme: dark)").matches;
+        const systemScheme = prefersDark ? "dark" : "light";
+        if (next !== systemScheme) {
+          localStorage.setItem("color-scheme", next);
+        } else {
+          localStorage.removeItem("color-scheme");
+        }
       } catch {}
       return next;
     });
@@ -4590,220 +4620,6 @@ function LiveBroadcastStudioContent() {
     setTimeout(() => setCopiedKey(null), 2000);
   };
 
-  // Render Scenes Panel for Column or Row layout
-  const renderScenesPanel = (isColumnMode: boolean) => (
-    <div className="flex flex-col rounded-xl border border-emerald-500/30 bg-[#131926] overflow-hidden shadow-lg h-full">
-      {/* Panel Header */}
-      <div className="flex flex-wrap items-center justify-between gap-1.5 px-3 py-2 bg-emerald-950/40 border-b border-emerald-500/30">
-        <div className="flex items-center gap-1.5 min-w-0">
-          <span className="inline-flex h-5 w-5 items-center justify-center rounded bg-emerald-500/20 text-emerald-300">
-            <Layers className="h-3.5 w-3.5" />
-          </span>
-          <span className="text-xs font-black uppercase tracking-wider text-emerald-200">
-            Scenes ({scenes.length})
-          </span>
-        </div>
-
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
-            onClick={handleAddScene}
-            className="inline-flex items-center gap-1 rounded bg-emerald-600/30 hover:bg-emerald-600/50 border border-emerald-500/40 px-2 py-0.5 text-[0.58rem] font-black uppercase text-emerald-300 cursor-pointer transition-colors"
-            title="Add New Camera Scene"
-          >
-            <Plus className="h-2.5 w-2.5" />
-            <span>+ Cam</span>
-          </button>
-
-          <label
-            className="inline-flex items-center gap-1 rounded bg-sky-600/30 hover:bg-sky-600/50 border border-sky-500/40 px-2 py-0.5 text-[0.58rem] font-black uppercase text-sky-300 cursor-pointer transition-colors"
-            title="Add Video Scene"
-          >
-            <Film className="h-2.5 w-2.5" />
-            <span>+ Vid</span>
-            <input
-              type="file"
-              accept="video/*"
-              onChange={(e) => handleAddMediaScene(e, "video")}
-              className="hidden"
-            />
-          </label>
-
-          <label
-            className="inline-flex items-center gap-1 rounded bg-purple-600/30 hover:bg-purple-600/50 border border-purple-500/40 px-2 py-0.5 text-[0.58rem] font-black uppercase text-purple-300 cursor-pointer transition-colors"
-            title="Add Picture Scene"
-          >
-            <Plus className="h-2.5 w-2.5" />
-            <span>+ Pic</span>
-            <input
-              type="file"
-              accept="image/*"
-              onChange={(e) => handleAddMediaScene(e, "picture")}
-              className="hidden"
-            />
-          </label>
-
-          {/* Quick Hide Scenes */}
-          <button
-            type="button"
-            onClick={() => toggleShowScenesPanel(false)}
-            className="p-1 rounded text-slate-400 hover:text-rose-300 hover:bg-rose-950/40 transition-colors ml-0.5 cursor-pointer"
-            title="Hide Scenes Panel"
-          >
-            <EyeOff className="h-3 w-3" />
-          </button>
-        </div>
-      </div>
-
-      {/* Scenes Cards List */}
-      <div
-        className={`p-2.5 flex-1 overflow-y-auto ${
-          isColumnMode
-            ? "max-h-[580px] space-y-2"
-            : "max-h-80 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2 space-y-0"
-        }`}
-      >
-        {scenes.map((sceneItem) => {
-          const isPreview = sceneItem.id === previewSceneId;
-          const isLive = sceneItem.id === liveSceneId;
-          return (
-            <div
-              key={sceneItem.id}
-              className={`group relative rounded-xl border text-left transition-all overflow-hidden bg-slate-900/90 ${
-                isPreview
-                  ? "border-emerald-400 ring-2 ring-emerald-500/40 shadow-md bg-emerald-950/30"
-                  : isLive
-                    ? "border-rose-500/80 shadow-md bg-rose-950/20"
-                    : "border-slate-800 hover:border-slate-600"
-              }`}
-            >
-              {/* Miniature 16:9 Canvas */}
-              <div
-                onClick={() => setPreviewSceneId(sceneItem.id)}
-                className="relative aspect-video w-full bg-black overflow-hidden cursor-pointer"
-                title={`Click to preview: ${sceneItem.name}`}
-              >
-                <canvas
-                  ref={(el) => {
-                    columnSceneThumbCanvasByIdRef.current[sceneItem.id] = el;
-                  }}
-                  width={320}
-                  height={180}
-                  className="w-full h-full object-contain"
-                />
-
-                {/* Badges Overlay */}
-                <div className="absolute top-1 left-1 right-1 flex items-center justify-between gap-1 pointer-events-none">
-                  <div className="flex items-center gap-1">
-                    {isPreview && (
-                      <span className="rounded bg-emerald-500 px-1.5 py-0.5 text-[0.52rem] font-black uppercase text-slate-950 shadow">
-                        PRV
-                      </span>
-                    )}
-                    {isLive && (
-                      <span className="rounded bg-rose-600 px-1.5 py-0.5 text-[0.52rem] font-black uppercase text-white shadow animate-pulse">
-                        LIVE
-                      </span>
-                    )}
-                  </div>
-                  <span className="rounded bg-black/80 px-1 py-0.5 text-[0.48rem] font-bold uppercase text-slate-200">
-                    {sceneItem.kind === "replay_scene"
-                      ? "Replay"
-                      : sceneItem.kind === "video_scene"
-                        ? "Video"
-                        : sceneItem.kind === "picture_scene"
-                          ? "Pic"
-                          : `${sceneItem.cameras.length} Cam`}
-                  </span>
-                </div>
-              </div>
-
-              {/* Card Info & Quick Actions */}
-              <div className="p-2 bg-[#0d121c] border-t border-slate-800/80 space-y-1.5">
-                <div className="flex items-center justify-between gap-1">
-                  <div className="min-w-0 flex-1">
-                    <div className="text-[0.68rem] font-black text-white truncate group-hover:text-emerald-300 transition-colors">
-                      {sceneItem.name}
-                    </div>
-                    <div className="text-[0.55rem] font-bold text-slate-400 truncate">
-                      {sceneItem.kind === "replay_scene"
-                        ? `⚡ ${sceneItem.replayConfig?.playbackRate}x Slow-Mo`
-                        : sceneItem.kind === "video_scene"
-                          ? `🎬 ${sceneItem.mediaConfig?.fileName || "Video"}`
-                          : sceneItem.kind === "picture_scene"
-                            ? `🖼️ ${sceneItem.mediaConfig?.fileName || "Picture"}`
-                            : `🎥 ${sceneItem.layout.replace(/_/g, " ")}`}
-                    </div>
-                  </div>
-
-                  {scenes.length > 1 && (
-                    <button
-                      type="button"
-                      onClick={() => handleDeleteScene(sceneItem.id)}
-                      className="p-1 text-slate-500 hover:text-rose-400 transition-colors cursor-pointer shrink-0"
-                      title="Delete Scene"
-                    >
-                      <Trash2 className="h-3 w-3" />
-                    </button>
-                  )}
-                </div>
-
-                {/* Cue / Cut Buttons */}
-                <div className="grid grid-cols-2 gap-1 pt-0.5">
-                  <button
-                    type="button"
-                    onClick={() => setPreviewSceneId(sceneItem.id)}
-                    className={`w-full py-1 text-[0.6rem] font-black uppercase rounded transition-all cursor-pointer ${
-                      isPreview
-                        ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
-                        : "bg-slate-800 hover:bg-emerald-600/30 text-slate-300 hover:text-emerald-200 border border-slate-700"
-                    }`}
-                    title="Load into Preview monitor"
-                  >
-                    {isPreview ? "In Preview" : "Cue Prv"}
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setLiveSceneId(sceneItem.id)}
-                    className={`w-full py-1 text-[0.6rem] font-black uppercase rounded transition-all cursor-pointer ${
-                      isLive
-                        ? "bg-rose-600/20 text-rose-300 border border-rose-500/40"
-                        : "bg-rose-600 hover:bg-rose-500 text-white shadow"
-                    }`}
-                    title="Cut directly to Live Output"
-                  >
-                    {isLive ? "On Air" : "Cut Live"}
-                  </button>
-                </div>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-
-      {/* Panel Footer: Quick Add Scene Name */}
-      <div className="p-2 border-t border-slate-800 bg-slate-900/60 flex items-center gap-1.5">
-        <input
-          type="text"
-          value={newSceneNameInput}
-          onChange={(e) => setNewSceneNameInput(e.target.value)}
-          placeholder="New scene name..."
-          className="flex-1 rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-[0.65rem] text-white focus:outline-none focus:border-emerald-500"
-        />
-        <button
-          type="button"
-          onClick={handleAddScene}
-          className="inline-flex items-center gap-1 rounded-md bg-emerald-600 hover:bg-emerald-500 px-2.5 py-1 text-[0.62rem] font-black uppercase text-white cursor-pointer"
-          title="Create Scene"
-        >
-          <Plus className="h-3 w-3" />
-          <span>Add</span>
-        </button>
-      </div>
-    </div>
-  );
-
   // Uncompressed pixel width of the timeline track based on Zoom level (px/sec)
   const totalTimelineWidthPx = Math.max(
     760,
@@ -4811,7 +4627,13 @@ function LiveBroadcastStudioContent() {
   );
 
   return (
-    <div className="min-h-screen bg-[#0b0e14] text-slate-100 flex flex-col font-sans select-none">
+    <div
+      className={`min-h-screen flex flex-col font-sans select-none transition-colors duration-200 ${
+        studioTheme === "light"
+          ? "studio-light-mode bg-[#f1f5f9] text-slate-900"
+          : "studio-dark-mode bg-[#0b0e14] text-slate-100"
+      }`}
+    >
       {/* Hidden Replay & Media Video Elements for Preview & Live Program */}
       <video ref={previewReplayVideoRef} playsInline muted className="hidden" />
       <video ref={liveReplayVideoRef} playsInline muted className="hidden" />
@@ -4894,7 +4716,7 @@ function LiveBroadcastStudioContent() {
           </div>
         </div>
 
-        {/* Right: Facebook Live Stream & Quick Record Controls */}
+        {/* Right: Facebook Live Stream, Section Order, Light Mode & Quick Record Controls */}
         <div className="flex flex-wrap items-center gap-2">
           {/* Direct Facebook / YouTube Live Button */}
           {!isStreamingLive ? (
@@ -4922,30 +4744,18 @@ function LiveBroadcastStudioContent() {
             </div>
           )}
 
-          {/* Quick Layout & Visibility Pill in Header */}
-          <div className="hidden md:flex items-center gap-1 rounded-lg bg-slate-900 border border-slate-700 px-2 py-1 text-xs">
-            <span className="text-[0.62rem] font-black uppercase text-slate-400 mr-1">View:</span>
+          {/* Section Top/Bottom Order Switcher + Visibility Toggles */}
+          <div className="flex flex-wrap items-center gap-1 rounded-lg bg-slate-900 border border-slate-700 px-2 py-1 text-xs">
             <button
               type="button"
-              onClick={() => toggleTimelineLayoutMode(timelineLayoutMode === "columns" ? "rows" : "columns")}
+              onClick={() => handleSwapTopSection()}
               className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[0.62rem] font-black uppercase text-amber-300 hover:text-white cursor-pointer border border-slate-700 transition-colors"
-              title={`Switch workspace layout to ${timelineLayoutMode === "columns" ? "Rows (Stacked)" : "Columns (Side-by-Side)"}`}
+              title="Switch which section is on top: Camera Timeline or Scenes and Live"
             >
-              {timelineLayoutMode === "columns" ? <Columns2 className="h-3 w-3" /> : <Rows2 className="h-3 w-3" />}
-              <span>{timelineLayoutMode === "columns" ? "Columns" : "Rows"}</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => toggleShowScenesPanel()}
-              className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[0.62rem] font-bold cursor-pointer border transition-colors ${
-                showScenesPanel
-                  ? "bg-emerald-950/60 border-emerald-500/40 text-emerald-300"
-                  : "bg-slate-800/80 border-slate-700 text-slate-500 line-through"
-              }`}
-              title={showScenesPanel ? "Hide Scenes panel" : "Show Scenes panel"}
-            >
-              {showScenesPanel ? <Eye className="h-2.5 w-2.5" /> : <EyeOff className="h-2.5 w-2.5" />}
-              <span>Scenes</span>
+              <ArrowUpDown className="h-3 w-3 text-amber-400" />
+              <span>
+                Top: {topSection === "timeline" ? "Timeline" : "Scenes & Live"}
+              </span>
             </button>
             <button
               type="button"
@@ -4960,7 +4770,45 @@ function LiveBroadcastStudioContent() {
               {showTimeline ? <Eye className="h-2.5 w-2.5" /> : <EyeOff className="h-2.5 w-2.5" />}
               <span>Timeline</span>
             </button>
+            <button
+              type="button"
+              onClick={() => toggleShowScenesAndLive()}
+              className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[0.62rem] font-bold cursor-pointer border transition-colors ${
+                showScenesAndLive
+                  ? "bg-emerald-950/60 border-emerald-500/40 text-emerald-300"
+                  : "bg-slate-800/80 border-slate-700 text-slate-500 line-through"
+              }`}
+              title={showScenesAndLive ? "Hide Scenes and Live" : "Show Scenes and Live"}
+            >
+              {showScenesAndLive ? <Eye className="h-2.5 w-2.5" /> : <EyeOff className="h-2.5 w-2.5" />}
+              <span>Scenes &amp; Live</span>
+            </button>
           </div>
+
+          {/* Light Mode / Dark Mode Toggle */}
+          <button
+            type="button"
+            onClick={() => toggleStudioTheme()}
+            aria-pressed={studioTheme === "light"}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 px-2.5 py-1.5 text-xs font-bold text-slate-200 cursor-pointer transition-colors"
+            title={
+              studioTheme === "dark"
+                ? "Switch Studio to Light Mode"
+                : "Switch Studio to Dark Mode"
+            }
+          >
+            {studioTheme === "dark" ? (
+              <>
+                <Sun className="h-3.5 w-3.5 text-amber-400" />
+                <span>Light Mode</span>
+              </>
+            ) : (
+              <>
+                <Moon className="h-3.5 w-3.5 text-indigo-500" />
+                <span>Dark Mode</span>
+              </>
+            )}
+          </button>
 
           {/* Clean 16:9 Program Window Pop-Out */}
           <button
@@ -5032,7 +4880,7 @@ function LiveBroadcastStudioContent() {
             </div>
           </div>
 
-          <div className="relative aspect-video w-full bg-black flex items-center justify-center">
+          <div className="studio-video-viewport relative aspect-video w-full bg-black flex items-center justify-center">
             <canvas
               ref={previewCanvasRef}
               width={1920}
@@ -5123,7 +4971,7 @@ function LiveBroadcastStudioContent() {
                       title={`Click to preview: ${sceneItem.name}`}
                     >
                       {/* Live Miniature 16:9 Scene Preview Canvas */}
-                      <div className="relative aspect-video w-full bg-black overflow-hidden">
+                      <div className="studio-video-viewport relative aspect-video w-full bg-black overflow-hidden">
                         <canvas
                           ref={(el) => {
                             sceneThumbCanvasByIdRef.current[sceneItem.id] = el;
@@ -5290,7 +5138,7 @@ function LiveBroadcastStudioContent() {
           </div>
 
           <div
-            className={`relative aspect-video w-full bg-black flex items-center justify-center transition-opacity duration-200 ${
+            className={`studio-video-viewport relative aspect-video w-full bg-black flex items-center justify-center transition-opacity duration-200 ${
               isTransitioning ? "opacity-50" : "opacity-100"
             }`}
           >
@@ -5395,312 +5243,196 @@ function LiveBroadcastStudioContent() {
       </section>
 
       {/* =====================================================================
-          3. BOTTOM WORKSPACE: CAMERA TIMELINE & SCENES (COLUMNS OR ROWS LAYOUT WITH HIDE/SHOW)
+          SWITCHABLE WORKSPACE CONTAINER: CAMERA TIMELINE <-> SCENES AND LIVE
          ===================================================================== */}
-      <section className="p-3 sm:p-4 bg-[#101520] border-b border-slate-800 space-y-3">
-        {/* LAYOUT OPTIONS & VISIBILITY TOOLBAR */}
-        <div className="flex flex-wrap items-center justify-between gap-2.5 pb-2 border-b border-slate-800/90">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-[0.68rem] font-black uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
-              <Layout className="h-3.5 w-3.5 text-amber-400" />
-              <span>Workspace Layout:</span>
-            </span>
-
-            {/* Layout Mode Selector (Columns vs Rows) */}
-            <div className="inline-flex items-center rounded-lg bg-slate-900 border border-slate-700/80 p-0.5 shadow-inner">
-              <button
-                type="button"
-                onClick={() => toggleTimelineLayoutMode("columns")}
-                className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[0.65rem] font-black uppercase transition-all cursor-pointer ${
-                  timelineLayoutMode === "columns"
-                    ? "bg-amber-500 text-slate-950 shadow"
-                    : "text-slate-400 hover:text-white"
-                }`}
-                title="Arrange Camera Timeline and Scenes in columns side-by-side for simultaneous, easy access"
-              >
-                <Columns2 className="h-3 w-3" />
-                <span>Columns (Side-by-Side)</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => toggleTimelineLayoutMode("rows")}
-                className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[0.65rem] font-black uppercase transition-all cursor-pointer ${
-                  timelineLayoutMode === "rows"
-                    ? "bg-amber-500 text-slate-950 shadow"
-                    : "text-slate-400 hover:text-white"
-                }`}
-                title="Stack Camera Timeline and Scenes in full-width rows"
-              >
-                <Rows2 className="h-3 w-3" />
-                <span>Rows (Stacked)</span>
-              </button>
+      <div className="flex-1 flex flex-col">
+        {/* =====================================================================
+            3. CAMERA TIMELINE • REPLAY INSPECTOR & LIVE PLAY-BY-PLAY
+           ===================================================================== */}
+        <section
+          className={`p-3 sm:p-4 bg-[#101520] border-b border-slate-800 space-y-3 ${
+            topSection === "timeline" ? "order-1" : "order-2"
+          }`}
+        >
+          {/* TOP TIMELINE HEADER: TITLE, JUMP TO LATEST TIME, SAVED RECORD PICKER, ZOOM, ORDER SWITCH & HIDE/SHOW */}
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="inline-flex h-6 w-6 items-center justify-center rounded-lg bg-amber-500/20 text-amber-400 border border-amber-500/30">
+                <Film className="h-3.5 w-3.5" />
+              </span>
+              <h2 className="text-xs sm:text-sm font-black uppercase tracking-wider text-white">
+                Camera Timeline • Replay Inspector &amp; Live Play-by-Play
+              </h2>
+              {isRecording && (
+                <span className="rounded-md bg-rose-600/20 border border-rose-500/40 px-2 py-0.5 text-[0.65rem] font-black text-rose-300 animate-pulse">
+                  ● Live Recording ({recordSeconds}s • {getPeriodLabel(period)} {formatClock(clockSeconds)})
+                </span>
+              )}
+              {showTimeline && (
+                <button
+                  type="button"
+                  onClick={handleJumpToLatestTime}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 px-2.5 py-1 text-[0.68rem] font-black uppercase tracking-wider text-slate-950 shadow cursor-pointer transition-colors"
+                  title="Jump Playhead, Replay Box, and Timeline Scrollbar to the latest recorded timestamp"
+                >
+                  <SkipForward className="h-3.5 w-3.5" />
+                  <span>Jump to Latest Time</span>
+                </button>
+              )}
             </div>
-          </div>
 
-          {/* Visibility Toggles (Hide and Show) */}
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-[0.62rem] font-black uppercase tracking-wider text-slate-400">
-              Visibility:
-            </span>
-
-            {/* Toggle Scenes Panel */}
-            <button
-              type="button"
-              onClick={() => toggleShowScenesPanel()}
-              className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[0.65rem] font-black uppercase transition-all cursor-pointer ${
-                showScenesPanel
-                  ? "bg-emerald-950/70 border-emerald-500/60 text-emerald-300 hover:bg-emerald-900/60 shadow-sm"
-                  : "bg-slate-900/80 border-slate-700/60 text-slate-400 hover:text-white"
-              }`}
-              title={showScenesPanel ? "Hide Scenes Panel" : "Show Scenes Panel"}
-            >
-              {showScenesPanel ? <Eye className="h-3 w-3 text-emerald-400" /> : <EyeOff className="h-3 w-3" />}
-              <span>Scenes: {showScenesPanel ? "Shown" : "Hidden"}</span>
-            </button>
-
-            {/* Toggle Camera Timeline */}
-            <button
-              type="button"
-              onClick={() => toggleShowTimeline()}
-              className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[0.65rem] font-black uppercase transition-all cursor-pointer ${
-                showTimeline
-                  ? "bg-amber-950/70 border-amber-500/60 text-amber-300 hover:bg-amber-900/60 shadow-sm"
-                  : "bg-slate-900/80 border-slate-700/60 text-slate-400 hover:text-white"
-              }`}
-              title={showTimeline ? "Hide Camera Timeline" : "Show Camera Timeline"}
-            >
-              {showTimeline ? <Eye className="h-3 w-3 text-amber-400" /> : <EyeOff className="h-3 w-3" />}
-              <span>Timeline: {showTimeline ? "Shown" : "Hidden"}</span>
-            </button>
-          </div>
-        </div>
-
-        {/* Both Panels Hidden State */}
-        {!showScenesPanel && !showTimeline ? (
-          <div className="rounded-xl border border-slate-800 bg-[#0d121c] p-6 text-center space-y-3 shadow-inner">
-            <div className="text-sm font-bold text-slate-400">
-              Both Scenes Panel and Camera Timeline are currently hidden.
-            </div>
-            <div className="flex flex-wrap items-center justify-center gap-2">
-              <button
-                type="button"
-                onClick={() => toggleShowScenesPanel(true)}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 px-3.5 py-1.5 text-xs font-black uppercase text-white shadow cursor-pointer"
-              >
-                <Eye className="h-3.5 w-3.5" />
-                <span>Show Scenes</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => toggleShowTimeline(true)}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 px-3.5 py-1.5 text-xs font-black uppercase text-slate-950 shadow cursor-pointer"
-              >
-                <Eye className="h-3.5 w-3.5" />
-                <span>Show Camera Timeline</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  toggleShowScenesPanel(true);
-                  toggleShowTimeline(true);
-                }}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 px-3.5 py-1.5 text-xs font-black uppercase text-slate-200 cursor-pointer"
-              >
-                <span>Show Both</span>
-              </button>
-            </div>
-          </div>
-        ) : (
-          <div
-            className={
-              timelineLayoutMode === "columns"
-                ? "grid grid-cols-1 lg:grid-cols-12 gap-3 items-start"
-                : "space-y-3"
-            }
-          >
-            {/* SCENES COLUMN / ROW */}
-            {showScenesPanel && (
-              <div
-                className={
-                  timelineLayoutMode === "columns"
-                    ? showTimeline
-                      ? "lg:col-span-4 xl:col-span-3"
-                      : "col-span-12"
-                    : "w-full"
-                }
-              >
-                {renderScenesPanel(timelineLayoutMode === "columns")}
-              </div>
-            )}
-
-            {/* CAMERA TIMELINE COLUMN / ROW */}
-            {showTimeline && (
-              <div
-                className={
-                  timelineLayoutMode === "columns"
-                    ? showScenesPanel
-                      ? "lg:col-span-8 xl:col-span-9 space-y-3 min-w-0"
-                      : "col-span-12 space-y-3 min-w-0"
-                    : "w-full space-y-3 min-w-0"
-                }
-              >
-                {/* TOP TIMELINE HEADER: TITLE, JUMP TO LATEST TIME, SAVED RECORD PICKER & ZOOM CONTROLS */}
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="inline-flex h-6 w-6 items-center justify-center rounded-lg bg-amber-500/20 text-amber-400 border border-amber-500/30">
-                      <Film className="h-3.5 w-3.5" />
+            {/* Right: Saved Recording Picker + Zoom In/Out Controls + Move Top/Bottom + Hide/Show Button */}
+            <div className="flex flex-wrap items-center gap-2">
+              {showTimeline && (
+                <>
+                  <div className="flex items-center gap-1.5 rounded-xl bg-slate-900 border border-slate-800 px-2.5 py-1">
+                    <span className="text-[0.62rem] font-black uppercase text-slate-400">
+                      Track Zoom:
                     </span>
-                    <h2 className="text-xs sm:text-sm font-black uppercase tracking-wider text-white">
-                      Camera Timeline • Replay Inspector &amp; Live Play-by-Play
-                    </h2>
-                    {isRecording && (
-                      <span className="rounded-md bg-rose-600/20 border border-rose-500/40 px-2 py-0.5 text-[0.65rem] font-black text-rose-300 animate-pulse">
-                        ● Live Recording ({recordSeconds}s • {getPeriodLabel(period)} {formatClock(clockSeconds)})
-                      </span>
-                    )}
                     <button
                       type="button"
-                      onClick={handleJumpToLatestTime}
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 px-2.5 py-1 text-[0.68rem] font-black uppercase tracking-wider text-slate-950 shadow cursor-pointer transition-colors"
-                      title="Jump Playhead, Replay Box, and Timeline Scrollbar to the latest recorded timestamp"
+                      onClick={() =>
+                        setTimelineZoomPxPerSec((z) => Math.max(24, z - 16))
+                      }
+                      className="rounded bg-slate-800 hover:bg-slate-700 p-1 text-slate-200 cursor-pointer"
+                      title="Zoom Out Timeline Track"
                     >
-                      <SkipForward className="h-3.5 w-3.5" />
-                      <span>Jump to Latest Time</span>
+                      <ZoomOut className="h-3.5 w-3.5" />
+                    </button>
+                    <input
+                      type="range"
+                      aria-label="Timeline Track Zoom"
+                      min={24}
+                      max={160}
+                      step={8}
+                      value={timelineZoomPxPerSec}
+                      onChange={(e) => setTimelineZoomPxPerSec(Number(e.target.value))}
+                      className="w-20 sm:w-24 accent-sky-400 cursor-pointer"
+                    />
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setTimelineZoomPxPerSec((z) => Math.min(160, z + 16))
+                      }
+                      className="rounded bg-slate-800 hover:bg-slate-700 p-1 text-slate-200 cursor-pointer"
+                      title="Zoom In Timeline Track"
+                    >
+                      <ZoomIn className="h-3.5 w-3.5" />
+                    </button>
+                    <span className="text-[0.62rem] font-mono font-bold text-sky-400 min-w-[46px] text-right">
+                      {timelineZoomPxPerSec}px/s
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => scrollTimelineToSec(timelinePlayheadSec)}
+                      className="ml-1 rounded bg-slate-800 hover:bg-slate-700 px-2 py-0.5 text-[0.6rem] font-black uppercase text-rose-300 border border-rose-500/30 cursor-pointer"
+                      title="Scroll timeline to center the Playhead"
+                    >
+                      Center Playhead
                     </button>
                   </div>
 
-                  {/* Right: Saved Recording Picker + Zoom In/Out Controls + Hide Button */}
-                  <div className="flex flex-wrap items-center gap-2">
-                    <div className="flex items-center gap-1.5 rounded-xl bg-slate-900 border border-slate-800 px-2.5 py-1">
-                      <span className="text-[0.62rem] font-black uppercase text-slate-400">
-                        Track Zoom:
-                      </span>
+                  <select
+                    aria-label="Select Saved Recording on Timeline"
+                    value={selectedTimelineVideoId}
+                    onChange={(e) => {
+                      const vid = storedVideos.find((v) => v.id === e.target.value);
+                      setSelectedTimelineVideoId(e.target.value);
+                      if (vid) {
+                        const boxDur = Math.min(vid.durationSeconds || 10, replayBoxDurationPreset || 10);
+                        const start = Math.max(0, (vid.durationSeconds || 10) - boxDur);
+                        setTrimStartSec(start);
+                        setTrimEndSec(vid.durationSeconds || 10);
+                        setTimelinePlayheadSec(start);
+                      }
+                    }}
+                    className="rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1 text-xs font-bold text-white focus:outline-none focus:border-amber-400 cursor-pointer"
+                  >
+                    {storedVideos.length === 0 ? (
+                      <option value="">-- No Saved Record Yet (Click Start Live Record) --</option>
+                    ) : (
+                      storedVideos.map((v) => (
+                        <option key={v.id} value={v.id}>
+                          📹 {v.title} ({v.durationSeconds}s)
+                        </option>
+                      ))
+                    )}
+                  </select>
+
+                  {selectedTimelineVideo && (
+                    <div className="flex items-center gap-1">
                       <button
                         type="button"
-                        onClick={() =>
-                          setTimelineZoomPxPerSec((z) => Math.max(24, z - 16))
-                        }
-                        className="rounded bg-slate-800 hover:bg-slate-700 p-1 text-slate-200 cursor-pointer"
-                        title="Zoom Out Timeline Track"
+                        onClick={() => handleDownloadVideo(selectedTimelineVideo)}
+                        className="rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 px-2 py-1 text-[0.68rem] font-bold text-slate-200 flex items-center gap-1 cursor-pointer"
+                        title="Download this recorded game file"
                       >
-                        <ZoomOut className="h-3.5 w-3.5" />
+                        <Download className="h-3 w-3 text-sky-400" />
+                        <span>Save</span>
                       </button>
-                      <input
-                        type="range"
-                        aria-label="Timeline Track Zoom"
-                        min={24}
-                        max={160}
-                        step={8}
-                        value={timelineZoomPxPerSec}
-                        onChange={(e) => setTimelineZoomPxPerSec(Number(e.target.value))}
-                        className="w-20 sm:w-24 accent-sky-400 cursor-pointer"
-                      />
                       <button
                         type="button"
-                        onClick={() =>
-                          setTimelineZoomPxPerSec((z) => Math.min(160, z + 16))
-                        }
-                        className="rounded bg-slate-800 hover:bg-slate-700 p-1 text-slate-200 cursor-pointer"
-                        title="Zoom In Timeline Track"
+                        onClick={() => handleDeleteStoredVideo(selectedTimelineVideo.id)}
+                        className="rounded-lg border border-rose-900/60 bg-rose-950/40 hover:bg-rose-900/60 px-2 py-1 text-[0.68rem] font-bold text-rose-300 cursor-pointer"
+                        title="Delete recording"
                       >
-                        <ZoomIn className="h-3.5 w-3.5" />
-                      </button>
-                      <span className="text-[0.62rem] font-mono font-bold text-sky-400 min-w-[46px] text-right">
-                        {timelineZoomPxPerSec}px/s
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => scrollTimelineToSec(timelinePlayheadSec)}
-                        className="ml-1 rounded bg-slate-800 hover:bg-slate-700 px-2 py-0.5 text-[0.6rem] font-black uppercase text-rose-300 border border-rose-500/30 cursor-pointer"
-                        title="Scroll timeline to center the Playhead"
-                      >
-                        Center Playhead
+                        <Trash2 className="h-3 w-3" />
                       </button>
                     </div>
+                  )}
+                </>
+              )}
 
-                    <select
-                      aria-label="Select Saved Recording on Timeline"
-                      value={selectedTimelineVideoId}
-                      onChange={(e) => {
-                        const vid = storedVideos.find((v) => v.id === e.target.value);
-                        setSelectedTimelineVideoId(e.target.value);
-                        if (vid) {
-                          const boxDur = Math.min(vid.durationSeconds || 10, replayBoxDurationPreset || 10);
-                          const start = Math.max(0, (vid.durationSeconds || 10) - boxDur);
-                          setTrimStartSec(start);
-                          setTrimEndSec(vid.durationSeconds || 10);
-                          setTimelinePlayheadSec(start);
-                        }
-                      }}
-                      className="rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1 text-xs font-bold text-white focus:outline-none focus:border-amber-400 cursor-pointer"
-                    >
-                      {storedVideos.length === 0 ? (
-                        <option value="">-- No Saved Record Yet (Click Start Live Record) --</option>
-                      ) : (
-                        storedVideos.map((v) => (
-                          <option key={v.id} value={v.id}>
-                            📹 {v.title} ({v.durationSeconds}s)
-                          </option>
-                        ))
-                      )}
-                    </select>
-
-                    {selectedTimelineVideo && (
-                      <div className="flex items-center gap-1">
-                        <button
-                          type="button"
-                          onClick={() => handleDownloadVideo(selectedTimelineVideo)}
-                          className="rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 px-2 py-1 text-[0.68rem] font-bold text-slate-200 flex items-center gap-1 cursor-pointer"
-                          title="Download this recorded game file"
-                        >
-                          <Download className="h-3 w-3 text-sky-400" />
-                          <span>Save</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteStoredVideo(selectedTimelineVideo.id)}
-                          className="rounded-lg border border-rose-900/60 bg-rose-950/40 hover:bg-rose-900/60 px-2 py-1 text-[0.68rem] font-bold text-rose-300 cursor-pointer"
-                          title="Delete recording"
-                        >
-                          <Trash2 className="h-3 w-3" />
-                        </button>
-                      </div>
-                    )}
-
-                    {/* Quick Hide Timeline Button */}
-                    <button
-                      type="button"
-                      onClick={() => toggleShowTimeline(false)}
-                      className="inline-flex items-center gap-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 px-2.5 py-1 text-[0.65rem] font-bold text-slate-300 hover:text-rose-300 transition-colors cursor-pointer"
-                      title="Hide Camera Timeline"
-                    >
-                      <EyeOff className="h-3 w-3" />
-                      <span>Hide</span>
-                    </button>
-                  </div>
-                </div>
-
-                {/* Unhide Scenes Banner when Scenes is hidden */}
-                {!showScenesPanel && (
-                  <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/20 px-3 py-1.5 flex items-center justify-between text-xs font-bold text-emerald-300">
-                    <span className="flex items-center gap-1.5">
-                      <Layers className="h-3.5 w-3.5 text-emerald-400" />
-                      <span>Scenes panel is currently hidden.</span>
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => toggleShowScenesPanel(true)}
-                      className="inline-flex items-center gap-1 rounded bg-emerald-600/30 hover:bg-emerald-600/50 border border-emerald-500/40 px-2 py-0.5 text-[0.62rem] font-black uppercase text-emerald-300 cursor-pointer transition-colors"
-                    >
-                      <Eye className="h-3 w-3" />
-                      <span>Show Scenes</span>
-                    </button>
-                  </div>
+              {/* Switch Top/Bottom Order Button */}
+              <button
+                type="button"
+                onClick={() => handleSwapTopSection()}
+                className="inline-flex items-center gap-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 px-2.5 py-1 text-[0.65rem] font-bold text-amber-300 hover:text-white transition-colors cursor-pointer"
+                title={
+                  topSection === "timeline"
+                    ? "Move Camera Timeline below Scenes and Live"
+                    : "Move Camera Timeline to Top (above Scenes and Live)"
+                }
+              >
+                {topSection === "timeline" ? (
+                  <>
+                    <ArrowDown className="h-3 w-3 text-amber-400" />
+                    <span>Move Below Scenes &amp; Live</span>
+                  </>
+                ) : (
+                  <>
+                    <ArrowUp className="h-3 w-3 text-amber-400" />
+                    <span>Move to Top</span>
+                  </>
                 )}
+              </button>
 
-        {/* GAME CLOCK TAG & SEARCH BAR (FIND ANY PLAY BY GAME CLOCK OR STAMP NEW PLAY TAGS!) */}
-        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-800 bg-[#0d121c] px-3 py-2">
+              {/* Hide / Show Timeline Button */}
+              <button
+                type="button"
+                onClick={() => toggleShowTimeline()}
+                className="inline-flex items-center gap-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 px-2.5 py-1 text-[0.65rem] font-bold text-slate-300 hover:text-rose-300 transition-colors cursor-pointer"
+                title={showTimeline ? "Hide Camera Timeline" : "Show Camera Timeline"}
+              >
+                {showTimeline ? (
+                  <>
+                    <EyeOff className="h-3 w-3" />
+                    <span>Hide</span>
+                  </>
+                ) : (
+                  <>
+                    <Eye className="h-3 w-3 text-amber-400" />
+                    <span>Show Timeline</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+
+          {showTimeline && (
+            <>
+              {/* GAME CLOCK TAG & SEARCH BAR (FIND ANY PLAY BY GAME CLOCK OR STAMP NEW PLAY TAGS!) */}
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-800 bg-[#0d121c] px-3 py-2">
           {/* Left: Search by Game Clock */}
           <div className="flex flex-wrap items-center gap-2 flex-1 min-w-[260px]">
             <div className="relative flex items-center flex-1 max-w-xs">
@@ -5813,21 +5545,9 @@ function LiveBroadcastStudioContent() {
 
         {/* MAIN TIMELINE WORKSPACE: REPLAY INSPECTOR (LEFT) + STEADY UNCOMPRESSED SCROLLABLE TRACK (RIGHT) */}
         <div className="rounded-xl border border-slate-800 bg-[#0b0e15] p-3 space-y-3">
-          <div
-            className={`grid grid-cols-1 gap-3 items-stretch ${
-              timelineLayoutMode === "columns" && showScenesPanel
-                ? "xl:grid-cols-12"
-                : "lg:grid-cols-12"
-            }`}
-          >
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 items-stretch">
             {/* LEFT COLS: REPLAY INSPECTOR (TEST & RUN REPLAY BEFORE PUTTING IT IN LIVE) */}
-            <div
-              className={`flex flex-col justify-between rounded-xl border border-amber-500/40 bg-[#121722] p-2.5 space-y-2 shadow-lg ${
-                timelineLayoutMode === "columns" && showScenesPanel
-                  ? "xl:col-span-4"
-                  : "lg:col-span-3"
-              }`}
-            >
+            <div className="lg:col-span-3 flex flex-col justify-between rounded-xl border border-amber-500/40 bg-[#121722] p-2.5 space-y-2 shadow-lg">
               <div className="flex items-center justify-between">
                 <span className="text-[0.65rem] font-black uppercase tracking-wider text-amber-400 flex items-center gap-1.5">
                   <span
@@ -5843,7 +5563,7 @@ function LiveBroadcastStudioContent() {
               </div>
 
               {/* Interactive Replay Inspector Video Monitor */}
-              <div className="relative aspect-video w-full rounded-lg overflow-hidden bg-black border border-slate-700 flex items-center justify-center">
+              <div className="studio-video-viewport relative aspect-video w-full rounded-lg overflow-hidden bg-black border border-slate-700 flex items-center justify-center">
                 <video
                   ref={timelineScrubVideoRef}
                   playsInline
@@ -5971,13 +5691,7 @@ function LiveBroadcastStudioContent() {
             </div>
 
             {/* RIGHT COLS: STEADY UNCOMPRESSED HORIZONTAL SCROLLABLE MULTI-TRACK TIMELINE */}
-            <div
-              className={`flex flex-col rounded-xl border border-slate-700 bg-[#080b11] overflow-hidden ${
-                timelineLayoutMode === "columns" && showScenesPanel
-                  ? "xl:col-span-8"
-                  : "lg:col-span-9"
-              }`}
-            >
+            <div className="lg:col-span-9 flex flex-col rounded-xl border border-slate-700 bg-[#080b11] overflow-hidden">
               {/* Top Info Strip above Scrollbar Track */}
               <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 bg-slate-900/90 border-b border-slate-800 text-[0.62rem]">
                 <div className="flex flex-wrap items-center gap-3">
@@ -6552,16 +6266,89 @@ function LiveBroadcastStudioContent() {
             )}
           </div>
         </div>
-              </div>
-            )}
-          </div>
-        )}
-      </section>
+            </>
+          )}
+        </section>
 
-      {/* =====================================================================
-          4. LOWER OBS DOCKS: SCENES | MULTI-CAMERA SOURCES | SCOREBUG | STREAM & STORAGE
-         ===================================================================== */}
-      <section className="flex-1 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 p-3 sm:p-4 bg-[#0b0e14]">
+        {/* =====================================================================
+            4. SCENES AND LIVE: SCENES | SOURCES | SCOREBUG & OVERLAY | FACEBOOK LIVE & STORAGE
+           ===================================================================== */}
+        <section
+          className={`p-3 sm:p-4 bg-[#0b0e14] border-b border-slate-800 space-y-3 ${
+            topSection === "scenes_and_live" ? "order-1" : "order-2"
+          }`}
+        >
+          {/* SCENES AND LIVE SECTION HEADER BAR */}
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="inline-flex h-6 w-6 items-center justify-center rounded-lg bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                <Layers className="h-3.5 w-3.5" />
+              </span>
+              <h2 className="text-xs sm:text-sm font-black uppercase tracking-wider text-white">
+                Scenes and Live • Sources, Scorebug &amp; Broadcast Controls
+              </h2>
+              <span className="rounded-md bg-emerald-500/15 border border-emerald-500/30 px-2 py-0.5 text-[0.62rem] font-black uppercase text-emerald-300">
+                {scenes.length} Scenes
+              </span>
+              <span className="rounded-md bg-sky-500/15 border border-sky-500/30 px-2 py-0.5 text-[0.62rem] font-black uppercase text-sky-300">
+                {previewScene?.cameras.length || (previewScene?.mediaConfig ? 1 : 0)} Cam • {audioSources.length} Audio
+              </span>
+              {isStreamingLive && (
+                <span className="rounded-md bg-rose-600/20 border border-rose-500/40 px-2 py-0.5 text-[0.62rem] font-black uppercase text-rose-300 animate-pulse">
+                  ● Live Stream On Air
+                </span>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              {/* Switch Top/Bottom Order Button */}
+              <button
+                type="button"
+                onClick={() => handleSwapTopSection()}
+                className="inline-flex items-center gap-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 px-2.5 py-1 text-[0.65rem] font-bold text-emerald-300 hover:text-white transition-colors cursor-pointer"
+                title={
+                  topSection === "scenes_and_live"
+                    ? "Move Scenes and Live below Camera Timeline"
+                    : "Move Scenes and Live to Top (above Camera Timeline)"
+                }
+              >
+                {topSection === "scenes_and_live" ? (
+                  <>
+                    <ArrowDown className="h-3 w-3 text-emerald-400" />
+                    <span>Move Below Timeline</span>
+                  </>
+                ) : (
+                  <>
+                    <ArrowUp className="h-3 w-3 text-emerald-400" />
+                    <span>Move to Top</span>
+                  </>
+                )}
+              </button>
+
+              {/* Hide / Show Scenes and Live Button */}
+              <button
+                type="button"
+                onClick={() => toggleShowScenesAndLive()}
+                className="inline-flex items-center gap-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 px-2.5 py-1 text-[0.65rem] font-bold text-slate-300 hover:text-rose-300 transition-colors cursor-pointer"
+                title={showScenesAndLive ? "Hide Scenes and Live" : "Show Scenes and Live"}
+              >
+                {showScenesAndLive ? (
+                  <>
+                    <EyeOff className="h-3 w-3" />
+                    <span>Hide</span>
+                  </>
+                ) : (
+                  <>
+                    <Eye className="h-3 w-3 text-emerald-400" />
+                    <span>Show Scenes &amp; Live</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+
+          {showScenesAndLive && (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
         {/* DOCK 1: SCENES LIST (Camera Scenes & Created Replay Scenes) */}
         <div className="flex flex-col rounded-xl border border-slate-800 bg-[#131926] overflow-hidden">
           <div className="px-3 py-2 bg-slate-900 border-b border-slate-800 flex items-center justify-between">
@@ -8124,7 +7911,10 @@ function LiveBroadcastStudioContent() {
             ))}
           </div>
         </div>
-      </section>
+            </div>
+          )}
+        </section>
+      </div>
 
       {/* =====================================================================
           5. FACEBOOK PAGE LIVE PRODUCER SETUP MODAL
