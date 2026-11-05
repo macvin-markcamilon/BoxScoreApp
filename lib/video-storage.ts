@@ -42,6 +42,12 @@ export interface StoredGameVideo {
   awayScore?: number;
   homeTeamName?: string;
   awayTeamName?: string;
+  /** Identifies which camera recorded this raw clip (e.g. "clean_program" or a specific camera slot/room ID) */
+  cameraId?: string;
+  cameraLabel?: string;
+  /** Group ID linking simultaneous multi-camera recordings from the same recording session */
+  recordingSessionId?: string;
+  isRawCameraFootage?: boolean;
 }
 
 let videoDbPromise: Promise<IDBDatabase> | null = null;
