@@ -355,6 +355,7 @@ function LiveBroadcastStudioContent() {
     gameSessionsByMatchId,
     initializeSession,
     fetchLeaguesAndTeams,
+    setupRealtimeSubscriptions,
     syncFromLocalStorage,
     updateTeamInLeague,
     updateMatchDetailsInLeague,
@@ -469,8 +470,19 @@ function LiveBroadcastStudioContent() {
   // Live On-Court Player Stats Overlay State (Controlled in Live — shows non-zero stats in the middle of the feed)
   const [liveFeaturedPlayerId, setLiveFeaturedPlayerId] = useState<string | null>(null);
 
-  // Team Comparison Stats Overlay State
+  // Team Comparison Stats Overlay State (Full Card or Single-Stat Comparison like FG, REB, etc.)
   const [showTeamComparisonOverlay, setShowTeamComparisonOverlay] = useState<boolean>(false);
+  const [teamComparisonStatKey, setTeamComparisonStatKey] = useState<
+    "ALL" | "FG" | "3PT" | "FT" | "REB" | "AST" | "STL" | "BLK" | "TOV" | "PF"
+  >("ALL");
+
+  // Top Performer Per Team Broadcast Layer State
+  const [showTopPerformersOverlay, setShowTopPerformersOverlay] = useState<boolean>(false);
+  const [topPerformerCriterion, setTopPerformerCriterion] = useState<
+    "OVERALL" | "PTS" | "REB" | "AST"
+  >("OVERALL");
+  const [manualAwayTopPerformerId, setManualAwayTopPerformerId] = useState<string>("");
+  const [manualHomeTopPerformerId, setManualHomeTopPerformerId] = useState<string>("");
 
   // Multiple Advertisement Images & Broadcast Ad Overlay State
   const [adItems, setAdItems] = useState<StudioAdItem[]>([]);
@@ -486,11 +498,16 @@ function LiveBroadcastStudioContent() {
   const [liveRecordingFramesByCam, setLiveRecordingFramesByCam] = useState<
     Record<string, TimelineFrame[]>
   >({});
+  const [rollingTimelineFramesByCam, setRollingTimelineFramesByCam] = useState<
+    Record<string, TimelineFrame[]>
+  >({});
 
-  // Team Logo & Featured Player Image Refs for Canvas Rendering
+  // Team Logo & Featured Player / Top Performers Image Refs for Canvas Rendering
   const homeLogoImgRef = useRef<HTMLImageElement | null>(null);
   const awayLogoImgRef = useRef<HTMLImageElement | null>(null);
   const featuredPlayerImgRef = useRef<HTMLImageElement | null>(null);
+  const awayTopPerformerImgRef = useRef<HTMLImageElement | null>(null);
+  const homeTopPerformerImgRef = useRef<HTMLImageElement | null>(null);
   const mediaImageCacheRef = useRef<Record<string, HTMLImageElement>>({});
 
   // Offscreen DOM container for camera/WebRTC <video> elements + HTTP signaling poll refs
@@ -566,6 +583,9 @@ function LiveBroadcastStudioContent() {
   const cameraMediaRecordersRef = useRef<Record<string, MediaRecorder>>({});
   const cameraRecordedChunksRef = useRef<Record<string, Blob[]>>({});
   const liveCaptureFramesByCamRef = useRef<Record<string, TimelineFrame[]>>({});
+  const rollingFramesByCamRef = useRef<Record<string, TimelineFrame[]>>({});
+  const rollingElapsedSecRef = useRef<number>(0);
+  const replayFrameImgCacheRef = useRef<Record<string, HTMLImageElement>>({});
   const recordIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const liveCaptureFramesRef = useRef<TimelineFrame[]>([]);
   const liveClockTagsRef = useRef<TimelineClockTag[]>([]);
@@ -610,6 +630,8 @@ function LiveBroadcastStudioContent() {
   const streamStartTimeRef = useRef<number>(0);
   const streamFrameCountRef = useRef<number>(0);
   const encoderCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const cleanPopupWindowRef = useRef<Window | null>(null);
+  const cleanPopupCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   // Initialize DB, Realtime & Stored Videos
   const refreshStoredVideos = useCallback(async () => {
@@ -672,14 +694,46 @@ function LiveBroadcastStudioContent() {
       }
     } catch {}
 
+    const cleanupRealtime = setupRealtimeSubscriptions();
+
+    let gamesBc: BroadcastChannel | null = null;
+    try {
+      if (typeof window !== "undefined" && "BroadcastChannel" in window) {
+        gamesBc = new BroadcastChannel("boxscore_game_sessions_sync");
+        gamesBc.onmessage = () => {
+          syncFromLocalStorage();
+        };
+      }
+    } catch {}
+
     const handleStorage = (e: StorageEvent) => {
       if (e.key && e.key.includes("boxscore")) {
         syncFromLocalStorage();
       }
     };
     window.addEventListener("storage", handleStorage);
-    return () => window.removeEventListener("storage", handleStorage);
-  }, [initializeSession, fetchLeaguesAndTeams, syncFromLocalStorage, refreshStoredVideos]);
+
+    const fastSyncInterval = setInterval(() => {
+      syncFromLocalStorage();
+    }, 200);
+
+    return () => {
+      cleanupRealtime();
+      if (gamesBc) {
+        try {
+          gamesBc.close();
+        } catch {}
+      }
+      clearInterval(fastSyncInterval);
+      window.removeEventListener("storage", handleStorage);
+    };
+  }, [
+    initializeSession,
+    fetchLeaguesAndTeams,
+    setupRealtimeSubscriptions,
+    syncFromLocalStorage,
+    refreshStoredVideos,
+  ]);
 
   // Select Initial League
   useEffect(() => {
@@ -749,7 +803,17 @@ function LiveBroadcastStudioContent() {
 
   // Timeouts & Team Penalty / Bonus Status for Scorebug
   const currentPeriodIndex = Math.max(0, period - 1);
-  const bonusThreshold = activeLeague?.rulesConfig?.teamFoulBonusThreshold ?? 5;
+  const activeMatchCategory = useMemo(() => {
+    if (!activeLeague?.categories || !activeMatch?.categoryId) return null;
+    return (
+      activeLeague.categories.find((c) => c.id === activeMatch.categoryId) ??
+      null
+    );
+  }, [activeLeague?.categories, activeMatch?.categoryId]);
+  const bonusThreshold =
+    activeMatchCategory?.rulesConfig?.teamFoulBonusThreshold ??
+    activeLeague?.rulesConfig?.teamFoulBonusThreshold ??
+    5;
   const homePeriodFouls =
     liveSession?.homeTeamFoulsByPeriod?.[currentPeriodIndex] ?? 0;
   const awayPeriodFouls =
@@ -758,6 +822,16 @@ function LiveBroadcastStudioContent() {
     liveSession?.homeTimeoutsRemaining ?? manualHomeTimeouts;
   const awayTimeoutsRemaining =
     liveSession?.awayTimeoutsRemaining ?? manualAwayTimeouts;
+
+  // Whenever live period fouls or period change in the Scorebook, clear any stale manual override so live BONUS status always syncs automatically
+  useEffect(() => {
+    setManualHomePenaltyOverride(null);
+  }, [homePeriodFouls, period, selectedMatchId]);
+
+  useEffect(() => {
+    setManualAwayPenaltyOverride(null);
+  }, [awayPeriodFouls, period, selectedMatchId]);
+
   const isHomeInPenalty =
     manualHomePenaltyOverride !== null
       ? manualHomePenaltyOverride
@@ -963,6 +1037,192 @@ function LiveBroadcastStudioContent() {
     homePeriodFouls,
   ]);
 
+  // All Roster Players with Game Stats (for Top Performer Per Team Layer)
+  const allAwayPlayers = useMemo(() => {
+    const statsMap = liveSession?.awayPlayerStats;
+    if (statsMap && Object.keys(statsMap).length > 0) {
+      return Object.values(statsMap).map((p) => ({
+        ...p,
+        teamSide: "AWAY" as const,
+        teamName: awayTeamName,
+        teamShortName: awayScorebugName,
+        teamColor: awayColor,
+      }));
+    }
+    return (awayTeam?.roster ?? []).map((r) => ({
+      playerId: r.id,
+      firstName: r.firstName,
+      lastName: r.lastName,
+      jerseyNumber: r.jerseyNumber,
+      position: r.position,
+      imageUrl: r.imageUrl,
+      isOnCourt: true,
+      points: 0,
+      fgm: 0,
+      fga: 0,
+      tpm: 0,
+      tpa: 0,
+      ftm: 0,
+      fta: 0,
+      oreb: 0,
+      dreb: 0,
+      ast: 0,
+      stl: 0,
+      blk: 0,
+      tov: 0,
+      pf: 0,
+      techFouls: 0,
+      teamSide: "AWAY" as const,
+      teamName: awayTeamName,
+      teamShortName: awayScorebugName,
+      teamColor: awayColor,
+    }));
+  }, [liveSession?.awayPlayerStats, awayTeam?.roster, awayTeamName, awayScorebugName, awayColor]);
+
+  const allHomePlayers = useMemo(() => {
+    const statsMap = liveSession?.homePlayerStats;
+    if (statsMap && Object.keys(statsMap).length > 0) {
+      return Object.values(statsMap).map((p) => ({
+        ...p,
+        teamSide: "HOME" as const,
+        teamName: homeTeamName,
+        teamShortName: homeScorebugName,
+        teamColor: homeColor,
+      }));
+    }
+    return (homeTeam?.roster ?? []).map((r) => ({
+      playerId: r.id,
+      firstName: r.firstName,
+      lastName: r.lastName,
+      jerseyNumber: r.jerseyNumber,
+      position: r.position,
+      imageUrl: r.imageUrl,
+      isOnCourt: true,
+      points: 0,
+      fgm: 0,
+      fga: 0,
+      tpm: 0,
+      tpa: 0,
+      ftm: 0,
+      fta: 0,
+      oreb: 0,
+      dreb: 0,
+      ast: 0,
+      stl: 0,
+      blk: 0,
+      tov: 0,
+      pf: 0,
+      techFouls: 0,
+      teamSide: "HOME" as const,
+      teamName: homeTeamName,
+      teamShortName: homeScorebugName,
+      teamColor: homeColor,
+    }));
+  }, [liveSession?.homePlayerStats, homeTeam?.roster, homeTeamName, homeScorebugName, homeColor]);
+
+  const awayTopPerformer = useMemo(() => {
+    if (allAwayPlayers.length === 0) return null;
+    if (manualAwayTopPerformerId) {
+      const manual = allAwayPlayers.find((p) => p.playerId === manualAwayTopPerformerId);
+      if (manual) return manual;
+    }
+    const sorted = [...allAwayPlayers].sort((a, b) => {
+      const aReb = (a.oreb || 0) + (a.dreb || 0);
+      const bReb = (b.oreb || 0) + (b.dreb || 0);
+      if (topPerformerCriterion === "PTS") {
+        if ((b.points || 0) !== (a.points || 0)) return (b.points || 0) - (a.points || 0);
+      } else if (topPerformerCriterion === "REB") {
+        if (bReb !== aReb) return bReb - aReb;
+      } else if (topPerformerCriterion === "AST") {
+        if ((b.ast || 0) !== (a.ast || 0)) return (b.ast || 0) - (a.ast || 0);
+      }
+      const aImpact =
+        (a.points || 0) * 1.4 +
+        aReb * 1.2 +
+        (a.ast || 0) * 1.5 +
+        (a.stl || 0) * 2 +
+        (a.blk || 0) * 2 -
+        (a.tov || 0) * 0.5;
+      const bImpact =
+        (b.points || 0) * 1.4 +
+        bReb * 1.2 +
+        (b.ast || 0) * 1.5 +
+        (b.stl || 0) * 2 +
+        (b.blk || 0) * 2 -
+        (b.tov || 0) * 0.5;
+      return bImpact - aImpact;
+    });
+    return sorted[0] ?? null;
+  }, [allAwayPlayers, manualAwayTopPerformerId, topPerformerCriterion]);
+
+  const homeTopPerformer = useMemo(() => {
+    if (allHomePlayers.length === 0) return null;
+    if (manualHomeTopPerformerId) {
+      const manual = allHomePlayers.find((p) => p.playerId === manualHomeTopPerformerId);
+      if (manual) return manual;
+    }
+    const sorted = [...allHomePlayers].sort((a, b) => {
+      const aReb = (a.oreb || 0) + (a.dreb || 0);
+      const bReb = (b.oreb || 0) + (b.dreb || 0);
+      if (topPerformerCriterion === "PTS") {
+        if ((b.points || 0) !== (a.points || 0)) return (b.points || 0) - (a.points || 0);
+      } else if (topPerformerCriterion === "REB") {
+        if (bReb !== aReb) return bReb - aReb;
+      } else if (topPerformerCriterion === "AST") {
+        if ((b.ast || 0) !== (a.ast || 0)) return (b.ast || 0) - (a.ast || 0);
+      }
+      const aImpact =
+        (a.points || 0) * 1.4 +
+        aReb * 1.2 +
+        (a.ast || 0) * 1.5 +
+        (a.stl || 0) * 2 +
+        (a.blk || 0) * 2 -
+        (a.tov || 0) * 0.5;
+      const bImpact =
+        (b.points || 0) * 1.4 +
+        bReb * 1.2 +
+        (b.ast || 0) * 1.5 +
+        (b.stl || 0) * 2 +
+        (b.blk || 0) * 2 -
+        (b.tov || 0) * 0.5;
+      return bImpact - aImpact;
+    });
+    return sorted[0] ?? null;
+  }, [allHomePlayers, manualHomeTopPerformerId, topPerformerCriterion]);
+
+  // Load Top Performer Player Portraits into CORS-safe HTMLImageElements
+  useEffect(() => {
+    const rawUrl = awayTopPerformer?.imageUrl;
+    if (!rawUrl || !rawUrl.trim()) {
+      awayTopPerformerImgRef.current = null;
+      return;
+    }
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    const trimmed = rawUrl.trim();
+    img.src =
+      trimmed.startsWith("http://") || trimmed.startsWith("https://")
+        ? `/api/image-proxy?url=${encodeURIComponent(trimmed)}`
+        : trimmed;
+    awayTopPerformerImgRef.current = img;
+  }, [awayTopPerformer?.imageUrl]);
+
+  useEffect(() => {
+    const rawUrl = homeTopPerformer?.imageUrl;
+    if (!rawUrl || !rawUrl.trim()) {
+      homeTopPerformerImgRef.current = null;
+      return;
+    }
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    const trimmed = rawUrl.trim();
+    img.src =
+      trimmed.startsWith("http://") || trimmed.startsWith("https://")
+        ? `/api/image-proxy?url=${encodeURIComponent(trimmed)}`
+        : trimmed;
+    homeTopPerformerImgRef.current = img;
+  }, [homeTopPerformer?.imageUrl]);
+
   // Active Preview & Live Scene objects
   const previewScene = useMemo(
     () => scenes.find((s) => s.id === previewSceneId) ?? scenes[0],
@@ -985,14 +1245,8 @@ function LiveBroadcastStudioContent() {
     ];
     const seenKeys = new Set<string>(["clean_program"]);
 
-    // 1. Add cameras from current Live Scene and Preview Scene first, then all other Camera Scenes
-    const orderedScenes = [
-      ...(liveScene ? [liveScene] : []),
-      ...(previewScene && previewScene.id !== liveScene?.id ? [previewScene] : []),
-      ...scenes.filter((s) => s.id !== liveScene?.id && s.id !== previewScene?.id),
-    ];
-
-    for (const sc of orderedScenes) {
+    // 1. Add cameras from all Camera Scenes in stable scene order so timeline tracks never jump when switching scenes
+    for (const sc of scenes) {
       if (sc.kind !== "camera_scene") continue;
       for (const slot of sc.cameras) {
         const key =
@@ -1121,6 +1375,66 @@ function LiveBroadcastStudioContent() {
   const selectedTimelineVideo = useMemo(
     () => storedVideos.find((v) => v.id === selectedTimelineVideoId) ?? storedVideos[0] ?? null,
     [storedVideos, selectedTimelineVideoId]
+  );
+
+  // Resolve the saved video specifically recorded for a given cameraId (returns null if no clip exists for that camera yet)
+  const resolveStoredVideoForCamera = useCallback(
+    (
+      camKey: string,
+      videoList: StoredGameVideo[] = storedVideos
+    ): StoredGameVideo | null => {
+      if (!camKey || camKey === "clean_program") {
+        if (
+          selectedTimelineVideo &&
+          (!selectedTimelineVideo.cameraId ||
+            selectedTimelineVideo.cameraId === "clean_program")
+        ) {
+          return selectedTimelineVideo;
+        }
+        if (selectedTimelineVideo?.recordingSessionId) {
+          const cleanSibling = videoList.find(
+            (v) =>
+              v.recordingSessionId ===
+                selectedTimelineVideo.recordingSessionId &&
+              (!v.cameraId || v.cameraId === "clean_program")
+          );
+          if (cleanSibling) return cleanSibling;
+        }
+        return (
+          videoList.find(
+            (v) => !v.cameraId || v.cameraId === "clean_program"
+          ) ??
+          selectedTimelineVideo ??
+          videoList[0] ??
+          null
+        );
+      }
+
+      if (selectedTimelineVideo?.cameraId === camKey) {
+        return selectedTimelineVideo;
+      }
+      if (selectedTimelineVideo?.recordingSessionId) {
+        const sibling = videoList.find(
+          (v) =>
+            v.recordingSessionId === selectedTimelineVideo.recordingSessionId &&
+            v.cameraId === camKey
+        );
+        if (sibling) return sibling;
+      }
+      const directMatch = videoList.find((v) => v.cameraId === camKey);
+      return directMatch ?? null;
+    },
+    [selectedTimelineVideo, storedVideos]
+  );
+
+  // Active Timeline Video for the currently selected camera track
+  const activeCameraTimelineVideo = useMemo(
+    () =>
+      resolveStoredVideoForCamera(selectedTimelineCameraKey) ??
+      (selectedTimelineCameraKey === "clean_program"
+        ? selectedTimelineVideo
+        : null),
+    [resolveStoredVideoForCamera, selectedTimelineCameraKey, selectedTimelineVideo]
   );
 
   // Enumerate Camera & Audio Input Devices
@@ -2118,28 +2432,47 @@ function LiveBroadcastStudioContent() {
         return;
       }
       const cfg = scene.replayConfig;
-      const targetVideo = storedVideos.find((v) => v.id === cfg.videoId);
+      const targetVideo =
+        storedVideos.find((v) => v.id === cfg.videoId) ??
+        (cfg.cameraId ? resolveStoredVideoForCamera(cfg.cameraId) : null);
       if (!targetVideo) return;
 
-      const currentVideoId = vidEl.getAttribute("data-video-id");
-      if (currentVideoId !== targetVideo.id) {
-        const url = URL.createObjectURL(targetVideo.blob);
-        vidEl.src = url;
-        vidEl.setAttribute("data-video-id", targetVideo.id);
+      // Pre-cache timeline frame images so slow-mo replay renders immediately even while video seeks
+      if (targetVideo.timelineFrames?.length) {
+        for (const f of targetVideo.timelineFrames) {
+          if (f.dataUrl && !replayFrameImgCacheRef.current[f.dataUrl]) {
+            const img = new Image();
+            img.src = f.dataUrl;
+            replayFrameImgCacheRef.current[f.dataUrl] = img;
+          }
+        }
       }
 
-      vidEl.playbackRate = cfg.playbackRate;
-      if (vidEl.currentTime < cfg.startSec || vidEl.currentTime >= cfg.endSec) {
-        vidEl.currentTime = cfg.startSec;
-      }
-      if (vidEl.paused) {
-        vidEl.play().catch(() => {});
+      if (targetVideo.sizeBytes > 1000) {
+        const currentVideoId = vidEl.getAttribute("data-video-id");
+        if (currentVideoId !== targetVideo.id) {
+          const url = URL.createObjectURL(targetVideo.blob);
+          vidEl.src = url;
+          vidEl.setAttribute("data-video-id", targetVideo.id);
+        }
+
+        vidEl.playbackRate = cfg.playbackRate;
+        if (vidEl.currentTime < cfg.startSec || vidEl.currentTime >= cfg.endSec) {
+          try {
+            vidEl.currentTime = cfg.startSec;
+          } catch {}
+        }
+        if (vidEl.paused) {
+          vidEl.play().catch(() => {});
+        }
+      } else {
+        vidEl.pause();
       }
     };
 
     syncReplayElement(previewScene, previewReplayVideoRef.current);
     syncReplayElement(liveScene, liveReplayVideoRef.current);
-  }, [previewScene, liveScene, storedVideos]);
+  }, [previewScene, liveScene, storedVideos, resolveStoredVideoForCamera]);
 
   // Sync Uploaded Video Scenes & Picture Scenes for Preview and Live Program
   useEffect(() => {
@@ -2199,17 +2532,18 @@ function LiveBroadcastStudioContent() {
     return () => clearInterval(interval);
   }, [previewScene, liveScene]);
 
-  // Sync Timeline Scrubber Video Element when user selects a video or scrubs playhead
+  // Sync Timeline Scrubber Video Element when user selects a video, switches camera track, or scrubs playhead
   useEffect(() => {
     const vidEl = timelineScrubVideoRef.current;
-    if (!vidEl || !selectedTimelineVideo) return;
+    const targetVid = activeCameraTimelineVideo || selectedTimelineVideo;
+    if (!vidEl || !targetVid || targetVid.sizeBytes <= 1000) return;
     const currentId = vidEl.getAttribute("data-scrub-id");
-    if (currentId !== selectedTimelineVideo.id) {
-      const url = URL.createObjectURL(selectedTimelineVideo.blob);
+    if (currentId !== targetVid.id) {
+      const url = URL.createObjectURL(targetVid.blob);
       vidEl.src = url;
-      vidEl.setAttribute("data-scrub-id", selectedTimelineVideo.id);
+      vidEl.setAttribute("data-scrub-id", targetVid.id);
     }
-  }, [selectedTimelineVideo]);
+  }, [activeCameraTimelineVideo, selectedTimelineVideo]);
 
   // Global Wireless Camera Hub Subscription + Real-Time ON AIR / PREVIEW Tally Broadcaster
   useEffect(() => {
@@ -2405,9 +2739,22 @@ function LiveBroadcastStudioContent() {
           ? lastConnectedWirelessRoomRef.current
           : rawRoomKey;
 
-      const vidEl =
+      let vidEl =
         (effectiveRoomKey && wirelessVideoElByRoomRef.current[effectiveRoomKey]) ||
         videoElBySlotRef.current[slot.id];
+      if (
+        (!vidEl || vidEl.readyState < 2) &&
+        slot.sourceType === "camera" &&
+        activeSlotIds[slot.id] !== false
+      ) {
+        const fallbackEntry = Object.entries(videoElBySlotRef.current).find(
+          ([otherSlotId, el]) =>
+            el && el.readyState >= 2 && activeSlotIds[otherSlotId] !== false
+        );
+        if (fallbackEntry) {
+          vidEl = fallbackEntry[1];
+        }
+      }
       const wirelessImgEl =
         (effectiveRoomKey && wirelessFrameImgByRoomRef.current[effectiveRoomKey]) ||
         wirelessFrameImgBySlotRef.current[slot.id];
@@ -2415,15 +2762,17 @@ function LiveBroadcastStudioContent() {
         slot.sourceType === "wireless_phone" &&
         activeSlotIds[slot.id] !== false &&
         (Boolean(activeSlotIds[slot.id]) ||
+          Boolean(hasDirectRoomFeed) ||
           Boolean(wirelessStatusByRoom[effectiveRoomKey]) ||
           Boolean(lastConnectedWirelessRoomRef.current));
       const isStreamReady =
         slot.sourceType !== "court_sim" &&
         (slot.sourceType === "wireless_phone"
           ? isWirelessSlotEnabled
-          : Boolean(activeSlotIds[slot.id])) &&
-        vidEl &&
-        vidEl.readyState >= 2;
+          : activeSlotIds[slot.id] !== false &&
+            (Boolean(activeSlotIds[slot.id]) ||
+              Boolean(vidEl && vidEl.readyState >= 2))) &&
+        Boolean(vidEl && vidEl.readyState >= 2);
       const isWirelessImgReady =
         slot.sourceType === "wireless_phone" &&
         isWirelessSlotEnabled &&
@@ -2686,7 +3035,7 @@ function LiveBroadcastStudioContent() {
         ctx.restore();
       };
 
-      // Helper to render Timeout Pips + PENALTY badge
+      // Helper to render Timeout Pips + BONUS badge
       const drawTimeoutAndPenaltyRow = (
         timeoutsLeft: number,
         inPenalty: boolean,
@@ -2700,7 +3049,7 @@ function LiveBroadcastStudioContent() {
         const pipH = 5;
         const pipGap = 3;
         const totalPipsW = maxPips * pipW + (maxPips - 1) * pipGap;
-        const penaltyW = inPenalty ? 52 : 0;
+        const penaltyW = inPenalty ? 54 : 0;
         const totalW = totalPipsW + (inPenalty ? penaltyW + 6 : 0);
         const startX = align === "right" ? x - totalW : x;
 
@@ -2719,16 +3068,16 @@ function LiveBroadcastStudioContent() {
 
         if (inPenalty) {
           const badgeX = startX + totalPipsW + 6;
-          ctx.fillStyle = "#e11d48";
+          ctx.fillStyle = "#f59e0b";
           ctx.beginPath();
-          ctx.roundRect(badgeX, y - 4, penaltyW, 13, [4]);
+          ctx.roundRect(badgeX, y - 5, penaltyW, 15, [4]);
           ctx.fill();
 
-          ctx.fillStyle = "#ffffff";
-          ctx.font = "900 8.5px 'Inter', sans-serif";
+          ctx.fillStyle = "#0f172a";
+          ctx.font = "900 9.5px 'Inter', sans-serif";
           ctx.textAlign = "center";
           ctx.textBaseline = "middle";
-          ctx.fillText("PENALTY", badgeX + penaltyW / 2, y + 2.5);
+          ctx.fillText("BONUS", badgeX + penaltyW / 2, y + 3);
         }
         ctx.restore();
       };
@@ -2873,8 +3222,16 @@ function LiveBroadcastStudioContent() {
         ctx.textBaseline = "middle";
         ctx.fillText(formatClock(clockSeconds), gameClockCenterX, bugY + bugH / 2);
 
-        // Right segment inside box: Shot Clock (e.g. 24)
+        // Right segment inside box: Shot Clock (e.g. 24 or 0)
         if (showShotClock) {
+          if (shotClock <= 0) {
+            ctx.save();
+            ctx.fillStyle = "rgba(239, 68, 68, 0.28)";
+            ctx.beginPath();
+            ctx.roundRect(clockBoxX + 208, bugY + 8, clockBoxW - 208, bugH - 16, [0, 12, 12, 0]);
+            ctx.fill();
+            ctx.restore();
+          }
           ctx.strokeStyle = borderColor;
           ctx.beginPath();
           ctx.moveTo(clockBoxX + 208, bugY + 18);
@@ -2886,7 +3243,7 @@ function LiveBroadcastStudioContent() {
           ctx.font = "900 28px 'Inter', sans-serif";
           ctx.textAlign = "center";
           ctx.textBaseline = "middle";
-          ctx.fillText(String(shotClock), shotClockCenterX, bugY + bugH / 2);
+          ctx.fillText(String(Math.max(0, shotClock)), shotClockCenterX, bugY + bugH / 2);
         }
       } else {
         // =====================================================================
@@ -2939,6 +3296,7 @@ function LiveBroadcastStudioContent() {
           logoEl: HTMLImageElement | null,
           shortName: string,
           timeoutsLeft: number,
+          inPenalty: boolean,
           isTopRow: boolean
         ) => {
           ctx.save();
@@ -2968,16 +3326,34 @@ function LiveBroadcastStudioContent() {
           ctx.fillStyle = "#ffffff";
           ctx.shadowColor = "rgba(0, 0, 0, 0.45)";
           ctx.shadowBlur = 4;
-          ctx.font = "900 26px 'Inter', sans-serif";
+          ctx.font = "900 25px 'Inter', sans-serif";
           ctx.textAlign = "left";
           ctx.textBaseline = "middle";
           ctx.fillText(
             shortName.slice(0, 6).toUpperCase(),
-            teamColX + 52,
+            teamColX + 50,
             rowY + rowH / 2 + 1,
-            teamColW - 58
+            inPenalty ? teamColW - 104 : teamColW - 56
           );
           ctx.shadowColor = "transparent";
+
+          // Prominent BONUS Pill Badge inside Team Bar when in Penalty
+          if (inPenalty) {
+            const bW = 46;
+            const bH = 15;
+            const bX = teamColX + teamColW - bW - 6;
+            const bY = rowY + (rowH - bH) / 2;
+            ctx.fillStyle = "#f59e0b";
+            ctx.beginPath();
+            ctx.roundRect(bX, bY, bW, bH, [3]);
+            ctx.fill();
+
+            ctx.fillStyle = "#0f172a";
+            ctx.font = "900 8.5px 'Inter', sans-serif";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText("BONUS", bX + bW / 2, bY + bH / 2 + 0.5);
+          }
 
           // Timeout Pips along top edge (Away) or bottom edge (Home) like Image 2
           const maxPips = 5;
@@ -3002,6 +3378,7 @@ function LiveBroadcastStudioContent() {
           awayLogoImgRef.current,
           awayScorebugName,
           awayTimeoutsRemaining,
+          isAwayInPenalty,
           true
         );
         drawBroadcastTeamBar(
@@ -3010,6 +3387,7 @@ function LiveBroadcastStudioContent() {
           homeLogoImgRef.current,
           homeScorebugName,
           homeTimeoutsRemaining,
+          isHomeInPenalty,
           false
         );
 
@@ -3187,9 +3565,271 @@ function LiveBroadcastStudioContent() {
     ]
   );
 
-  // Helper: Draw Broadcast Team Comparison Stats Overlay (Away vs Home)
+  // Helper: Draw Broadcast Team Comparison Stats Overlay (All Stats Card OR Per-Stat Comparison Banner like FG, REB, etc.)
   const drawTeamComparisonOverlay = useCallback(
     (ctx: CanvasRenderingContext2D, width: number, height: number) => {
+      // Single-Stat Broadcast Lower-Third / Banner when a specific stat is selected
+      if (teamComparisonStatKey !== "ALL") {
+        const statMetaMap: Record<
+          Exclude<typeof teamComparisonStatKey, "ALL">,
+          {
+            title: string;
+            awayPrimary: string;
+            awaySub: string;
+            homePrimary: string;
+            homeSub: string;
+            awayVal: number;
+            homeVal: number;
+            lowerIsBetter?: boolean;
+          }
+        > = {
+          FG: {
+            title: "FIELD GOALS COMPARISON",
+            awayPrimary: `${teamComparisonStats.away.fgPct}%`,
+            awaySub: `${teamComparisonStats.away.fgm}/${teamComparisonStats.away.fga} FG`,
+            homePrimary: `${teamComparisonStats.home.fgPct}%`,
+            homeSub: `${teamComparisonStats.home.fgm}/${teamComparisonStats.home.fga} FG`,
+            awayVal: teamComparisonStats.away.fgPct || teamComparisonStats.away.fgm,
+            homeVal: teamComparisonStats.home.fgPct || teamComparisonStats.home.fgm,
+          },
+          "3PT": {
+            title: "3-POINT SHOOTING COMPARISON",
+            awayPrimary: `${teamComparisonStats.away.tpPct}%`,
+            awaySub: `${teamComparisonStats.away.tpm}/${teamComparisonStats.away.tpa} 3PT`,
+            homePrimary: `${teamComparisonStats.home.tpPct}%`,
+            homeSub: `${teamComparisonStats.home.tpm}/${teamComparisonStats.home.tpa} 3PT`,
+            awayVal: teamComparisonStats.away.tpPct || teamComparisonStats.away.tpm,
+            homeVal: teamComparisonStats.home.tpPct || teamComparisonStats.home.tpm,
+          },
+          FT: {
+            title: "FREE THROWS COMPARISON",
+            awayPrimary: `${teamComparisonStats.away.ftPct}%`,
+            awaySub: `${teamComparisonStats.away.ftm}/${teamComparisonStats.away.fta} FT`,
+            homePrimary: `${teamComparisonStats.home.ftPct}%`,
+            homeSub: `${teamComparisonStats.home.ftm}/${teamComparisonStats.home.fta} FT`,
+            awayVal: teamComparisonStats.away.ftPct || teamComparisonStats.away.ftm,
+            homeVal: teamComparisonStats.home.ftPct || teamComparisonStats.home.ftm,
+          },
+          REB: {
+            title: "TOTAL REBOUNDS COMPARISON",
+            awayPrimary: String(teamComparisonStats.away.reb),
+            awaySub: `${teamComparisonStats.away.oreb} OREB • ${teamComparisonStats.away.dreb} DREB`,
+            homePrimary: String(teamComparisonStats.home.reb),
+            homeSub: `${teamComparisonStats.home.oreb} OREB • ${teamComparisonStats.home.dreb} DREB`,
+            awayVal: teamComparisonStats.away.reb,
+            homeVal: teamComparisonStats.home.reb,
+          },
+          AST: {
+            title: "TEAM ASSISTS COMPARISON",
+            awayPrimary: String(teamComparisonStats.away.ast),
+            awaySub: "TOTAL ASSISTS",
+            homePrimary: String(teamComparisonStats.home.ast),
+            homeSub: "TOTAL ASSISTS",
+            awayVal: teamComparisonStats.away.ast,
+            homeVal: teamComparisonStats.home.ast,
+          },
+          STL: {
+            title: "TEAM STEALS COMPARISON",
+            awayPrimary: String(teamComparisonStats.away.stl),
+            awaySub: "TOTAL STEALS",
+            homePrimary: String(teamComparisonStats.home.stl),
+            homeSub: "TOTAL STEALS",
+            awayVal: teamComparisonStats.away.stl,
+            homeVal: teamComparisonStats.home.stl,
+          },
+          BLK: {
+            title: "TEAM BLOCKS COMPARISON",
+            awayPrimary: String(teamComparisonStats.away.blk),
+            awaySub: "TOTAL BLOCKS",
+            homePrimary: String(teamComparisonStats.home.blk),
+            homeSub: "TOTAL BLOCKS",
+            awayVal: teamComparisonStats.away.blk,
+            homeVal: teamComparisonStats.home.blk,
+          },
+          TOV: {
+            title: "TURNOVERS COMPARISON",
+            awayPrimary: String(teamComparisonStats.away.tov),
+            awaySub: "TOTAL TURNOVERS",
+            homePrimary: String(teamComparisonStats.home.tov),
+            homeSub: "TOTAL TURNOVERS",
+            awayVal: teamComparisonStats.away.tov,
+            homeVal: teamComparisonStats.home.tov,
+            lowerIsBetter: true,
+          },
+          PF: {
+            title: "TEAM FOULS COMPARISON",
+            awayPrimary: String(teamComparisonStats.away.fouls),
+            awaySub: isAwayInPenalty ? "IN BONUS PENALTY" : "TEAM FOULS",
+            homePrimary: String(teamComparisonStats.home.fouls),
+            homeSub: isHomeInPenalty ? "IN BONUS PENALTY" : "TEAM FOULS",
+            awayVal: teamComparisonStats.away.fouls,
+            homeVal: teamComparisonStats.home.fouls,
+            lowerIsBetter: true,
+          },
+        };
+
+        const meta = statMetaMap[teamComparisonStatKey];
+        const bannerW = 760;
+        const bannerH = 118;
+        const bannerX = Math.round((width - bannerW) / 2);
+        const bannerY = height - 216; // Positioned cleanly above bottom scorebug without blocking court action
+        const centerX = bannerX + bannerW / 2;
+
+        ctx.save();
+        ctx.shadowColor = "rgba(0, 0, 0, 0.72)";
+        ctx.shadowBlur = 24;
+        ctx.shadowOffsetY = 8;
+
+        ctx.fillStyle = "rgba(11, 18, 32, 0.96)";
+        ctx.beginPath();
+        ctx.roundRect(bannerX, bannerY, bannerW, bannerH, [18]);
+        ctx.fill();
+
+        const borderGrad = ctx.createLinearGradient(bannerX, bannerY, bannerX + bannerW, bannerY);
+        borderGrad.addColorStop(0, awayColor);
+        borderGrad.addColorStop(0.5, "rgba(255,255,255,0.28)");
+        borderGrad.addColorStop(1, homeColor);
+        ctx.lineWidth = 2.5;
+        ctx.strokeStyle = borderGrad;
+        ctx.stroke();
+        ctx.shadowColor = "transparent";
+
+        // Top Pill Header
+        ctx.fillStyle = "rgba(30, 41, 59, 0.9)";
+        ctx.beginPath();
+        ctx.roundRect(centerX - 165, bannerY + 8, 330, 24, [12]);
+        ctx.fill();
+
+        ctx.fillStyle = "#fbbf24";
+        ctx.font = "900 11px 'Inter', sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(meta.title, centerX, bannerY + 20);
+
+        // Away Team Logo & Name (Left)
+        ctx.fillStyle = awayColor;
+        ctx.beginPath();
+        ctx.roundRect(bannerX + 12, bannerY + 16, 6, bannerH - 32, [3]);
+        ctx.fill();
+
+        const awayImg = awayLogoImgRef.current;
+        if (awayImg && awayImg.complete && awayImg.naturalWidth > 0) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(bannerX + 52, bannerY + 66, 24, 0, Math.PI * 2);
+          ctx.clip();
+          try {
+            ctx.drawImage(awayImg, bannerX + 28, bannerY + 42, 48, 48);
+          } catch {}
+          ctx.restore();
+        } else {
+          ctx.fillStyle = awayColor;
+          ctx.beginPath();
+          ctx.arc(bannerX + 52, bannerY + 66, 24, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = "#ffffff";
+          ctx.font = "900 13px 'Inter', sans-serif";
+          ctx.textAlign = "center";
+          ctx.fillText(awayScorebugName.slice(0, 3), bannerX + 52, bannerY + 67);
+        }
+
+        ctx.fillStyle = "#ffffff";
+        ctx.font = "900 20px 'Inter', sans-serif";
+        ctx.textAlign = "left";
+        ctx.fillText(awayScorebugName, bannerX + 86, bannerY + 56);
+        ctx.fillStyle = "#94a3b8";
+        ctx.font = "800 11px 'Inter', sans-serif";
+        ctx.fillText(meta.awaySub, bannerX + 86, bannerY + 78);
+
+        // Away Primary Value
+        const awayLeads = meta.lowerIsBetter
+          ? meta.awayVal <= meta.homeVal
+          : meta.awayVal >= meta.homeVal;
+        ctx.fillStyle = awayLeads ? "#ffffff" : "#cbd5e1";
+        ctx.font = "900 34px 'Inter', sans-serif";
+        ctx.textAlign = "right";
+        ctx.fillText(meta.awayPrimary, centerX - 24, bannerY + 58);
+
+        // Home Primary Value
+        const homeLeads = meta.lowerIsBetter
+          ? meta.homeVal <= meta.awayVal
+          : meta.homeVal >= meta.awayVal;
+        ctx.fillStyle = homeLeads ? "#ffffff" : "#cbd5e1";
+        ctx.font = "900 34px 'Inter', sans-serif";
+        ctx.textAlign = "left";
+        ctx.fillText(meta.homePrimary, centerX + 24, bannerY + 58);
+
+        // Center Divider & Dual Comparison Bar
+        ctx.fillStyle = "#64748b";
+        ctx.font = "900 11px 'Inter', sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText("VS", centerX, bannerY + 58);
+
+        const barMaxHalfW = 165;
+        const total = Math.max(1, meta.awayVal + meta.homeVal);
+        const awayBarW =
+          meta.awayVal === 0 && meta.homeVal === 0
+            ? barMaxHalfW * 0.3
+            : Math.max(10, Math.round((meta.awayVal / total) * barMaxHalfW));
+        const homeBarW =
+          meta.awayVal === 0 && meta.homeVal === 0
+            ? barMaxHalfW * 0.3
+            : Math.max(10, Math.round((meta.homeVal / total) * barMaxHalfW));
+
+        ctx.fillStyle = "rgba(30, 41, 59, 0.85)";
+        ctx.beginPath();
+        ctx.roundRect(centerX - barMaxHalfW - 6, bannerY + 90, (barMaxHalfW + 6) * 2, 10, [5]);
+        ctx.fill();
+
+        ctx.fillStyle = awayColor;
+        ctx.beginPath();
+        ctx.roundRect(centerX - 4 - awayBarW, bannerY + 90, awayBarW, 10, [5]);
+        ctx.fill();
+
+        ctx.fillStyle = homeColor;
+        ctx.beginPath();
+        ctx.roundRect(centerX + 4, bannerY + 90, homeBarW, 10, [5]);
+        ctx.fill();
+
+        // Home Team Logo & Name (Right)
+        ctx.fillStyle = homeColor;
+        ctx.beginPath();
+        ctx.roundRect(bannerX + bannerW - 18, bannerY + 16, 6, bannerH - 32, [3]);
+        ctx.fill();
+
+        const homeImg = homeLogoImgRef.current;
+        if (homeImg && homeImg.complete && homeImg.naturalWidth > 0) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(bannerX + bannerW - 52, bannerY + 66, 24, 0, Math.PI * 2);
+          ctx.clip();
+          try {
+            ctx.drawImage(homeImg, bannerX + bannerW - 76, bannerY + 42, 48, 48);
+          } catch {}
+          ctx.restore();
+        } else {
+          ctx.fillStyle = homeColor;
+          ctx.beginPath();
+          ctx.arc(bannerX + bannerW - 52, bannerY + 66, 24, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = "#ffffff";
+          ctx.font = "900 13px 'Inter', sans-serif";
+          ctx.textAlign = "center";
+          ctx.fillText(homeScorebugName.slice(0, 3), bannerX + bannerW - 52, bannerY + 67);
+        }
+
+        ctx.fillStyle = "#ffffff";
+        ctx.font = "900 20px 'Inter', sans-serif";
+        ctx.textAlign = "right";
+        ctx.fillText(homeScorebugName, bannerX + bannerW - 86, bannerY + 56);
+        ctx.fillStyle = "#94a3b8";
+        ctx.font = "800 11px 'Inter', sans-serif";
+        ctx.fillText(meta.homeSub, bannerX + bannerW - 86, bannerY + 78);
+
+        ctx.restore();
+        return;
+      }
+
       const cardW = 780;
       const cardH = 490;
       const cardX = Math.round((width - cardW) / 2);
@@ -3393,6 +4033,9 @@ function LiveBroadcastStudioContent() {
       ctx.restore();
     },
     [
+      teamComparisonStatKey,
+      isAwayInPenalty,
+      isHomeInPenalty,
       awayColor,
       homeColor,
       activeLeague?.name,
@@ -3405,6 +4048,248 @@ function LiveBroadcastStudioContent() {
       homeTeamName,
       homeScore,
       teamComparisonStats,
+    ]
+  );
+
+  // Helper: Draw Broadcast Top Performer Per Team Layer (Side-by-Side Away vs Home Leaders)
+  const drawTopPerformersOverlay = useCallback(
+    (ctx: CanvasRenderingContext2D, width: number, height: number) => {
+      if (!awayTopPerformer && !homeTopPerformer) return;
+
+      const cardW = 860;
+      const cardH = 158;
+      const cardX = Math.round((width - cardW) / 2);
+      const cardY = height - 252; // Positioned above bottom scorebug
+      const centerX = cardX + cardW / 2;
+
+      ctx.save();
+      ctx.shadowColor = "rgba(0, 0, 0, 0.78)";
+      ctx.shadowBlur = 28;
+      ctx.shadowOffsetY = 10;
+
+      ctx.fillStyle = "rgba(11, 18, 32, 0.96)";
+      ctx.beginPath();
+      ctx.roundRect(cardX, cardY, cardW, cardH, [18]);
+      ctx.fill();
+
+      const borderGrad = ctx.createLinearGradient(cardX, cardY, cardX + cardW, cardY);
+      borderGrad.addColorStop(0, awayColor);
+      borderGrad.addColorStop(0.5, "rgba(251, 191, 36, 0.65)");
+      borderGrad.addColorStop(1, homeColor);
+      ctx.lineWidth = 2.5;
+      ctx.strokeStyle = borderGrad;
+      ctx.stroke();
+      ctx.shadowColor = "transparent";
+
+      // Header Ribbon
+      const headerGrad = ctx.createLinearGradient(cardX + 4, cardY + 4, cardX + cardW - 4, cardY + 4);
+      headerGrad.addColorStop(0, awayColor);
+      headerGrad.addColorStop(0.5, "#0f172a");
+      headerGrad.addColorStop(1, homeColor);
+      ctx.fillStyle = headerGrad;
+      ctx.beginPath();
+      ctx.roundRect(cardX + 4, cardY + 4, cardW - 8, 32, [14, 14, 4, 4]);
+      ctx.fill();
+
+      const criterionLabel =
+        topPerformerCriterion === "PTS"
+          ? "SCORING LEADERS"
+          : topPerformerCriterion === "REB"
+          ? "REBOUNDING LEADERS"
+          : topPerformerCriterion === "AST"
+          ? "ASSIST LEADERS"
+          : "TOP PERFORMERS";
+
+      ctx.fillStyle = "#fbbf24";
+      ctx.font = "900 12px 'Inter', sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(
+        `★ ${(activeLeague?.name || "BOX SCORE").toUpperCase()} • ${criterionLabel} PER TEAM ★`,
+        centerX,
+        cardY + 20
+      );
+
+      // Center vertical divider
+      ctx.strokeStyle = "rgba(148, 163, 184, 0.25)";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(centerX, cardY + 42);
+      ctx.lineTo(centerX, cardY + cardH - 12);
+      ctx.stroke();
+
+      const drawPlayerSide = (
+        player: typeof awayTopPerformer | typeof homeTopPerformer,
+        imgRef: React.MutableRefObject<HTMLImageElement | null>,
+        teamLogoRef: React.MutableRefObject<HTMLImageElement | null>,
+        teamShort: string,
+        teamColorHex: string,
+        sideX: number,
+        sideW: number
+      ) => {
+        if (!player) return;
+        const bodyY = cardY + 42;
+        const avatarCX = sideX + 46;
+        const avatarCY = bodyY + 54;
+        const avatarR = 32;
+
+        // Player Portrait Circle
+        ctx.fillStyle = "#1e293b";
+        ctx.beginPath();
+        ctx.arc(avatarCX, avatarCY, avatarR, 0, Math.PI * 2);
+        ctx.fill();
+
+        const pImg = imgRef.current;
+        if (pImg && pImg.complete && pImg.naturalWidth > 0) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(avatarCX, avatarCY, avatarR - 2, 0, Math.PI * 2);
+          ctx.clip();
+          try {
+            ctx.drawImage(pImg, avatarCX - avatarR + 2, avatarCY - avatarR + 2, (avatarR - 2) * 2, (avatarR - 2) * 2);
+          } catch {}
+          ctx.restore();
+        } else {
+          ctx.fillStyle = teamColorHex;
+          ctx.beginPath();
+          ctx.arc(avatarCX, avatarCY, avatarR - 2, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = "#ffffff";
+          ctx.font = "900 18px 'Inter', sans-serif";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(`#${player.jerseyNumber}`, avatarCX, avatarCY);
+        }
+
+        ctx.lineWidth = 2.5;
+        ctx.strokeStyle = teamColorHex;
+        ctx.beginPath();
+        ctx.arc(avatarCX, avatarCY, avatarR, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // Small Team Logo Badge on Avatar Corner
+        const tImg = teamLogoRef.current;
+        if (tImg && tImg.complete && tImg.naturalWidth > 0) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(avatarCX + 22, avatarCY + 22, 11, 0, Math.PI * 2);
+          ctx.fillStyle = "#0f172a";
+          ctx.fill();
+          ctx.clip();
+          try {
+            ctx.drawImage(tImg, avatarCX + 11, avatarCY + 11, 22, 22);
+          } catch {}
+          ctx.restore();
+        }
+
+        // Player Name & Team/Position Meta
+        const infoX = sideX + 90;
+        ctx.fillStyle = "#38bdf8";
+        ctx.font = "800 11px 'Inter', sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        ctx.fillText(
+          `${teamShort} • #${player.jerseyNumber} • ${player.position || "PLAYER"}`,
+          infoX,
+          bodyY + 18
+        );
+
+        const fullName = `${player.firstName} ${player.lastName}`.trim().toUpperCase();
+        ctx.fillStyle = "#ffffff";
+        ctx.font = "900 17px 'Inter', sans-serif";
+        ctx.fillText(fullName.slice(0, 22), infoX, bodyY + 38);
+
+        // Stat Pills Row (PTS, REB, AST, FG, STL/BLK)
+        const reb = (player.oreb || 0) + (player.dreb || 0);
+        const fgText = `${player.fgm || 0}/${player.fga || 0}`;
+        const pills: Array<{ label: string; value: string; highlight?: boolean }> = [
+          {
+            label: "PTS",
+            value: String(player.points || 0),
+            highlight: topPerformerCriterion === "OVERALL" || topPerformerCriterion === "PTS",
+          },
+          {
+            label: "REB",
+            value: String(reb),
+            highlight: topPerformerCriterion === "REB",
+          },
+          {
+            label: "AST",
+            value: String(player.ast || 0),
+            highlight: topPerformerCriterion === "AST",
+          },
+          {
+            label: "FG",
+            value: fgText,
+          },
+          {
+            label: "STL/BLK",
+            value: `${player.stl || 0}/${player.blk || 0}`,
+          },
+        ];
+
+        const pillW = 60;
+        const pillH = 44;
+        const pillGap = 6;
+        const pillY = bodyY + 54;
+
+        pills.forEach((pill, idx) => {
+          const px = infoX + idx * (pillW + pillGap);
+          if (px + pillW > sideX + sideW - 8) return;
+          ctx.fillStyle = pill.highlight
+            ? "rgba(225, 29, 72, 0.28)"
+            : "rgba(30, 41, 59, 0.85)";
+          ctx.beginPath();
+          ctx.roundRect(px, pillY, pillW, pillH, [8]);
+          ctx.fill();
+
+          ctx.lineWidth = 1;
+          ctx.strokeStyle = pill.highlight
+            ? "rgba(251, 113, 133, 0.65)"
+            : "rgba(148, 163, 184, 0.25)";
+          ctx.stroke();
+
+          ctx.fillStyle = pill.highlight ? "#fda4af" : "#94a3b8";
+          ctx.font = "800 9px 'Inter', sans-serif";
+          ctx.textAlign = "center";
+          ctx.fillText(pill.label, px + pillW / 2, pillY + 13);
+
+          ctx.fillStyle = "#ffffff";
+          ctx.font = "900 15px 'Inter', sans-serif";
+          ctx.fillText(pill.value, px + pillW / 2, pillY + 31);
+        });
+      };
+
+      drawPlayerSide(
+        awayTopPerformer,
+        awayTopPerformerImgRef,
+        awayLogoImgRef,
+        awayScorebugName,
+        awayColor,
+        cardX + 8,
+        cardW / 2 - 12
+      );
+      drawPlayerSide(
+        homeTopPerformer,
+        homeTopPerformerImgRef,
+        homeLogoImgRef,
+        homeScorebugName,
+        homeColor,
+        centerX + 4,
+        cardW / 2 - 12
+      );
+
+      ctx.restore();
+    },
+    [
+      awayTopPerformer,
+      homeTopPerformer,
+      awayColor,
+      homeColor,
+      topPerformerCriterion,
+      activeLeague?.name,
+      awayScorebugName,
+      homeScorebugName,
     ]
   );
 
@@ -3753,9 +4638,90 @@ function LiveBroadcastStudioContent() {
 
       if (scene.kind === "replay_scene" && scene.replayConfig) {
         // Render Slow-Motion Replay Scene (Raw Camera Footage — Scorebug is NEVER drawn on Replays!)
-        if (replayVidEl && replayVidEl.readyState >= 2) {
+        const cfg = scene.replayConfig;
+        const replaySourceVideo =
+          storedVideos.find((v) => v.id === cfg.videoId) ??
+          (cfg.cameraId ? resolveStoredVideoForCamera(cfg.cameraId) : null);
+        const startSec = cfg.startSec || 0;
+        const endSec = Math.max(startSec + 0.5, cfg.endSec || 10);
+        const rate = cfg.playbackRate || 0.5;
+        const clipSpan = Math.max(0.5, endSec - startSec);
+        const syntheticLoopSec =
+          startSec + (((nowMs / 1000) * rate) % clipSpan);
+
+        const hasPlayableVideo =
+          Boolean(replaySourceVideo && replaySourceVideo.sizeBytes > 1000) &&
+          Boolean(
+            replayVidEl &&
+              replayVidEl.readyState >= 2 &&
+              replayVidEl.videoWidth > 0
+          );
+
+        const currentClipSec =
+          hasPlayableVideo &&
+          replayVidEl &&
+          !Number.isNaN(replayVidEl.currentTime)
+            ? replayVidEl.currentTime
+            : syntheticLoopSec;
+
+        const candidateFrames =
+          replaySourceVideo?.timelineFrames?.length
+            ? replaySourceVideo.timelineFrames
+            : cfg.cameraId &&
+                liveCaptureFramesByCamRef.current[cfg.cameraId]?.length
+              ? liveCaptureFramesByCamRef.current[cfg.cameraId]
+              : cfg.cameraId &&
+                  rollingFramesByCamRef.current[cfg.cameraId]?.length
+                ? rollingFramesByCamRef.current[cfg.cameraId]
+                : [];
+
+        let bestFrame: TimelineFrame | null = null;
+        if (candidateFrames.length > 0) {
+          bestFrame = candidateFrames[0];
+          let bestDiff = Math.abs(bestFrame.timeSec - currentClipSec);
+          for (const f of candidateFrames) {
+            const d = Math.abs(f.timeSec - currentClipSec);
+            if (d < bestDiff) {
+              bestFrame = f;
+              bestDiff = d;
+            }
+          }
+        }
+
+        let drewReplayFrame = false;
+        if (hasPlayableVideo && replayVidEl) {
           ctx.drawImage(replayVidEl, 0, 0, width, height);
-        } else {
+          drewReplayFrame = true;
+        } else if (bestFrame?.dataUrl) {
+          let frameImg = replayFrameImgCacheRef.current[bestFrame.dataUrl];
+          if (!frameImg) {
+            frameImg = new Image();
+            frameImg.src = bestFrame.dataUrl;
+            replayFrameImgCacheRef.current[bestFrame.dataUrl] = frameImg;
+          }
+          if (frameImg.complete && frameImg.naturalWidth > 0) {
+            ctx.drawImage(frameImg, 0, 0, width, height);
+            drewReplayFrame = true;
+          }
+        }
+
+        if (
+          !drewReplayFrame &&
+          cfg.cameraId &&
+          cfg.cameraId !== "clean_program" &&
+          cameraRawCanvasByKeyRef.current[cfg.cameraId]
+        ) {
+          ctx.drawImage(
+            cameraRawCanvasByKeyRef.current[cfg.cameraId],
+            0,
+            0,
+            width,
+            height
+          );
+          drewReplayFrame = true;
+        }
+
+        if (!drewReplayFrame) {
           ctx.fillStyle = "#0f172a";
           ctx.fillRect(0, 0, width, height);
           ctx.fillStyle = "#f59e0b";
@@ -3763,19 +4729,19 @@ function LiveBroadcastStudioContent() {
           ctx.textAlign = "center";
           ctx.textBaseline = "middle";
           ctx.fillText(
-            `LOADING REPLAY CLIP: ${scene.replayConfig.videoTitle}`,
+            `LOADING REPLAY CLIP: ${cfg.videoTitle}`,
             width / 2,
             height / 2
           );
         }
 
         // Broadcast Slow-Motion Instant Replay Banner (Top-Left)
-        const camTag = scene.replayConfig.cameraLabel
-          ? ` • ${scene.replayConfig.cameraLabel.toUpperCase()}`
+        const camTag = cfg.cameraLabel
+          ? ` • ${cfg.cameraLabel.toUpperCase()}`
           : "";
-        const bannerText = `⚡ INSTANT REPLAY (${scene.replayConfig.playbackRate}x SLOW-MO)${camTag} • ${formatClock(
-          scene.replayConfig.startSec
-        )}-${formatClock(scene.replayConfig.endSec)}`;
+        const bannerText = `⚡ INSTANT REPLAY (${cfg.playbackRate}x SLOW-MO)${camTag} • ${formatClock(
+          cfg.startSec
+        )}-${formatClock(cfg.endSec)}`;
         ctx.save();
         ctx.font = "900 16px 'Inter', sans-serif";
         const bannerW = Math.max(400, Math.min(760, ctx.measureText(bannerText).width + 44));
@@ -3792,34 +4758,14 @@ function LiveBroadcastStudioContent() {
 
         // Optional Buzzer-Beater / Official Review Game Clock Overlay on Replay (No Scorebug!)
         const shouldShowReplayClock =
-          scene.replayConfig.showGameClock !== undefined
-            ? scene.replayConfig.showGameClock
+          cfg.showGameClock !== undefined
+            ? cfg.showGameClock
             : showReplayGameClock;
 
         if (shouldShowReplayClock) {
-          const replaySourceVideo = storedVideos.find(
-            (v) => v.id === scene.replayConfig?.videoId
-          );
-          const currentClipSec =
-            replayVidEl && !Number.isNaN(replayVidEl.currentTime)
-              ? replayVidEl.currentTime
-              : scene.replayConfig.startSec;
-
-          let syncedGameClockLabel = `${getPeriodLabel(period)} ${formatClock(clockSeconds)}`;
-          if (replaySourceVideo?.timelineFrames?.length) {
-            let bestFrame = replaySourceVideo.timelineFrames[0];
-            let bestDiff = Math.abs(bestFrame.timeSec - currentClipSec);
-            for (const f of replaySourceVideo.timelineFrames) {
-              const d = Math.abs(f.timeSec - currentClipSec);
-              if (d < bestDiff) {
-                bestFrame = f;
-                bestDiff = d;
-              }
-            }
-            if (bestFrame?.gameClockLabel) {
-              syncedGameClockLabel = bestFrame.gameClockLabel;
-            }
-          }
+          const syncedGameClockLabel =
+            bestFrame?.gameClockLabel ||
+            `${getPeriodLabel(period)} ${formatClock(clockSeconds)}`;
 
           // Render Official Review / Buzzer-Beater Game Clock Box at Bottom-Right
           const hudW = 340;
@@ -4023,6 +4969,11 @@ function LiveBroadcastStudioContent() {
         drawTeamComparisonOverlay(ctx, width, height);
       }
 
+      // Render Top Performer Per Team Layer when toggled ON
+      if (drawOverlay && showTopPerformersOverlay && !isPictureOrVideoScene) {
+        drawTopPerformersOverlay(ctx, width, height);
+      }
+
       // Render Advertisement Image Overlay when toggled ON
       if (drawOverlay && showAdOverlay && activeAdItem) {
         drawAdvertisementOverlay(ctx, width, height);
@@ -4033,14 +4984,17 @@ function LiveBroadcastStudioContent() {
       drawScorebugOverlay,
       drawLivePlayerStatsOverlay,
       drawTeamComparisonOverlay,
+      drawTopPerformersOverlay,
       drawAdvertisementOverlay,
       featuredOnCourtPlayer,
       scorebugPosition,
       showReplayGameClock,
       storedVideos,
+      resolveStoredVideoForCamera,
       period,
       clockSeconds,
       showTeamComparisonOverlay,
+      showTopPerformersOverlay,
       showAdOverlay,
       activeAdItem,
     ]
@@ -4227,6 +5181,22 @@ function LiveBroadcastStudioContent() {
               setIsTransitioning(false);
             }
           }
+
+          // Mirror Live Program Canvas directly to Pop-Out Clean Program Window if open
+          const popupWin = cleanPopupWindowRef.current;
+          const popupCanvas = cleanPopupCanvasRef.current;
+          if (popupWin && !popupWin.closed && popupCanvas) {
+            const popCtx = popupCanvas.getContext("2d");
+            if (popCtx) {
+              popCtx.drawImage(
+                lCanvas,
+                0,
+                0,
+                popupCanvas.width,
+                popupCanvas.height
+              );
+            }
+          }
         }
       }
 
@@ -4235,6 +5205,9 @@ function LiveBroadcastStudioContent() {
         const cleanC = document.createElement("canvas");
         cleanC.width = 1920;
         cleanC.height = 1080;
+        if (hiddenVideosContainerRef.current) {
+          hiddenVideosContainerRef.current.appendChild(cleanC);
+        }
         cleanLiveCanvasRef.current = cleanC;
       }
       const cleanCanvas = cleanLiveCanvasRef.current;
@@ -4265,19 +5238,24 @@ function LiveBroadcastStudioContent() {
             camCanvas = document.createElement("canvas");
             camCanvas.width = 1280;
             camCanvas.height = 720;
+            if (hiddenVideosContainerRef.current) {
+              hiddenVideosContainerRef.current.appendChild(camCanvas);
+            }
             cameraRawCanvasByKeyRef.current[camTrack.cameraId] = camCanvas;
           }
           const camCtx = camCanvas.getContext("2d");
           if (camCtx) {
+            camCtx.fillStyle = "#090d16";
+            camCtx.fillRect(0, 0, camCanvas.width, camCanvas.height);
             drawCameraSlotRect(
               camCtx,
               camTrack.slot,
+              idx,
               0,
               0,
               camCanvas.width,
               camCanvas.height,
-              nowMs,
-              idx
+              nowMs
             );
           }
         });
@@ -4316,13 +5294,80 @@ function LiveBroadcastStudioContent() {
         }
       }
 
-      rafId = requestAnimationFrame(tick);
+      if (typeof document === "undefined" || !document.hidden) {
+        rafId = requestAnimationFrame(tick);
+      }
     };
 
     rafId = requestAnimationFrame(tick);
+
+    // Unthrottled Web Worker 30fps ticker + Pop-Out Window RAF so Live Canvas & Clean Feed Pop-Out never freeze when /studio is in a background tab behind the Scorebook tab!
+    let bgWorker: Worker | null = null;
+    let bgWorkerUrl = "";
+    try {
+      if (typeof window !== "undefined" && "Worker" in window) {
+        const blob = new Blob(
+          [
+            `const id = setInterval(() => postMessage("tick"), 33); onmessage = (e) => { if (e.data === "stop") clearInterval(id); };`,
+          ],
+          { type: "application/javascript" }
+        );
+        bgWorkerUrl = URL.createObjectURL(blob);
+        bgWorker = new Worker(bgWorkerUrl);
+        bgWorker.onmessage = () => {
+          if (!isRunning) return;
+          if (
+            typeof document !== "undefined" &&
+            (document.hidden ||
+              Boolean(
+                cleanPopupWindowRef.current &&
+                  !cleanPopupWindowRef.current.closed
+              ))
+          ) {
+            syncFromLocalStorage();
+            tick(performance.now());
+          }
+        };
+      }
+    } catch {}
+
+    const fallbackBgTimer = setInterval(() => {
+      if (!isRunning) return;
+      if (typeof document !== "undefined" && document.hidden) {
+        syncFromLocalStorage();
+        tick(performance.now());
+      }
+    }, 100);
+
+    const handleVisibilityChange = () => {
+      if (typeof document !== "undefined" && !document.hidden && isRunning) {
+        syncFromLocalStorage();
+        cancelAnimationFrame(rafId);
+        rafId = requestAnimationFrame(tick);
+      }
+    };
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", handleVisibilityChange);
+    }
+
     return () => {
       isRunning = false;
       cancelAnimationFrame(rafId);
+      clearInterval(fallbackBgTimer);
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", handleVisibilityChange);
+      }
+      if (bgWorker) {
+        try {
+          bgWorker.postMessage("stop");
+          bgWorker.terminate();
+        } catch {}
+      }
+      if (bgWorkerUrl) {
+        try {
+          URL.revokeObjectURL(bgWorkerUrl);
+        } catch {}
+      }
     };
   }, [
     scenes,
@@ -4333,6 +5378,7 @@ function LiveBroadcastStudioContent() {
     drawLogoStingerOverlay,
     availableStudioCameras,
     drawCameraSlotRect,
+    syncFromLocalStorage,
   ]);
 
   // Section Order, Visibility & Light/Dark Theme Toggle Handlers
@@ -4973,12 +6019,54 @@ function LiveBroadcastStudioContent() {
     }
   };
 
+  // Continuous 1fps Rolling Frame Buffer for EVERY Studio Camera (so any camera has instant timeline frames & replay capability even if added mid-game!)
+  useEffect(() => {
+    const rollingTimer = setInterval(() => {
+      const nextRollingSec = rollingElapsedSecRef.current;
+      rollingElapsedSecRef.current = (nextRollingSec + 1) % 90;
+      const nextMap: Record<string, TimelineFrame[]> = {
+        ...rollingFramesByCamRef.current,
+      };
+
+      const mainC = cleanLiveCanvasRef.current || liveCanvasRef.current;
+      if (mainC) {
+        const snapMain = captureLiveTimelineThumbnail(nextRollingSec, mainC);
+        if (snapMain) {
+          const prev = (nextMap["clean_program"] || []).filter(
+            (f) => f.timeSec !== nextRollingSec
+          );
+          nextMap["clean_program"] = [...prev, snapMain].slice(-90);
+        }
+      }
+
+      availableStudioCameras.forEach((camTrack) => {
+        if (camTrack.cameraId === "clean_program") return;
+        const camC = cameraRawCanvasByKeyRef.current[camTrack.cameraId];
+        if (!camC) return;
+        const snapCam = captureLiveTimelineThumbnail(nextRollingSec, camC);
+        if (snapCam) {
+          const prev = (nextMap[camTrack.cameraId] || []).filter(
+            (f) => f.timeSec !== nextRollingSec
+          );
+          nextMap[camTrack.cameraId] = [...prev, snapCam].slice(-90);
+        }
+      });
+
+      rollingFramesByCamRef.current = nextMap;
+      setRollingTimelineFramesByCam({ ...nextMap });
+    }, 1000);
+    return () => clearInterval(rollingTimer);
+  }, [availableStudioCameras]);
+
   // Start Live Recording (Records Clean Raw Program Canvas + Every Individual Camera Track Simultaneously!)
   const startRecording = () => {
     if (!cleanLiveCanvasRef.current && typeof document !== "undefined") {
       const cleanC = document.createElement("canvas");
       cleanC.width = 1920;
       cleanC.height = 1080;
+      if (hiddenVideosContainerRef.current) {
+        hiddenVideosContainerRef.current.appendChild(cleanC);
+      }
       cleanLiveCanvasRef.current = cleanC;
     }
     const primaryRawCanvas = cleanLiveCanvasRef.current || liveCanvasRef.current;
@@ -4986,6 +6074,7 @@ function LiveBroadcastStudioContent() {
 
     try {
       const recordingSessionId = `recsess-${generateUUID().slice(0, 8)}`;
+      activeRecordingSessionIdRef.current = recordingSessionId;
       const canvasStream = primaryRawCanvas.captureStream(30);
       // Attach Web Audio API Master Mixer tracks (Microphones + BGM/SFX audio files)
       if (masterAudioDestRef.current) {
@@ -5009,6 +6098,9 @@ function LiveBroadcastStudioContent() {
         : MediaRecorder.isTypeSupported("video/webm")
         ? "video/webm"
         : "video/mp4";
+      const camMimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp8")
+        ? "video/webm;codecs=vp8"
+        : mimeType;
 
       const recorder = new MediaRecorder(canvasStream, {
         mimeType,
@@ -5043,45 +6135,59 @@ function LiveBroadcastStudioContent() {
         setLiveRecordingFrames([firstFrame]);
       }
 
-      // Also start per-camera MediaRecorders for every individual camera in availableStudioCameras
-      const initialFramesMap: Record<string, TimelineFrame[]> = {
-        clean_program: firstFrame ? [firstFrame] : [],
-      };
-      availableStudioCameras.forEach((camTrack, idx) => {
-        if (camTrack.cameraId === "clean_program" || !camTrack.slot) return;
+      // Helper to ensure a MediaRecorder is running for any secondary camera track
+      const startSecondaryCameraRecorder = (
+        camTrack: StudioCameraTrackInfo,
+        idx: number,
+        initialSec = 0
+      ): TimelineFrame | null => {
+        if (camTrack.cameraId === "clean_program" || !camTrack.slot) return null;
         let camCanvas = cameraRawCanvasByKeyRef.current[camTrack.cameraId];
         if (!camCanvas && typeof document !== "undefined") {
           camCanvas = document.createElement("canvas");
           camCanvas.width = 1280;
           camCanvas.height = 720;
+          if (hiddenVideosContainerRef.current) {
+            hiddenVideosContainerRef.current.appendChild(camCanvas);
+          }
           cameraRawCanvasByKeyRef.current[camTrack.cameraId] = camCanvas;
         }
-        if (!camCanvas) return;
+        if (!camCanvas) return null;
         const camCtx = camCanvas.getContext("2d");
         if (camCtx) {
+          camCtx.fillStyle = "#090d16";
+          camCtx.fillRect(0, 0, camCanvas.width, camCanvas.height);
           drawCameraSlotRect(
             camCtx,
             camTrack.slot,
+            idx,
             0,
             0,
             camCanvas.width,
             camCanvas.height,
-            performance.now(),
-            idx
+            performance.now()
           );
         }
-        const camFirstFrame = captureLiveTimelineThumbnail(0, camCanvas);
-        liveCaptureFramesByCamRef.current[camTrack.cameraId] = camFirstFrame
-          ? [camFirstFrame]
-          : [];
-        initialFramesMap[camTrack.cameraId] = camFirstFrame ? [camFirstFrame] : [];
-        cameraRecordedChunksRef.current[camTrack.cameraId] = [];
+        const camFirstFrame = captureLiveTimelineThumbnail(initialSec, camCanvas);
+        if (!liveCaptureFramesByCamRef.current[camTrack.cameraId]) {
+          liveCaptureFramesByCamRef.current[camTrack.cameraId] = camFirstFrame
+            ? [camFirstFrame]
+            : [];
+        }
+        if (!cameraRecordedChunksRef.current[camTrack.cameraId]) {
+          cameraRecordedChunksRef.current[camTrack.cameraId] = [];
+        }
+
+        const existingRec = cameraMediaRecordersRef.current[camTrack.cameraId];
+        if (existingRec && existingRec.state !== "inactive") {
+          return camFirstFrame;
+        }
 
         try {
           const camStream = camCanvas.captureStream(15);
           const camRec = new MediaRecorder(camStream, {
-            mimeType,
-            videoBitsPerSecond: 2_500_000,
+            mimeType: camMimeType,
+            videoBitsPerSecond: 2_200_000,
           });
           camRec.ondataavailable = (ev) => {
             if (ev.data && ev.data.size > 0) {
@@ -5092,23 +6198,24 @@ function LiveBroadcastStudioContent() {
             }
           };
           camRec.onstop = async () => {
-            const camChunks = cameraRecordedChunksRef.current[camTrack.cameraId] || [];
-            if (camChunks.length === 0) return;
-            const camBlob = new Blob(camChunks, { type: mimeType });
+            const camChunks =
+              cameraRecordedChunksRef.current[camTrack.cameraId] || [];
+            const camFrames = [
+              ...(liveCaptureFramesByCamRef.current[camTrack.cameraId] || []),
+            ];
+            if (camChunks.length === 0 && camFrames.length === 0) return;
+            const camBlob = new Blob(camChunks, { type: camMimeType });
             const elapsedSec = Math.max(
               2,
               Math.round((Date.now() - recordStartTimeRef.current) / 1000)
             );
-            const camFrames = [
-              ...(liveCaptureFramesByCamRef.current[camTrack.cameraId] || []),
-            ];
             const camVideo: StoredGameVideo = {
               id: generateUUID(),
               matchId: activeMatch?.id ?? "generic-game",
               gameNumber: activeMatch?.gameNumber ?? 1,
               title: `[${camTrack.label}] Game #${activeMatch?.gameNumber || 1} (${homeTeamName} vs ${awayTeamName}) - ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`,
               blob: camBlob,
-              mimeType,
+              mimeType: camMimeType,
               sizeBytes: camBlob.size,
               durationSeconds: elapsedSec,
               createdAt: new Date().toISOString(),
@@ -5131,8 +6238,19 @@ function LiveBroadcastStudioContent() {
           camRec.start(500);
           cameraMediaRecordersRef.current[camTrack.cameraId] = camRec;
         } catch {
-          // ignore if secondary camera stream fails
+          // If MediaRecorder fails on this secondary stream, liveCaptureFramesByCamRef still captures every frame for replay!
         }
+        return camFirstFrame;
+      };
+
+      // Also start per-camera MediaRecorders for every individual camera in availableStudioCameras
+      const initialFramesMap: Record<string, TimelineFrame[]> = {
+        clean_program: firstFrame ? [firstFrame] : [],
+      };
+      availableStudioCameras.forEach((camTrack, idx) => {
+        if (camTrack.cameraId === "clean_program" || !camTrack.slot) return;
+        const camFirstFrame = startSecondaryCameraRecorder(camTrack, idx, 0);
+        initialFramesMap[camTrack.cameraId] = camFirstFrame ? [camFirstFrame] : [];
       });
       setLiveRecordingFramesByCam(initialFramesMap);
 
@@ -5211,6 +6329,13 @@ function LiveBroadcastStudioContent() {
         const updatedList = await getAllStoredVideos();
         setStoredVideos(updatedList);
         setSelectedTimelineVideoId(newVideo.id);
+        // Refresh storedVideos again after 400ms so all secondary camRec.onstop IndexedDB writes are guaranteed in state
+        setTimeout(async () => {
+          try {
+            const allAfter = await getAllStoredVideos();
+            setStoredVideos(allAfter);
+          } catch {}
+        }, 400);
         // Default to a 10-second Replay Selection Box at the end of the recording!
         const boxDur = Math.min(elapsedSec, replayBoxDurationPreset || 10);
         const defaultStart = Math.max(0, elapsedSec - boxDur);
@@ -5245,17 +6370,22 @@ function LiveBroadcastStudioContent() {
             ];
             setLiveRecordingFrames([...liveCaptureFramesRef.current]);
           }
-          // Capture per-camera timeline thumbnails at 1fps
+          // Capture per-camera timeline thumbnails at 1fps (and auto-start recorder if a camera was added mid-recording)
           const nextCamFramesMap: Record<string, TimelineFrame[]> = {
             clean_program: [...(liveCaptureFramesByCamRef.current["clean_program"] || [])],
           };
-          Object.entries(cameraRawCanvasByKeyRef.current).forEach(([camKey, camC]) => {
-            const camSnap = captureLiveTimelineThumbnail(next, camC);
-            if (camSnap) {
-              const prevArr = liveCaptureFramesByCamRef.current[camKey] || [];
-              const updatedArr = [...prevArr, camSnap];
-              liveCaptureFramesByCamRef.current[camKey] = updatedArr;
-              nextCamFramesMap[camKey] = updatedArr;
+          availableStudioCameras.forEach((camTrack, idx) => {
+            if (camTrack.cameraId === "clean_program") return;
+            startSecondaryCameraRecorder(camTrack, idx, next);
+            const camC = cameraRawCanvasByKeyRef.current[camTrack.cameraId];
+            if (camC) {
+              const camSnap = captureLiveTimelineThumbnail(next, camC);
+              if (camSnap) {
+                const prevArr = liveCaptureFramesByCamRef.current[camTrack.cameraId] || [];
+                const updatedArr = [...prevArr, camSnap];
+                liveCaptureFramesByCamRef.current[camTrack.cameraId] = updatedArr;
+                nextCamFramesMap[camTrack.cameraId] = updatedArr;
+              }
             }
           });
           setLiveRecordingFramesByCam(nextCamFramesMap);
@@ -5662,7 +6792,7 @@ function LiveBroadcastStudioContent() {
     }
   };
 
-  // Pop-Out Clean 16:9 Program Window (Alternative zero-latency capture for Facebook Screen Share / OBS)
+  // Pop-Out Clean 16:9 Program Window (Zero-latency direct canvas mirror for Facebook Screen Share / OBS / Dual-Monitor)
   const openCleanProgramWindow = () => {
     const lCanvas = liveCanvasRef.current;
     if (!lCanvas) return;
@@ -5675,6 +6805,8 @@ function LiveBroadcastStudioContent() {
       alert("Please allow pop-ups to open the Clean 16:9 Live Program Window.");
       return;
     }
+    cleanPopupWindowRef.current = popup;
+    popup.document.open();
     popup.document.write(`
       <!DOCTYPE html>
       <html>
@@ -5683,72 +6815,78 @@ function LiveBroadcastStudioContent() {
           <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body { background: #000; width: 100vw; height: 100vh; overflow: hidden; display: flex; align-items: center; justify-content: center; }
-            video { width: 100%; height: 100%; object-fit: contain; }
+            canvas { width: 100%; height: 100%; object-fit: contain; display: block; }
           </style>
         </head>
         <body>
-          <video id="cleanProgVideo" autoplay muted playsinline></video>
+          <canvas id="cleanProgCanvas" width="1920" height="1080"></canvas>
         </body>
       </html>
     `);
     popup.document.close();
-    const vid = popup.document.getElementById("cleanProgVideo") as HTMLVideoElement | null;
-    if (vid) {
-      vid.srcObject = lCanvas.captureStream(30);
-      vid.play().catch(() => {});
+    const popCanvas = popup.document.getElementById(
+      "cleanProgCanvas"
+    ) as HTMLCanvasElement | null;
+    if (popCanvas) {
+      cleanPopupCanvasRef.current = popCanvas;
+      const popCtx = popCanvas.getContext("2d");
+      if (popCtx) {
+        popCtx.drawImage(lCanvas, 0, 0, popCanvas.width, popCanvas.height);
+      }
     }
   };
 
-  // Resolve the active saved video for the selected timeline camera track (matches recordingSessionId if available)
-  const activeCameraTimelineVideo = useMemo(() => {
-    if (!selectedTimelineVideo) return null;
-    if (
-      !selectedTimelineCameraKey ||
-      selectedTimelineCameraKey === "clean_program" ||
-      selectedTimelineVideo.cameraId === selectedTimelineCameraKey
-    ) {
-      return selectedTimelineVideo;
+  const displayTimelineFrames = useMemo(() => {
+    const camKey = selectedTimelineCameraKey || "clean_program";
+    if (isRecording) {
+      if (camKey !== "clean_program") {
+        const camFrames = liveRecordingFramesByCam[camKey];
+        if (camFrames && camFrames.length > 0) return camFrames;
+        return rollingTimelineFramesByCam[camKey] || [];
+      }
+      return liveRecordingFrames;
     }
-    if (selectedTimelineVideo.recordingSessionId) {
-      const sibling = storedVideos.find(
-        (v) =>
-          v.recordingSessionId === selectedTimelineVideo.recordingSessionId &&
-          v.cameraId === selectedTimelineCameraKey
-      );
-      if (sibling) return sibling;
+    if (camKey !== "clean_program") {
+      if (activeCameraTimelineVideo?.timelineFrames?.length) {
+        return activeCameraTimelineVideo.timelineFrames;
+      }
+      if (liveRecordingFramesByCam[camKey]?.length) {
+        return liveRecordingFramesByCam[camKey];
+      }
+      return rollingTimelineFramesByCam[camKey] || [];
     }
-    const fallbackByCam = storedVideos.find(
-      (v) => v.cameraId === selectedTimelineCameraKey
+    return (
+      activeCameraTimelineVideo?.timelineFrames ||
+      rollingTimelineFramesByCam["clean_program"] ||
+      []
     );
-    return fallbackByCam || selectedTimelineVideo;
-  }, [selectedTimelineVideo, selectedTimelineCameraKey, storedVideos]);
+  }, [
+    isRecording,
+    liveRecordingFramesByCam,
+    rollingTimelineFramesByCam,
+    selectedTimelineCameraKey,
+    liveRecordingFrames,
+    activeCameraTimelineVideo,
+  ]);
 
   const activeTimelineDuration = Math.max(
     10,
     isRecording
       ? Math.max(15, recordSeconds + 2)
-      : activeCameraTimelineVideo?.durationSeconds || 20
+      : activeCameraTimelineVideo?.durationSeconds ||
+          selectedTimelineVideo?.durationSeconds ||
+          Math.max(15, displayTimelineFrames.length) ||
+          20
   );
-  const displayTimelineFrames = useMemo(() => {
-    if (isRecording) {
-      const camFrames = liveRecordingFramesByCam[selectedTimelineCameraKey];
-      if (camFrames && camFrames.length > 0) return camFrames;
-      return liveRecordingFrames;
-    }
-    return activeCameraTimelineVideo?.timelineFrames || [];
-  }, [
-    isRecording,
-    liveRecordingFramesByCam,
-    selectedTimelineCameraKey,
-    liveRecordingFrames,
-    activeCameraTimelineVideo,
-  ]);
+
   const displayClockTags = useMemo(
     () =>
       isRecording
         ? liveClockTags
-        : activeCameraTimelineVideo?.clockTags || [],
-    [isRecording, liveClockTags, activeCameraTimelineVideo]
+        : activeCameraTimelineVideo?.clockTags ||
+          selectedTimelineVideo?.clockTags ||
+          [],
+    [isRecording, liveClockTags, activeCameraTimelineVideo, selectedTimelineVideo]
   );
 
   // Get exact Game Clock Tag (e.g. "Q2 08:42") at any recording second on the timeline
@@ -5775,70 +6913,196 @@ function LiveBroadcastStudioContent() {
     [displayTimelineFrames, clockSeconds, period]
   );
 
-  // Create a Replay Scene from the selected Timeline In/Out range & Selected Camera Track (works on saved clips AND during live recording!)
-  const handleCreateReplaySceneFromTimeline = async (
-    pushImmediatelyToLive = false,
-    overrideCameraKey?: string
-  ) => {
-    const camKey = overrideCameraKey || selectedTimelineCameraKey || "clean_program";
+  // Resolve or create a StoredGameVideo specifically for a given cameraId (works during live recording, after recording, or from live rolling buffer!)
+  const resolveOrCreateVideoForCamera = async (
+    camKey: string
+  ): Promise<StoredGameVideo | null> => {
     const camInfo = availableStudioCameras.find((c) => c.cameraId === camKey);
     const camLabel = camInfo?.label || "Program Clean Feed";
 
-    let targetVideo =
+    // 1. If currently recording, flush & snapshot this specific camera's chunks & frames
+    if (isRecording) {
+      if (camKey === "clean_program") {
+        try {
+          if (mediaRecorderRef.current?.state === "recording") {
+            mediaRecorderRef.current.requestData();
+          }
+        } catch {}
+      } else {
+        try {
+          const camRec = cameraMediaRecordersRef.current[camKey];
+          if (camRec && camRec.state === "recording") {
+            camRec.requestData();
+          }
+        } catch {}
+      }
+      await new Promise((r) => setTimeout(r, 65));
+
+      const camChunks =
+        camKey === "clean_program"
+          ? recordedChunksRef.current
+          : cameraRecordedChunksRef.current[camKey] || [];
+      let camFrames =
+        camKey === "clean_program"
+          ? [...liveCaptureFramesRef.current]
+          : [
+              ...(liveCaptureFramesByCamRef.current[camKey]?.length
+                ? liveCaptureFramesByCamRef.current[camKey]
+                : rollingFramesByCamRef.current[camKey] || []),
+            ];
+
+      if (camFrames.length === 0) {
+        const srcCanvas =
+          camKey === "clean_program"
+            ? cleanLiveCanvasRef.current || liveCanvasRef.current
+            : cameraRawCanvasByKeyRef.current[camKey];
+        const fallbackSnap = captureLiveTimelineThumbnail(
+          Math.max(0, recordSeconds),
+          srcCanvas
+        );
+        if (fallbackSnap) camFrames = [fallbackSnap];
+      }
+
+      if (camChunks.length > 0 || camFrames.length > 0) {
+        const snapBlob = new Blob(camChunks, { type: "video/webm" });
+        const elapsedSec = Math.max(2, recordSeconds, camFrames.length);
+        const snapVideo: StoredGameVideo = {
+          id: generateUUID(),
+          matchId: activeMatch?.id ?? "generic-game",
+          gameNumber: activeMatch?.gameNumber ?? 1,
+          title: `[${camLabel}] Live Replay Clip (${homeTeamName} vs ${awayTeamName}) - ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`,
+          blob: snapBlob,
+          mimeType: "video/webm",
+          sizeBytes: snapBlob.size,
+          durationSeconds: elapsedSec,
+          createdAt: new Date().toISOString(),
+          thumbnailDataUrl: camFrames[0]?.dataUrl || "",
+          timelineFrames: camFrames,
+          clockTags: [...liveClockTagsRef.current],
+          homeScore,
+          awayScore,
+          homeTeamName,
+          awayTeamName,
+          cameraId: camKey,
+          cameraLabel: camLabel,
+          recordingSessionId:
+            activeRecordingSessionIdRef.current ||
+            selectedTimelineVideo?.recordingSessionId,
+          isRawCameraFootage: true,
+        };
+        await saveVideoToIndexedDB(snapVideo);
+        const list = await getAllStoredVideos();
+        setStoredVideos(list);
+        return snapVideo;
+      }
+    }
+
+    // 2. Check existing storedVideos in state, then refresh from IndexedDB in case camRec.onstop just finished
+    let existing = resolveStoredVideoForCamera(camKey, storedVideos);
+    if (!existing) {
+      const freshList = await getAllStoredVideos();
+      setStoredVideos(freshList);
+      existing = resolveStoredVideoForCamera(camKey, freshList);
+    }
+    if (existing) {
+      return existing;
+    }
+
+    // 3. Fallback: Build a StoredGameVideo for this camera from its in-memory chunks or continuous rolling frame buffer!
+    const memChunks =
       camKey === "clean_program"
-        ? selectedTimelineVideo
-        : activeCameraTimelineVideo || selectedTimelineVideo;
+        ? recordedChunksRef.current
+        : cameraRecordedChunksRef.current[camKey] || [];
+    let memFrames =
+      camKey === "clean_program"
+        ? [
+            ...(liveCaptureFramesRef.current.length
+              ? liveCaptureFramesRef.current
+              : rollingFramesByCamRef.current["clean_program"] || []),
+          ]
+        : [
+            ...(liveCaptureFramesByCamRef.current[camKey]?.length
+              ? liveCaptureFramesByCamRef.current[camKey]
+              : rollingFramesByCamRef.current[camKey] || []),
+          ];
 
-    // If currently recording, snapshot the selected camera's raw chunks (or primary clean chunks)
-    const camChunks =
-      camKey !== "clean_program" &&
-      cameraRecordedChunksRef.current[camKey] &&
-      cameraRecordedChunksRef.current[camKey].length > 0
-        ? cameraRecordedChunksRef.current[camKey]
-        : recordedChunksRef.current;
+    if (memFrames.length === 0) {
+      const srcCanvas =
+        camKey === "clean_program"
+          ? cleanLiveCanvasRef.current || liveCanvasRef.current
+          : cameraRawCanvasByKeyRef.current[camKey];
+      const snapNow = captureLiveTimelineThumbnail(0, srcCanvas);
+      if (snapNow) memFrames = [snapNow];
+    }
 
-    if (isRecording && camChunks.length > 0) {
-      const snapBlob = new Blob(camChunks, { type: "video/webm" });
-      const elapsedSec = Math.max(2, recordSeconds);
-      const snapId = generateUUID();
-      const camFrames =
-        liveCaptureFramesByCamRef.current[camKey] &&
-        liveCaptureFramesByCamRef.current[camKey].length > 0
-          ? [...liveCaptureFramesByCamRef.current[camKey]]
-          : [...liveCaptureFramesRef.current];
-      const snapVideo: StoredGameVideo = {
-        id: snapId,
+    if (memChunks.length > 0 || memFrames.length > 0) {
+      const camBlob = new Blob(memChunks, { type: "video/webm" });
+      const elapsedSec = Math.max(
+        10,
+        selectedTimelineVideo?.durationSeconds || 0,
+        memFrames.length
+      );
+      const createdCamVideo: StoredGameVideo = {
+        id: generateUUID(),
         matchId: activeMatch?.id ?? "generic-game",
         gameNumber: activeMatch?.gameNumber ?? 1,
-        title: `[${camLabel}] Live Replay Clip (${homeTeamName} vs ${awayTeamName}) - ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`,
-        blob: snapBlob,
+        title: `[${camLabel}] Camera Replay Clip (${homeTeamName} vs ${awayTeamName}) - ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`,
+        blob: camBlob,
         mimeType: "video/webm",
-        sizeBytes: snapBlob.size,
+        sizeBytes: camBlob.size,
         durationSeconds: elapsedSec,
         createdAt: new Date().toISOString(),
-        thumbnailDataUrl: camFrames[0]?.dataUrl || "",
-        timelineFrames: camFrames,
-        clockTags: [...liveClockTagsRef.current],
+        thumbnailDataUrl: memFrames[0]?.dataUrl || "",
+        timelineFrames: memFrames,
+        clockTags: [
+          ...(selectedTimelineVideo?.clockTags || liveClockTagsRef.current),
+        ],
         homeScore,
         awayScore,
         homeTeamName,
         awayTeamName,
         cameraId: camKey,
         cameraLabel: camLabel,
+        recordingSessionId:
+          selectedTimelineVideo?.recordingSessionId ||
+          activeRecordingSessionIdRef.current ||
+          undefined,
         isRawCameraFootage: true,
       };
-      await saveVideoToIndexedDB(snapVideo);
+      await saveVideoToIndexedDB(createdCamVideo);
       const list = await getAllStoredVideos();
       setStoredVideos(list);
-      targetVideo = snapVideo;
+      return createdCamVideo;
     }
 
+    return null;
+  };
+
+  // Create a Replay Scene from the selected Timeline In/Out range & Selected Camera Track (works on ALL cameras!)
+  const handleCreateReplaySceneFromTimeline = async (
+    pushImmediatelyToLive = false,
+    overrideCameraKey?: string
+  ) => {
+    const camKey =
+      overrideCameraKey || selectedTimelineCameraKey || "clean_program";
+    if (overrideCameraKey && overrideCameraKey !== selectedTimelineCameraKey) {
+      setSelectedTimelineCameraKey(overrideCameraKey);
+    }
+    const camInfo = availableStudioCameras.find((c) => c.cameraId === camKey);
+    const camLabel = camInfo?.label || "Program Clean Feed";
+
+    const targetVideo = await resolveOrCreateVideoForCamera(camKey);
     if (!targetVideo) {
-      alert("Record a game clip first so you can select a replay segment on the timeline.");
+      alert(
+        "Unable to capture replay for this camera yet. Make sure the camera is active or start live recording."
+      );
       return;
     }
 
-    const maxClipDur = Math.max(2, targetVideo.durationSeconds || activeTimelineDuration);
+    const maxClipDur = Math.max(
+      2,
+      targetVideo.durationSeconds || activeTimelineDuration
+    );
     const start = Math.max(0, Math.min(trimStartSec, trimEndSec - 0.5));
     const end = Math.max(start + 1, Math.min(trimEndSec, maxClipDur));
     const startGameClock = getGameClockLabelAtSec(start);
@@ -5880,11 +7144,52 @@ function LiveBroadcastStudioContent() {
     setTimeout(() => setTimelineNotice(null), 5000);
   };
 
+  // Switch the Camera Angle of an existing Replay Scene to any Studio Camera!
+  const handleSwitchReplaySceneCamera = async (
+    sceneId: string,
+    newCameraKey: string
+  ) => {
+    const camInfo = availableStudioCameras.find(
+      (c) => c.cameraId === newCameraKey
+    );
+    const camLabel = camInfo?.label || "Program Clean Feed";
+    setSelectedTimelineCameraKey(newCameraKey);
+    const targetVideo = await resolveOrCreateVideoForCamera(newCameraKey);
+    if (!targetVideo) return;
+
+    setScenes((prev) =>
+      prev.map((sc) => {
+        if (sc.id !== sceneId || sc.kind !== "replay_scene" || !sc.replayConfig) {
+          return sc;
+        }
+        const start = sc.replayConfig.startSec;
+        const end = sc.replayConfig.endSec;
+        const spd = sc.replayConfig.playbackRate;
+        const startGameClock = getGameClockLabelAtSec(start);
+        return {
+          ...sc,
+          name: `🎬 Replay • ${camLabel} [${startGameClock}] (${formatClock(start)}-${formatClock(end)} @ ${spd}x)`,
+          replayConfig: {
+            ...sc.replayConfig,
+            videoId: targetVideo.id,
+            videoTitle: targetVideo.title,
+            cameraId: newCameraKey,
+            cameraLabel: camLabel,
+          },
+        };
+      })
+    );
+    setTimelineNotice(
+      `🎥 Switched Replay Scene camera angle to ${camLabel}!`
+    );
+    setTimeout(() => setTimelineNotice(null), 4000);
+  };
+
   const handleScrubTimeline = useCallback(
     (sec: number) => {
       const maxDur = isRecording
         ? Math.max(10, recordSeconds)
-        : selectedTimelineVideo?.durationSeconds || 20;
+        : activeTimelineDuration;
       const clamped = Math.max(0, Math.min(maxDur, Number(sec.toFixed(1))));
       setTimelinePlayheadSec(clamped);
       if (timelineScrubVideoRef.current) {
@@ -5893,7 +7198,7 @@ function LiveBroadcastStudioContent() {
         } catch {}
       }
     },
-    [isRecording, recordSeconds, selectedTimelineVideo]
+    [isRecording, recordSeconds, activeTimelineDuration]
   );
 
   // Scroll horizontal timeline container so target second is visible & centered
@@ -5915,7 +7220,9 @@ function LiveBroadcastStudioContent() {
   const handleJumpToLatestTime = useCallback(() => {
     const latestSec = isRecording
       ? Math.max(1, recordSeconds)
-      : selectedTimelineVideo?.durationSeconds || activeTimelineDuration;
+      : activeCameraTimelineVideo?.durationSeconds ||
+        selectedTimelineVideo?.durationSeconds ||
+        activeTimelineDuration;
     const boxDur = replayBoxDurationPreset || 10;
     const start = Math.max(0, Number((latestSec - boxDur).toFixed(1)));
     const end = Number(latestSec.toFixed(1));
@@ -5930,6 +7237,7 @@ function LiveBroadcastStudioContent() {
   }, [
     isRecording,
     recordSeconds,
+    activeCameraTimelineVideo,
     selectedTimelineVideo,
     activeTimelineDuration,
     replayBoxDurationPreset,
@@ -5963,18 +7271,14 @@ function LiveBroadcastStudioContent() {
   // =====================================================================
   const ensureInspectorVideoSource = useCallback(() => {
     const vidEl = timelineScrubVideoRef.current;
-    if (!vidEl) return false;
-
     const camKey = selectedTimelineCameraKey || "clean_program";
     const camChunks =
-      camKey !== "clean_program" &&
-      cameraRecordedChunksRef.current[camKey] &&
-      cameraRecordedChunksRef.current[camKey].length > 0
-        ? cameraRecordedChunksRef.current[camKey]
-        : recordedChunksRef.current;
+      camKey === "clean_program"
+        ? recordedChunksRef.current
+        : cameraRecordedChunksRef.current[camKey] || [];
 
     // If currently recording and chunks exist for the selected camera, load live buffer blob into Inspector
-    if (isRecording && camChunks.length > 0) {
+    if (isRecording && camChunks.length > 0 && vidEl) {
       const liveBlob = new Blob(camChunks, { type: "video/webm" });
       const url = URL.createObjectURL(liveBlob);
       vidEl.src = url;
@@ -5982,14 +7286,22 @@ function LiveBroadcastStudioContent() {
       return true;
     }
 
-    const targetVid = activeCameraTimelineVideo || selectedTimelineVideo;
-    if (targetVid) {
+    const targetVid =
+      camKey === "clean_program"
+        ? activeCameraTimelineVideo || selectedTimelineVideo
+        : activeCameraTimelineVideo;
+    if (targetVid && targetVid.sizeBytes > 1000 && vidEl) {
       const currentId = vidEl.getAttribute("data-scrub-id");
       if (currentId !== targetVid.id) {
         const url = URL.createObjectURL(targetVid.blob);
         vidEl.src = url;
         vidEl.setAttribute("data-scrub-id", targetVid.id);
       }
+      return true;
+    }
+
+    // Even if only timelineFrames / rolling frames exist for this camera, Inspector can run frame-stepped slow-mo replay!
+    if (displayTimelineFrames.length > 0) {
       return true;
     }
     return false;
@@ -5999,63 +7311,93 @@ function LiveBroadcastStudioContent() {
     selectedTimelineCameraKey,
     activeCameraTimelineVideo,
     selectedTimelineVideo,
+    displayTimelineFrames.length,
   ]);
 
   const handleToggleInspectorReplay = () => {
     const vidEl = timelineScrubVideoRef.current;
-    if (!vidEl) return;
 
     if (isPlayingInspectorReplay) {
-      vidEl.pause();
+      vidEl?.pause();
       setIsPlayingInspectorReplay(false);
       return;
     }
 
     const hasSource = ensureInspectorVideoSource();
     if (!hasSource) {
-      alert("Start recording or select a saved recording first to run a replay in the Replay Inspector.");
+      alert("Start recording or activate a camera first to run a replay in the Replay Inspector.");
       return;
     }
 
-    vidEl.playbackRate = selectedReplaySpeed;
-    if (vidEl.currentTime < trimStartSec || vidEl.currentTime >= trimEndSec) {
-      vidEl.currentTime = trimStartSec;
-    }
     setTimelinePlayheadSec(trimStartSec);
     setIsPlayingInspectorReplay(true);
-    vidEl.play().catch(() => {
-      setIsPlayingInspectorReplay(false);
-    });
+    if (vidEl && vidEl.getAttribute("data-scrub-id")) {
+      vidEl.playbackRate = selectedReplaySpeed;
+      try {
+        if (vidEl.currentTime < trimStartSec || vidEl.currentTime >= trimEndSec) {
+          vidEl.currentTime = trimStartSec;
+        }
+        vidEl.play().catch(() => {});
+      } catch {}
+    }
   };
 
   const handleRestartInspectorReplay = () => {
     const vidEl = timelineScrubVideoRef.current;
-    if (!vidEl) return;
     if (!ensureInspectorVideoSource()) return;
-    vidEl.playbackRate = selectedReplaySpeed;
-    vidEl.currentTime = trimStartSec;
     setTimelinePlayheadSec(trimStartSec);
     setIsPlayingInspectorReplay(true);
-    vidEl.play().catch(() => {});
+    if (vidEl && vidEl.getAttribute("data-scrub-id")) {
+      vidEl.playbackRate = selectedReplaySpeed;
+      try {
+        vidEl.currentTime = trimStartSec;
+        vidEl.play().catch(() => {});
+      } catch {}
+    }
   };
 
-  // Loop Replay Inspector between trimStartSec and trimEndSec & advance Playhead
+  // Loop Replay Inspector between trimStartSec and trimEndSec & advance Playhead (supports both Video Blob and Frame-Buffered Cameras!)
   useEffect(() => {
     if (!isPlayingInspectorReplay) return;
     const interval = setInterval(() => {
       const vidEl = timelineScrubVideoRef.current;
-      if (!vidEl) return;
-      if (vidEl.playbackRate !== selectedReplaySpeed) {
-        vidEl.playbackRate = selectedReplaySpeed;
+      const hasReadyVideo =
+        Boolean(vidEl && vidEl.readyState >= 2 && !vidEl.paused && vidEl.videoWidth > 0) &&
+        Boolean(
+          selectedTimelineCameraKey === "clean_program" ||
+            (activeCameraTimelineVideo && activeCameraTimelineVideo.sizeBytes > 1000) ||
+            (isRecording && (cameraRecordedChunksRef.current[selectedTimelineCameraKey]?.length || 0) > 0)
+        );
+
+      if (hasReadyVideo && vidEl) {
+        if (vidEl.playbackRate !== selectedReplaySpeed) {
+          vidEl.playbackRate = selectedReplaySpeed;
+        }
+        if (vidEl.currentTime >= trimEndSec || vidEl.ended) {
+          vidEl.currentTime = trimStartSec;
+          vidEl.play().catch(() => {});
+        }
+        setTimelinePlayheadSec(Number(vidEl.currentTime.toFixed(1)));
+      } else {
+        setTimelinePlayheadSec((prev) => {
+          const next = prev + 0.08 * selectedReplaySpeed;
+          if (next >= trimEndSec || next < trimStartSec) {
+            return trimStartSec;
+          }
+          return Number(next.toFixed(1));
+        });
       }
-      if (vidEl.currentTime >= trimEndSec || vidEl.ended) {
-        vidEl.currentTime = trimStartSec;
-        vidEl.play().catch(() => {});
-      }
-      setTimelinePlayheadSec(Number(vidEl.currentTime.toFixed(1)));
     }, 80);
     return () => clearInterval(interval);
-  }, [isPlayingInspectorReplay, trimStartSec, trimEndSec, selectedReplaySpeed]);
+  }, [
+    isPlayingInspectorReplay,
+    trimStartSec,
+    trimEndSec,
+    selectedReplaySpeed,
+    selectedTimelineCameraKey,
+    activeCameraTimelineVideo,
+    isRecording,
+  ]);
 
   // Resolve any Play-by-Play Event to its exact Recording Second on the Camera Timeline
   const resolvePlayEventTimelineSec = useCallback(
@@ -6887,71 +8229,200 @@ function LiveBroadcastStudioContent() {
             />
           </div>
 
-          {/* LIVE BROADCAST GRAPHICS QUICK TOGGLES: TEAM COMPARISON STATS, SPONSOR ADS & REPLAY GAME CLOCK */}
-          <div className="px-3 py-1.5 bg-[#101726] border-t border-rose-500/30 flex flex-wrap items-center justify-between gap-1.5">
-            <div className="flex flex-wrap items-center gap-1.5">
-              <button
-                type="button"
-                onClick={() => {
-                  setShowTeamComparisonOverlay((v) => {
-                    const next = !v;
-                    if (next) setLiveFeaturedPlayerId("");
-                    return next;
-                  });
-                }}
-                className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-[0.62rem] font-black uppercase cursor-pointer border transition-all ${
-                  showTeamComparisonOverlay
-                    ? "bg-amber-500 border-amber-300 text-slate-950 shadow"
-                    : "bg-slate-900 border-slate-700 text-slate-200 hover:border-amber-400"
-                }`}
-                title="Show or hide the full Team Comparison Stats Overlay on the Live Broadcast"
-              >
-                <span>📊 {showTeamComparisonOverlay ? "Hide Team Comparison Stats" : "Team Comparison Stats"}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setShowAdOverlay((v) => !v)}
-                className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-[0.62rem] font-black uppercase cursor-pointer border transition-all ${
-                  showAdOverlay
-                    ? "bg-emerald-500 border-emerald-300 text-slate-950 shadow"
-                    : "bg-slate-900 border-slate-700 text-slate-200 hover:border-emerald-400"
-                }`}
-                title="Show or hide the uploaded Sponsor Advertisement Image Overlay on the Live Broadcast"
-              >
-                <span>
-                  📢 {showAdOverlay ? "Ad Overlay ON" : "Sponsor Ad Overlay"} ({adItems.length})
-                </span>
-              </button>
-
-              {adItems.length > 1 && showAdOverlay && (
-                <select
-                  aria-label="Select Active Advertisement Image"
-                  value={activeAdItem?.id || ""}
-                  onChange={(e) => setActiveAdId(e.target.value)}
-                  className="rounded-lg border border-emerald-500/40 bg-slate-950 px-2 py-0.5 text-[0.6rem] font-bold text-emerald-300"
+          {/* LIVE BROADCAST GRAPHICS QUICK TOGGLES: TEAM COMPARISON PER STAT, TOP PERFORMERS PER TEAM, SPONSOR ADS & REPLAY GAME CLOCK */}
+          <div className="px-3 py-1.5 bg-[#101726] border-t border-rose-500/30 space-y-1.5">
+            <div className="flex flex-wrap items-center justify-between gap-1.5">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  aria-pressed={showTeamComparisonOverlay}
+                  onClick={() => {
+                    setShowTeamComparisonOverlay((v) => {
+                      const next = !v;
+                      if (next) {
+                        setLiveFeaturedPlayerId("");
+                        setShowTopPerformersOverlay(false);
+                      }
+                      return next;
+                    });
+                  }}
+                  className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-[0.62rem] font-black uppercase cursor-pointer border transition-all ${
+                    showTeamComparisonOverlay
+                      ? "bg-amber-500 border-amber-300 text-slate-950 shadow"
+                      : "bg-slate-900 border-slate-700 text-slate-200 hover:border-amber-400"
+                  }`}
+                  title="Show or hide Team Comparison Stats Overlay on the Live Broadcast"
                 >
-                  {adItems.map((ad, idx) => (
-                    <option key={ad.id} value={ad.id}>
-                      Ad #{idx + 1}: {ad.name}
-                    </option>
-                  ))}
-                </select>
-              )}
+                  <span>
+                    📊{" "}
+                    {showTeamComparisonOverlay
+                      ? `Team Compare (${teamComparisonStatKey}) ON`
+                      : "Team Comparison Stats"}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  aria-pressed={showTopPerformersOverlay}
+                  onClick={() => {
+                    setShowTopPerformersOverlay((v) => {
+                      const next = !v;
+                      if (next) {
+                        setLiveFeaturedPlayerId("");
+                        setShowTeamComparisonOverlay(false);
+                      }
+                      return next;
+                    });
+                  }}
+                  className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-[0.62rem] font-black uppercase cursor-pointer border transition-all ${
+                    showTopPerformersOverlay
+                      ? "bg-violet-500 border-violet-300 text-white shadow"
+                      : "bg-slate-900 border-slate-700 text-slate-200 hover:border-violet-400"
+                  }`}
+                  title="Show or hide Top Performer Per Team Layer on the Live Broadcast"
+                >
+                  <span>
+                    🏆 {showTopPerformersOverlay ? "Top Performers ON" : "Top Performer Per Team"}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  aria-pressed={showAdOverlay}
+                  onClick={() => setShowAdOverlay((v) => !v)}
+                  className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-[0.62rem] font-black uppercase cursor-pointer border transition-all ${
+                    showAdOverlay
+                      ? "bg-emerald-500 border-emerald-300 text-slate-950 shadow"
+                      : "bg-slate-900 border-slate-700 text-slate-200 hover:border-emerald-400"
+                  }`}
+                  title="Show or hide the uploaded Sponsor Advertisement Image Overlay on the Live Broadcast"
+                >
+                  <span>
+                    📢 {showAdOverlay ? "Ad Overlay ON" : "Sponsor Ad Overlay"} ({adItems.length})
+                  </span>
+                </button>
+
+                {adItems.length > 1 && showAdOverlay && (
+                  <select
+                    aria-label="Select Active Advertisement Image"
+                    value={activeAdItem?.id || ""}
+                    onChange={(e) => setActiveAdId(e.target.value)}
+                    className="rounded-lg border border-emerald-500/40 bg-slate-950 px-2 py-0.5 text-[0.6rem] font-bold text-emerald-300"
+                  >
+                    {adItems.map((ad, idx) => (
+                      <option key={ad.id} value={ad.id}>
+                        Ad #{idx + 1}: {ad.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+
+              <label
+                className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 border border-slate-700 px-2 py-0.5 text-[0.6rem] font-black text-amber-300 cursor-pointer"
+                title="When replaying raw camera footage, optionally show the official Game Clock timer (ideal for buzzer-beater reviews)"
+              >
+                <input
+                  type="checkbox"
+                  checked={showReplayGameClock}
+                  onChange={(e) => setShowReplayGameClock(e.target.checked)}
+                  className="h-3 w-3 rounded accent-amber-400"
+                />
+                <span>⏱️ Show Game Clock in Replay</span>
+              </label>
             </div>
 
-            <label
-              className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 border border-slate-700 px-2 py-0.5 text-[0.6rem] font-black text-amber-300 cursor-pointer"
-              title="When replaying raw camera footage, optionally show the official Game Clock timer (ideal for buzzer-beater reviews)"
-            >
-              <input
-                type="checkbox"
-                checked={showReplayGameClock}
-                onChange={(e) => setShowReplayGameClock(e.target.checked)}
-                className="h-3 w-3 rounded accent-amber-400"
-              />
-              <span>⏱️ Show Game Clock in Replay</span>
-            </label>
+            {/* Per-Stat Team Comparison Quick Filter Chips + Top Performer Criterion Pills */}
+            <div className="flex flex-wrap items-center justify-between gap-1.5 pt-1 border-t border-slate-800/80">
+              <div className="flex flex-wrap items-center gap-1">
+                <span className="text-[0.55rem] font-black uppercase tracking-wider text-amber-300 mr-0.5">
+                  Compare Stat:
+                </span>
+                {(
+                  [
+                    { key: "ALL", label: "ALL STATS" },
+                    { key: "FG", label: "FG" },
+                    { key: "3PT", label: "3PT" },
+                    { key: "FT", label: "FT" },
+                    { key: "REB", label: "REB" },
+                    { key: "AST", label: "AST" },
+                    { key: "STL", label: "STL" },
+                    { key: "BLK", label: "BLK" },
+                    { key: "TOV", label: "TOV" },
+                    { key: "PF", label: "FOULS" },
+                  ] as const
+                ).map((item) => {
+                  const isActive =
+                    showTeamComparisonOverlay && teamComparisonStatKey === item.key;
+                  return (
+                    <button
+                      key={item.key}
+                      type="button"
+                      aria-pressed={isActive}
+                      onClick={() => {
+                        if (showTeamComparisonOverlay && teamComparisonStatKey === item.key) {
+                          setShowTeamComparisonOverlay(false);
+                        } else {
+                          setTeamComparisonStatKey(item.key);
+                          setShowTeamComparisonOverlay(true);
+                          setShowTopPerformersOverlay(false);
+                          setLiveFeaturedPlayerId("");
+                        }
+                      }}
+                      className={`rounded px-1.5 py-0.5 text-[0.56rem] font-black uppercase cursor-pointer border transition-all ${
+                        isActive
+                          ? "bg-amber-500 border-amber-300 text-slate-950 shadow"
+                          : "bg-slate-950 border-slate-800 text-slate-300 hover:border-amber-400/60"
+                      }`}
+                      title={`Compare teams by ${item.label} on Live Broadcast`}
+                    >
+                      {item.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1">
+                <span className="text-[0.55rem] font-black uppercase tracking-wider text-violet-300 mr-0.5">
+                  Top Performer:
+                </span>
+                {(
+                  [
+                    { key: "OVERALL", label: "⭐ Overall" },
+                    { key: "PTS", label: "🏀 PTS" },
+                    { key: "REB", label: "💪 REB" },
+                    { key: "AST", label: "🎯 AST" },
+                  ] as const
+                ).map((crit) => {
+                  const isActive =
+                    showTopPerformersOverlay && topPerformerCriterion === crit.key;
+                  return (
+                    <button
+                      key={crit.key}
+                      type="button"
+                      aria-pressed={isActive}
+                      onClick={() => {
+                        if (showTopPerformersOverlay && topPerformerCriterion === crit.key) {
+                          setShowTopPerformersOverlay(false);
+                        } else {
+                          setTopPerformerCriterion(crit.key);
+                          setShowTopPerformersOverlay(true);
+                          setShowTeamComparisonOverlay(false);
+                          setLiveFeaturedPlayerId("");
+                        }
+                      }}
+                      className={`rounded px-1.5 py-0.5 text-[0.56rem] font-black uppercase cursor-pointer border transition-all ${
+                        isActive
+                          ? "bg-violet-500 border-violet-300 text-white shadow"
+                          : "bg-slate-950 border-slate-800 text-slate-300 hover:border-violet-400/60"
+                      }`}
+                    >
+                      {crit.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
           </div>
 
           {/* LIVE CONTROL: ON-COURT PLAYER STATS OVERLAY (SHOWS NON-ZERO STATS IN MIDDLE OF LIVE FEED) */}
@@ -7399,18 +8870,39 @@ function LiveBroadcastStudioContent() {
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 items-stretch">
             {/* LEFT COLS: REPLAY INSPECTOR (TEST & RUN REPLAY BEFORE PUTTING IT IN LIVE) */}
             <div className="lg:col-span-3 flex flex-col justify-between rounded-xl border border-amber-500/40 bg-[#121722] p-2.5 space-y-2 shadow-lg">
-              <div className="flex items-center justify-between">
-                <span className="text-[0.65rem] font-black uppercase tracking-wider text-amber-400 flex items-center gap-1.5">
-                  <span
-                    className={`h-2 w-2 rounded-full ${
-                      isPlayingInspectorReplay ? "bg-emerald-400 animate-ping" : "bg-amber-400"
-                    }`}
-                  />
-                  Replay Inspector
-                </span>
-                <span className="rounded bg-amber-500/20 border border-amber-400/40 px-1.5 py-0.5 text-[0.6rem] font-black text-amber-300">
-                  🏀 {getGameClockLabelAtSec(timelinePlayheadSec)}
-                </span>
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[0.65rem] font-black uppercase tracking-wider text-amber-400 flex items-center gap-1.5">
+                    <span
+                      className={`h-2 w-2 rounded-full ${
+                        isPlayingInspectorReplay ? "bg-emerald-400 animate-ping" : "bg-amber-400"
+                      }`}
+                    />
+                    Replay Inspector
+                  </span>
+                  <span className="rounded bg-amber-500/20 border border-amber-400/40 px-1.5 py-0.5 text-[0.6rem] font-black text-amber-300">
+                    🏀 {getGameClockLabelAtSec(timelinePlayheadSec)}
+                  </span>
+                </div>
+
+                {/* Camera Angle Selector inside Replay Inspector */}
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[0.58rem] font-black uppercase text-slate-400 shrink-0">
+                    🎥 Cam:
+                  </span>
+                  <select
+                    aria-label="Select Camera for Replay Inspector"
+                    value={selectedTimelineCameraKey}
+                    onChange={(e) => setSelectedTimelineCameraKey(e.target.value)}
+                    className="flex-1 min-w-0 rounded-lg border border-amber-500/40 bg-slate-900 px-2 py-1 text-[0.62rem] font-black text-amber-300 focus:outline-none focus:border-amber-400 cursor-pointer"
+                  >
+                    {availableStudioCameras.map((camTrack) => (
+                      <option key={camTrack.cameraId} value={camTrack.cameraId}>
+                        {camTrack.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
 
               {/* Interactive Replay Inspector Video Monitor */}
@@ -7420,16 +8912,22 @@ function LiveBroadcastStudioContent() {
                   playsInline
                   muted
                   className={`w-full h-full object-contain ${
-                    selectedTimelineVideo || isPlayingInspectorReplay ? "block" : "hidden"
+                    (activeCameraTimelineVideo && activeCameraTimelineVideo.sizeBytes > 1000) ||
+                    isPlayingInspectorReplay
+                      ? "block"
+                      : "hidden"
                   }`}
                 />
-                {!isPlayingInspectorReplay && activePlayheadFrame && (
-                  <img
-                    src={activePlayheadFrame.dataUrl}
-                    alt="Replay Inspector Frame"
-                    className="absolute inset-0 w-full h-full object-cover pointer-events-none"
-                  />
-                )}
+                {(!isPlayingInspectorReplay ||
+                  !activeCameraTimelineVideo ||
+                  activeCameraTimelineVideo.sizeBytes <= 1000) &&
+                  activePlayheadFrame && (
+                    <img
+                      src={activePlayheadFrame.dataUrl}
+                      alt="Replay Inspector Frame"
+                      className="absolute inset-0 w-full h-full object-cover pointer-events-none"
+                    />
+                  )}
                 {!isPlayingInspectorReplay && !activePlayheadFrame && !selectedTimelineVideo && (
                   <span className="text-[0.65rem] font-bold text-slate-500 text-center px-3">
                     Start recording or select a saved clip to test-run replays here before going Live
@@ -7678,7 +9176,7 @@ function LiveBroadcastStudioContent() {
                   </div>
 
                   {/* =========================================================
-                      TRACK 3: UNCOMPRESSED CAMERA FILMSTRIP + STEADY 10-SECOND DRAGGABLE REPLAY BOX
+                      TRACK 3: ACTIVE SELECTED CAMERA FILMSTRIP + STEADY 10-SECOND DRAGGABLE REPLAY BOX
                      ========================================================= */}
                   <div
                     className="relative h-28 w-full bg-slate-900/80 overflow-hidden"
@@ -7691,6 +9189,44 @@ function LiveBroadcastStudioContent() {
                       handleSnapBoxToSecond(sec, replayBoxDurationPreset);
                     }}
                   >
+                    {/* Sticky Active Camera Header + 1-Click Replay Buttons */}
+                    <div className="sticky left-2 top-1.5 z-30 inline-flex items-center gap-1.5 rounded-lg bg-slate-950/95 border border-amber-400/60 px-2 py-0.5 shadow-md">
+                      <span className="text-[0.58rem] font-black uppercase text-amber-300">
+                        🎯 Active:{" "}
+                        {availableStudioCameras.find(
+                          (c) => c.cameraId === selectedTimelineCameraKey
+                        )?.label || "Main Program Cam"}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void handleCreateReplaySceneFromTimeline(
+                            false,
+                            selectedTimelineCameraKey
+                          );
+                        }}
+                        className="rounded bg-emerald-600 hover:bg-emerald-500 px-1.5 py-0.2 text-[0.52rem] font-black uppercase text-white cursor-pointer"
+                        title="Create Replay Scene in Preview from this camera track"
+                      >
+                        + Cue Replay
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void handleCreateReplaySceneFromTimeline(
+                            true,
+                            selectedTimelineCameraKey
+                          );
+                        }}
+                        className="rounded bg-rose-600 hover:bg-rose-500 px-1.5 py-0.2 text-[0.52rem] font-black uppercase text-white cursor-pointer"
+                        title="Push instant slow-mo Replay to Live from this camera track"
+                      >
+                        ⚡ Live Replay
+                      </button>
+                    </div>
+
                     {/* 1-Second Camera Thumbnail Tiles (Each tile is exactly timelineZoomPxPerSec wide!) */}
                     {displayTimelineFrames.length > 0 ? (
                       displayTimelineFrames.map((f, idx) => {
@@ -7852,17 +9388,17 @@ function LiveBroadcastStudioContent() {
                     .map((camTrack) => {
                       const isActiveTrack =
                         selectedTimelineCameraKey === camTrack.cameraId;
+                      const camSpecificVideo = resolveStoredVideoForCamera(
+                        camTrack.cameraId
+                      );
                       const camFrames: TimelineFrame[] = isRecording
                         ? liveRecordingFramesByCam[camTrack.cameraId] ||
-                          displayTimelineFrames
-                        : storedVideos.find(
-                            (v) =>
-                              (selectedTimelineVideo?.recordingSessionId &&
-                                v.recordingSessionId ===
-                                  selectedTimelineVideo.recordingSessionId &&
-                                v.cameraId === camTrack.cameraId) ||
-                              v.cameraId === camTrack.cameraId
-                          )?.timelineFrames || displayTimelineFrames;
+                          rollingTimelineFramesByCam[camTrack.cameraId] ||
+                          []
+                        : camSpecificVideo?.timelineFrames ||
+                          liveRecordingFramesByCam[camTrack.cameraId] ||
+                          rollingTimelineFramesByCam[camTrack.cameraId] ||
+                          [];
 
                       return (
                         <div
@@ -7938,7 +9474,7 @@ function LiveBroadcastStudioContent() {
                               >
                                 <img
                                   src={f.dataUrl}
-                                                                  alt={`${camTrack.label} ${f.timeSec}s`}
+                                  alt={`${camTrack.label} ${f.timeSec}s`}
                                   draggable={false}
                                   className="h-full w-full object-cover opacity-75 hover:opacity-100 pointer-events-none"
                                 />
@@ -7949,21 +9485,64 @@ function LiveBroadcastStudioContent() {
                             );
                           })}
 
-                          {/* Highlight Active Replay Selection Range on this Camera Track */}
+                          {/* Interactive Replay Selection Range on this Camera Track (Draggable IN/OUT + Move) */}
                           <div
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedTimelineCameraKey(camTrack.cameraId);
+                            }}
+                            onPointerDown={(e) => {
+                              setSelectedTimelineCameraKey(camTrack.cameraId);
+                              startTimelineDrag(e, "box_move");
+                            }}
+                            onPointerMove={(e) => moveTimelineDrag(e, "box_move")}
+                            onPointerUp={endTimelineDrag}
+                            onLostPointerCapture={endTimelineDrag}
                             style={{
                               left: `${trimStartSec * timelineZoomPxPerSec}px`,
                               width: `${Math.max(
                                 24,
                                 (trimEndSec - trimStartSec) * timelineZoomPxPerSec
                               )}px`,
+                              touchAction: "none",
+                              userSelect: "none",
                             }}
-                            className={`absolute top-0 bottom-0 pointer-events-none border-x-2 ${
+                            className={`absolute top-0 bottom-0 z-10 border-2 rounded cursor-grab active:cursor-grabbing ${
                               isActiveTrack
-                                ? "bg-amber-400/20 border-amber-400"
-                                : "bg-sky-500/10 border-sky-400/50"
+                                ? "bg-amber-400/20 border-amber-400 shadow-[0_0_12px_rgba(251,191,36,0.3)]"
+                                : "bg-sky-500/10 border-sky-400/60 hover:border-amber-400"
                             }`}
-                          />
+                            title={`Drag to move Replay Box on ${camTrack.label} (${formatClock(
+                              trimStartSec
+                            )}–${formatClock(trimEndSec)})`}
+                          >
+                            {/* Left Trim Handle [IN] */}
+                            <div
+                              onPointerDown={(e) => {
+                                setSelectedTimelineCameraKey(camTrack.cameraId);
+                                startTimelineDrag(e, "box_left");
+                              }}
+                              onPointerMove={(e) => moveTimelineDrag(e, "box_left")}
+                              onPointerUp={endTimelineDrag}
+                              onLostPointerCapture={endTimelineDrag}
+                              style={{ touchAction: "none", userSelect: "none" }}
+                              className="absolute left-0 top-0 bottom-0 w-2 bg-amber-400/90 hover:bg-white cursor-ew-resize"
+                              title="Drag left edge to adjust Replay Start [IN]"
+                            />
+                            {/* Right Trim Handle [OUT] */}
+                            <div
+                              onPointerDown={(e) => {
+                                setSelectedTimelineCameraKey(camTrack.cameraId);
+                                startTimelineDrag(e, "box_right");
+                              }}
+                              onPointerMove={(e) => moveTimelineDrag(e, "box_right")}
+                              onPointerUp={endTimelineDrag}
+                              onLostPointerCapture={endTimelineDrag}
+                              style={{ touchAction: "none", userSelect: "none" }}
+                              className="absolute right-0 top-0 bottom-0 w-2 bg-amber-400/90 hover:bg-white cursor-ew-resize"
+                              title="Drag right edge to adjust Replay End [OUT]"
+                            />
+                          </div>
                         </div>
                       );
                     })}
@@ -8051,8 +9630,27 @@ function LiveBroadcastStudioContent() {
               </button>
             </div>
 
-            {/* Right: Slow-Mo Speed, Replay Scene Label & Create Replay Scene Buttons */}
+            {/* Right: Camera Angle Selector, Slow-Mo Speed, Replay Scene Label & Create Replay Scene Buttons */}
             <div className="flex flex-wrap items-center justify-end gap-2">
+              {/* Camera Angle Selector for Replay */}
+              <div className="flex items-center gap-1 rounded-xl bg-slate-900 border border-slate-800 px-2 py-1">
+                <span className="text-[0.62rem] font-black uppercase text-amber-400">
+                  🎥 Replay Cam:
+                </span>
+                <select
+                  aria-label="Select Camera Angle for Replay"
+                  value={selectedTimelineCameraKey}
+                  onChange={(e) => setSelectedTimelineCameraKey(e.target.value)}
+                  className="rounded-lg bg-slate-950 border border-slate-700 px-2 py-1 text-xs font-black text-amber-300 focus:outline-none focus:border-amber-400 cursor-pointer max-w-[210px]"
+                >
+                  {availableStudioCameras.map((camTrack) => (
+                    <option key={camTrack.cameraId} value={camTrack.cameraId}>
+                      {camTrack.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
               {/* Slow Motion Speed Selector */}
               <div className="flex items-center gap-1 rounded-xl bg-slate-900 border border-slate-800 p-1">
                 <span className="text-[0.62rem] font-black uppercase text-slate-400 px-2">
@@ -8502,18 +10100,52 @@ function LiveBroadcastStudioContent() {
             )}
 
             {previewScene?.kind === "replay_scene" ? (
-              <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 space-y-2 text-xs">
+              <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 space-y-2.5 text-xs">
                 <p className="font-black text-amber-300 uppercase">
                   🎬 Replay Scene Selected
                 </p>
                 <p className="text-slate-300 text-[0.7rem]">
-                  Clip: <strong>{previewScene.replayConfig?.videoTitle}</strong>
+                  Camera: <strong className="text-amber-300">{previewScene.replayConfig?.cameraLabel || "Program Clean Feed"}</strong>
                 </p>
                 <p className="text-slate-300 text-[0.7rem]">
                   Window: <strong>{formatClock(previewScene.replayConfig?.startSec || 0)}</strong> to{" "}
                   <strong>{formatClock(previewScene.replayConfig?.endSec || 0)}</strong> at{" "}
                   <strong>{previewScene.replayConfig?.playbackRate}x Slow-Mo</strong>
                 </p>
+
+                {/* Switch Replay Camera Angle directly inside Replay Scene settings */}
+                <div className="space-y-1 pt-1 border-t border-amber-500/20">
+                  <label className="text-[0.62rem] font-black uppercase text-amber-300 block">
+                    🎥 Switch Replay Camera Angle:
+                  </label>
+                  <div className="flex flex-wrap gap-1">
+                    {availableStudioCameras.map((camTrack) => {
+                      const isCurrentReplayCam =
+                        (previewScene.replayConfig?.cameraId || "clean_program") ===
+                        camTrack.cameraId;
+                      return (
+                        <button
+                          key={camTrack.cameraId}
+                          type="button"
+                          onClick={() =>
+                            void handleSwitchReplaySceneCamera(
+                              previewScene.id,
+                              camTrack.cameraId
+                            )
+                          }
+                          className={`rounded-lg px-2 py-1 text-[0.6rem] font-black uppercase cursor-pointer border transition-all ${
+                            isCurrentReplayCam
+                              ? "bg-amber-400 border-amber-300 text-slate-950 shadow"
+                              : "bg-slate-900 border-slate-700 text-slate-200 hover:border-amber-400"
+                          }`}
+                        >
+                          {camTrack.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
                 <button
                   type="button"
                   onClick={handleCutToLive}
@@ -9142,6 +10774,45 @@ function LiveBroadcastStudioContent() {
                             </div>
                           </div>
                         )}
+
+                        {/* Direct 1-Click Replay Actions for this Camera Slot */}
+                        <div className="flex items-center justify-between gap-1.5 pt-1 border-t border-slate-800/80">
+                          <span className="text-[0.56rem] font-black uppercase text-slate-400 truncate">
+                            🎬 Instant Replay ({slot.angleName || slot.label}):
+                          </span>
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const camKey =
+                                  slot.sourceType === "wireless_phone"
+                                    ? `wireless:${(slot.wirelessRoomCode || slot.id).trim().toUpperCase()}`
+                                    : `slot:${slot.id}`;
+                                setSelectedTimelineCameraKey(camKey);
+                                void handleCreateReplaySceneFromTimeline(false, camKey);
+                              }}
+                              className="rounded bg-emerald-600 hover:bg-emerald-500 px-2 py-0.5 text-[0.55rem] font-black uppercase text-white cursor-pointer"
+                              title={`Create a Replay Scene in Preview using raw footage from ${slot.angleName || slot.label}`}
+                            >
+                              + Cue Replay
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const camKey =
+                                  slot.sourceType === "wireless_phone"
+                                    ? `wireless:${(slot.wirelessRoomCode || slot.id).trim().toUpperCase()}`
+                                    : `slot:${slot.id}`;
+                                setSelectedTimelineCameraKey(camKey);
+                                void handleCreateReplaySceneFromTimeline(true, camKey);
+                              }}
+                              className="rounded bg-rose-600 hover:bg-rose-500 px-2 py-0.5 text-[0.55rem] font-black uppercase text-white cursor-pointer"
+                              title={`Push instant slow-mo Replay to Live using raw footage from ${slot.angleName || slot.label}`}
+                            >
+                              ⚡ Live Replay
+                            </button>
+                          </div>
+                        </div>
                       </div>
                     );
                   })}
@@ -9526,11 +11197,13 @@ function LiveBroadcastStudioContent() {
                     onClick={() => setManualAwayPenaltyOverride(!isAwayInPenalty)}
                     className={`w-full rounded py-0.5 font-black uppercase border cursor-pointer ${
                       isAwayInPenalty
-                        ? "bg-rose-600 border-rose-400 text-white"
+                        ? "bg-amber-500 border-amber-300 text-slate-950"
                         : "bg-slate-900 border-slate-700 text-slate-400"
                     }`}
                   >
-                    {isAwayInPenalty ? "● PENALTY ON" : "Penalty Off"}
+                    {isAwayInPenalty
+                      ? `● BONUS ON (${awayPeriodFouls}/${bonusThreshold} PF)`
+                      : `Bonus Off (${awayPeriodFouls}/${bonusThreshold} PF)`}
                   </button>
                 </div>
 
@@ -9566,11 +11239,13 @@ function LiveBroadcastStudioContent() {
                     onClick={() => setManualHomePenaltyOverride(!isHomeInPenalty)}
                     className={`w-full rounded py-0.5 font-black uppercase border cursor-pointer ${
                       isHomeInPenalty
-                        ? "bg-rose-600 border-rose-400 text-white"
+                        ? "bg-amber-500 border-amber-300 text-slate-950"
                         : "bg-slate-900 border-slate-700 text-slate-400"
                     }`}
                   >
-                    {isHomeInPenalty ? "● PENALTY ON" : "Penalty Off"}
+                    {isHomeInPenalty
+                      ? `● BONUS ON (${homePeriodFouls}/${bonusThreshold} PF)`
+                      : `Bonus Off (${homePeriodFouls}/${bonusThreshold} PF)`}
                   </button>
                 </div>
               </div>
@@ -9691,18 +11366,22 @@ function LiveBroadcastStudioContent() {
               )}
             </div>
 
-            {/* TEAM COMPARISON STATS OVERLAY CONTROL */}
+            {/* TEAM COMPARISON STATS OVERLAY CONTROL (ALL STATS OR PER STAT: FG, REB, ETC.) */}
             <div className="rounded-lg border border-sky-500/30 bg-sky-950/15 p-2.5 space-y-2">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-[0.65rem] font-black uppercase text-sky-300">
-                  📊 Team Comparison Stats Overlay
+                  📊 Team Comparison ({teamComparisonStatKey})
                 </span>
                 <button
                   type="button"
+                  aria-pressed={showTeamComparisonOverlay}
                   onClick={() => {
                     setShowTeamComparisonOverlay((v) => {
                       const next = !v;
-                      if (next) setLiveFeaturedPlayerId("");
+                      if (next) {
+                        setLiveFeaturedPlayerId("");
+                        setShowTopPerformersOverlay(false);
+                      }
                       return next;
                     });
                   }}
@@ -9716,8 +11395,166 @@ function LiveBroadcastStudioContent() {
                 </button>
               </div>
               <p className="text-[0.6rem] text-slate-400">
-                Displays a head-to-head broadcast table comparing FG%, 3PT, FT, Rebounds, Assists, Steals, Blocks &amp; Turnovers with League &amp; Team Logos.
+                Select <strong className="text-slate-200">ALL</strong> for the full comparison table or click any stat (<strong className="text-slate-200">FG, 3PT, FT, REB, AST, STL, BLK, TOV, PF</strong>) for a broadcast lower-third comparison banner.
               </p>
+              <div className="grid grid-cols-5 gap-1">
+                {(
+                  [
+                    { key: "ALL", label: "ALL" },
+                    { key: "FG", label: "FG" },
+                    { key: "3PT", label: "3PT" },
+                    { key: "FT", label: "FT" },
+                    { key: "REB", label: "REB" },
+                    { key: "AST", label: "AST" },
+                    { key: "STL", label: "STL" },
+                    { key: "BLK", label: "BLK" },
+                    { key: "TOV", label: "TOV" },
+                    { key: "PF", label: "PF" },
+                  ] as const
+                ).map((st) => {
+                  const active = teamComparisonStatKey === st.key;
+                  return (
+                    <button
+                      key={st.key}
+                      type="button"
+                      aria-pressed={active && showTeamComparisonOverlay}
+                      onClick={() => {
+                        setTeamComparisonStatKey(st.key);
+                        setShowTeamComparisonOverlay(true);
+                        setShowTopPerformersOverlay(false);
+                        setLiveFeaturedPlayerId("");
+                      }}
+                      className={`rounded py-1 text-[0.58rem] font-black uppercase cursor-pointer border transition-all ${
+                        active && showTeamComparisonOverlay
+                          ? "bg-amber-500 border-amber-300 text-slate-950 shadow"
+                          : active
+                          ? "bg-sky-600/30 border-sky-400 text-sky-200"
+                          : "bg-slate-950 border-slate-800 text-slate-400 hover:text-white"
+                      }`}
+                    >
+                      {st.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* TOP PERFORMER PER TEAM OVERLAY LAYER CONTROL */}
+            <div className="rounded-lg border border-violet-500/30 bg-violet-950/15 p-2.5 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[0.65rem] font-black uppercase text-violet-300">
+                  🏆 Top Performer Per Team Layer
+                </span>
+                <button
+                  type="button"
+                  aria-pressed={showTopPerformersOverlay}
+                  onClick={() => {
+                    setShowTopPerformersOverlay((v) => {
+                      const next = !v;
+                      if (next) {
+                        setLiveFeaturedPlayerId("");
+                        setShowTeamComparisonOverlay(false);
+                      }
+                      return next;
+                    });
+                  }}
+                  className={`rounded-lg px-2.5 py-1 text-[0.62rem] font-black uppercase cursor-pointer border transition-all ${
+                    showTopPerformersOverlay
+                      ? "bg-violet-500 border-violet-300 text-white shadow"
+                      : "bg-slate-900 border-slate-700 text-slate-300 hover:text-white"
+                  }`}
+                >
+                  {showTopPerformersOverlay ? "● Showing on Live" : "Show on Live"}
+                </button>
+              </div>
+              <p className="text-[0.6rem] text-slate-400">
+                Displays a dual broadcast graphic featuring the #1 Top Performer from each team side-by-side (PTS, REB, AST, FG, STL/BLK).
+              </p>
+              <div className="grid grid-cols-4 gap-1">
+                {(
+                  [
+                    { key: "OVERALL", label: "⭐ Overall" },
+                    { key: "PTS", label: "🏀 PTS" },
+                    { key: "REB", label: "💪 REB" },
+                    { key: "AST", label: "🎯 AST" },
+                  ] as const
+                ).map((crit) => {
+                  const active = topPerformerCriterion === crit.key;
+                  return (
+                    <button
+                      key={crit.key}
+                      type="button"
+                      aria-pressed={active && showTopPerformersOverlay}
+                      onClick={() => {
+                        setTopPerformerCriterion(crit.key);
+                        setShowTopPerformersOverlay(true);
+                        setShowTeamComparisonOverlay(false);
+                        setLiveFeaturedPlayerId("");
+                      }}
+                      className={`rounded py-1 text-[0.58rem] font-black uppercase cursor-pointer border transition-all ${
+                        active && showTopPerformersOverlay
+                          ? "bg-violet-500 border-violet-300 text-white shadow"
+                          : active
+                          ? "bg-violet-600/30 border-violet-400 text-violet-200"
+                          : "bg-slate-950 border-slate-800 text-slate-400 hover:text-white"
+                      }`}
+                    >
+                      {crit.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="grid grid-cols-2 gap-1.5 pt-1">
+                <div>
+                  <label className="block text-[0.54rem] font-black uppercase text-slate-400 mb-0.5">
+                    {awayScorebugName} Leader:
+                  </label>
+                  <select
+                    value={manualAwayTopPerformerId}
+                    onChange={(e) => setManualAwayTopPerformerId(e.target.value)}
+                    className="w-full rounded border border-slate-700 bg-slate-950 px-1.5 py-1 text-[0.6rem] font-bold text-white"
+                  >
+                    <option value="">
+                      Auto Best (
+                      {awayTopPerformer
+                        ? `#${awayTopPerformer.jerseyNumber} ${awayTopPerformer.lastName}`
+                        : "None"}
+                      )
+                    </option>
+                    {allAwayPlayers.map((p) => (
+                      <option key={p.playerId} value={p.playerId}>
+                        #{p.jerseyNumber} {p.firstName} {p.lastName} ({p.points || 0} PTS,{" "}
+                        {(p.oreb || 0) + (p.dreb || 0)} REB, {p.ast || 0} AST)
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[0.54rem] font-black uppercase text-slate-400 mb-0.5">
+                    {homeScorebugName} Leader:
+                  </label>
+                  <select
+                    value={manualHomeTopPerformerId}
+                    onChange={(e) => setManualHomeTopPerformerId(e.target.value)}
+                    className="w-full rounded border border-slate-700 bg-slate-950 px-1.5 py-1 text-[0.6rem] font-bold text-white"
+                  >
+                    <option value="">
+                      Auto Best (
+                      {homeTopPerformer
+                        ? `#${homeTopPerformer.jerseyNumber} ${homeTopPerformer.lastName}`
+                        : "None"}
+                      )
+                    </option>
+                    {allHomePlayers.map((p) => (
+                      <option key={p.playerId} value={p.playerId}>
+                        #{p.jerseyNumber} {p.firstName} {p.lastName} ({p.points || 0} PTS,{" "}
+                        {(p.oreb || 0) + (p.dreb || 0)} REB, {p.ast || 0} AST)
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
             </div>
 
             {/* MULTIPLE ADVERTISEMENT IMAGES & OVERLAY POSITION SELECTOR */}

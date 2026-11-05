@@ -593,10 +593,6 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
       if (!current) {
         mergedSessions[mId] = cached;
       } else {
-        // If local memory has an actively ticking clock, do NOT allow stale cached session to stop or revert it
-        if (current.isClockRunning && !cached.isClockRunning) {
-          continue;
-        }
         const currentUpdated = new Date(current.updatedAt || 0).getTime();
         const cachedUpdated = new Date(cached.updatedAt || 0).getTime();
         if (cachedUpdated >= currentUpdated) {
@@ -1476,10 +1472,6 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
             if (!localSess) {
               nextGameSessions[mId] = cloudSess;
             } else {
-              // If local session currently has an active clock running, never allow cloud to overwrite or pause it
-              if (localSess.isClockRunning && !cloudSess.isClockRunning) {
-                continue;
-              }
               const cloudTime = new Date(cloudSess.updatedAt || 0).getTime();
               const localTime = new Date(localSess.updatedAt || 0).getTime();
               if (cloudTime >= localTime) {
@@ -1631,10 +1623,6 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
         if (matchId && incomingSession) {
           const currentSessions = get().gameSessionsByMatchId;
           const current = currentSessions[matchId];
-          // If we are locally running the clock and the incoming session is stopped or older, don't revert
-          if (current?.isClockRunning && !incomingSession.isClockRunning) {
-            return;
-          }
           const currentUpdated = new Date(current?.updatedAt || 0).getTime();
           const incomingUpdated = new Date(incomingSession.updatedAt || 0).getTime();
           if (!current || incomingUpdated >= currentUpdated) {
