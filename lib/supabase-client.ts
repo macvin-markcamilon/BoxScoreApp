@@ -83,6 +83,11 @@ export const supabase = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
     detectSessionInUrl: true,
     storage: customAuthStorage,
   },
+  realtime: {
+    params: {
+      eventsPerSecond: 40,
+    },
+  },
 });
 
 export function mapAuthUserToProfile(

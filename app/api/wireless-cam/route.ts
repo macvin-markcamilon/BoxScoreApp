@@ -4,8 +4,10 @@ interface RoomState {
   roomCode: string;
   camName: string;
   devicePlatform: "iphone" | "android";
+  zoomLevel: number;
   offerSdp?: RTCSessionDescriptionInit | null;
   offerId?: string;
+  offerTimestamp?: number;
   answerSdp?: RTCSessionDescriptionInit | null;
   answerForOfferId?: string;
   phoneCandidates: RTCIceCandidateInit[];
@@ -14,11 +16,24 @@ interface RoomState {
   latestFrameTs?: number;
   studioReadyTs?: number;
   phoneJoinedTs?: number;
+  isOnAir?: boolean;
+  isInPreview?: boolean;
+  liveSceneName?: string;
+  previewSceneName?: string;
+  updatedAt: number;
+}
+
+interface GlobalStudioTally {
+  onAirRoomCodes: string[];
+  previewRoomCodes: string[];
+  liveSceneName: string;
+  previewSceneName: string;
   updatedAt: number;
 }
 
 const globalForWireless = globalThis as unknown as {
   __boxscoreWirelessRooms?: Map<string, RoomState>;
+  __boxscoreWirelessTally?: GlobalStudioTally;
 };
 
 function getRoomsMap(): Map<string, RoomState> {
@@ -28,10 +43,22 @@ function getRoomsMap(): Map<string, RoomState> {
   return globalForWireless.__boxscoreWirelessRooms;
 }
 
+function getTallyState(): GlobalStudioTally {
+  if (!globalForWireless.__boxscoreWirelessTally) {
+    globalForWireless.__boxscoreWirelessTally = {
+      onAirRoomCodes: [],
+      previewRoomCodes: [],
+      liveSceneName: "Main Court",
+      previewSceneName: "Preview",
+      updatedAt: 0,
+    };
+  }
+  return globalForWireless.__boxscoreWirelessTally;
+}
+
 function getOrCreateRoom(roomCode: string): RoomState {
   const clean = roomCode.trim().toUpperCase();
   const map = getRoomsMap();
-  // Prune stale rooms older than 2 hours
   const now = Date.now();
   for (const [k, v] of map.entries()) {
     if (now - v.updatedAt > 2 * 60 * 60 * 1000) {
@@ -44,6 +71,7 @@ function getOrCreateRoom(roomCode: string): RoomState {
       roomCode: clean,
       camName: "Mobile Cam",
       devicePlatform: "iphone",
+      zoomLevel: 1,
       phoneCandidates: [],
       studioCandidates: [],
       updatedAt: now,
@@ -62,25 +90,41 @@ export async function GET(req: NextRequest) {
   }
 
   const room = getOrCreateRoom(roomCode);
+  const tally = getTallyState();
   if (role === "studio") {
     room.studioReadyTs = Date.now();
   }
+
+  const isOnAir =
+    Boolean(room.isOnAir) || tally.onAirRoomCodes.includes(room.roomCode);
+  const isInPreview =
+    Boolean(room.isInPreview) || tally.previewRoomCodes.includes(room.roomCode);
 
   return NextResponse.json({
     ok: true,
     roomCode: room.roomCode,
     camName: room.camName,
     devicePlatform: room.devicePlatform,
+    zoomLevel: room.zoomLevel || 1,
     offerSdp: room.offerSdp || null,
     offerId: room.offerId || null,
+    offerTimestamp: room.offerTimestamp || 0,
     answerSdp: room.answerSdp || null,
     answerForOfferId: room.answerForOfferId || null,
     phoneCandidates: room.phoneCandidates,
+    phoneIceCandidates: room.phoneCandidates,
     studioCandidates: room.studioCandidates,
     latestFrameDataUrl: role === "studio" ? room.latestFrameDataUrl || null : null,
     latestFrameTs: room.latestFrameTs || 0,
+    latestFrameTimestamp: room.latestFrameTs || 0,
     studioReadyTs: room.studioReadyTs || 0,
     phoneJoinedTs: room.phoneJoinedTs || 0,
+    isOnAir,
+    isInPreview,
+    liveSceneName: room.liveSceneName || tally.liveSceneName || "Main Court",
+    previewSceneName: room.previewSceneName || tally.previewSceneName || "Preview",
+    onAirRoomCodes: tally.onAirRoomCodes,
+    previewRoomCodes: tally.previewRoomCodes,
   });
 }
 
@@ -90,19 +134,48 @@ export async function POST(req: NextRequest) {
       action:
         | "phone_join"
         | "studio_ready"
+        | "studio_tally"
         | "offer"
         | "answer"
         | "phone_ice"
         | "studio_ice"
-        | "frame";
+        | "frame"
+        | "zoom";
       roomCode?: string;
       camName?: string;
       devicePlatform?: "iphone" | "android";
+      zoomLevel?: number;
       sdp?: RTCSessionDescriptionInit;
       offerId?: string;
       candidate?: RTCIceCandidateInit;
       frameDataUrl?: string;
+      onAirRoomCodes?: string[];
+      previewRoomCodes?: string[];
+      liveSceneName?: string;
+      previewSceneName?: string;
     };
+
+    const tally = getTallyState();
+    if (body.action === "studio_tally") {
+      tally.onAirRoomCodes = (body.onAirRoomCodes || []).map((r) =>
+        r.trim().toUpperCase()
+      );
+      tally.previewRoomCodes = (body.previewRoomCodes || []).map((r) =>
+        r.trim().toUpperCase()
+      );
+      if (body.liveSceneName) tally.liveSceneName = body.liveSceneName;
+      if (body.previewSceneName) tally.previewSceneName = body.previewSceneName;
+      tally.updatedAt = Date.now();
+
+      const map = getRoomsMap();
+      for (const rm of map.values()) {
+        rm.isOnAir = tally.onAirRoomCodes.includes(rm.roomCode);
+        rm.isInPreview = tally.previewRoomCodes.includes(rm.roomCode);
+        rm.liveSceneName = tally.liveSceneName;
+        rm.previewSceneName = tally.previewSceneName;
+      }
+      return NextResponse.json({ ok: true, tally });
+    }
 
     const roomCode = (body.roomCode || "").trim().toUpperCase();
     if (!roomCode) {
@@ -115,6 +188,27 @@ export async function POST(req: NextRequest) {
     if (body.camName) room.camName = body.camName;
     if (body.devicePlatform === "android" || body.devicePlatform === "iphone") {
       room.devicePlatform = body.devicePlatform;
+    }
+    if (typeof body.zoomLevel === "number" && body.zoomLevel >= 1) {
+      room.zoomLevel = Math.min(5, Math.max(1, body.zoomLevel));
+    }
+    if (Array.isArray(body.onAirRoomCodes)) {
+      tally.onAirRoomCodes = body.onAirRoomCodes.map((r) => r.trim().toUpperCase());
+      room.isOnAir = tally.onAirRoomCodes.includes(room.roomCode);
+    }
+    if (Array.isArray(body.previewRoomCodes)) {
+      tally.previewRoomCodes = body.previewRoomCodes.map((r) =>
+        r.trim().toUpperCase()
+      );
+      room.isInPreview = tally.previewRoomCodes.includes(room.roomCode);
+    }
+    if (body.liveSceneName) {
+      tally.liveSceneName = body.liveSceneName;
+      room.liveSceneName = body.liveSceneName;
+    }
+    if (body.previewSceneName) {
+      tally.previewSceneName = body.previewSceneName;
+      room.previewSceneName = body.previewSceneName;
     }
 
     switch (body.action) {
@@ -130,6 +224,7 @@ export async function POST(req: NextRequest) {
         if (body.sdp) {
           room.offerSdp = body.sdp;
           room.offerId = body.offerId || `${Date.now()}`;
+          room.offerTimestamp = Date.now();
           room.answerSdp = null;
           room.answerForOfferId = undefined;
           room.phoneCandidates = [];
@@ -164,7 +259,15 @@ export async function POST(req: NextRequest) {
         }
         break;
       }
+      case "zoom": {
+        break;
+      }
     }
+
+    const isOnAir =
+      Boolean(room.isOnAir) || tally.onAirRoomCodes.includes(room.roomCode);
+    const isInPreview =
+      Boolean(room.isInPreview) || tally.previewRoomCodes.includes(room.roomCode);
 
     return NextResponse.json({
       ok: true,
@@ -173,6 +276,12 @@ export async function POST(req: NextRequest) {
       answerSdp: room.answerSdp || null,
       answerForOfferId: room.answerForOfferId || null,
       studioCandidates: room.studioCandidates,
+      isOnAir,
+      isInPreview,
+      liveSceneName: room.liveSceneName || tally.liveSceneName || "Main Court",
+      previewSceneName: room.previewSceneName || tally.previewSceneName || "Preview",
+      onAirRoomCodes: tally.onAirRoomCodes,
+      previewRoomCodes: tally.previewRoomCodes,
     });
   } catch (err) {
     return NextResponse.json(

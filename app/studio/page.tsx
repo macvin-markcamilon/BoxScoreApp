@@ -1454,6 +1454,11 @@ function LiveBroadcastStudioContent() {
     }
   }, [liveSession?.playEvents, isRecording, recordSeconds]);
 
+  // Wireless Hub Channel, Per-Room Zoom Level & Last Active Wireless Room Refs
+  const wirelessHubChannelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+  const wirelessZoomByRoomRef = useRef<Record<string, number>>({});
+  const lastConnectedWirelessRoomRef = useRef<string>("");
+
   // Helper to mount hidden <video> elements in the DOM so Chromium & WebKit always decode WebRTC/Camera streams
   const mountHiddenVideoElement = (vid: HTMLVideoElement) => {
     if (typeof document === "undefined") return;
@@ -1530,6 +1535,9 @@ function LiveBroadcastStudioContent() {
         remoteStream?: MediaStream,
         relayImg?: HTMLImageElement
       ) => {
+        if (status === "webrtc" || status === "relay") {
+          lastConnectedWirelessRoomRef.current = roomCode;
+        }
         if (remoteStream) {
           streamBySlotRef.current[slot.id] = remoteStream;
           const slotVid = getOrCreateSlotVideoElement(slot.id);
@@ -1548,14 +1556,30 @@ function LiveBroadcastStudioContent() {
         );
         setScenes((currentScenes) => {
           const matchingIds: string[] = [slot.id];
-          for (const sc of currentScenes) {
-            for (const c of sc.cameras) {
+          let didUpdateSceneRoom = false;
+          const nextScenes = currentScenes.map((sc) => {
+            const wirelessSlotsInScene = sc.cameras.filter(
+              (cam) => cam.sourceType === "wireless_phone"
+            );
+            const updatedCams = sc.cameras.map((c) => {
+              if (c.sourceType !== "wireless_phone") return c;
               const cRoom = (
                 c.wirelessRoomCode || `CAM${c.id.slice(-4).toUpperCase()}`
               )
                 .trim()
                 .toUpperCase();
-              if (c.sourceType === "wireless_phone" && cRoom === roomCode) {
+              const isCConnected =
+                Boolean(wirelessStreamByRoomRef.current[cRoom]?.active) ||
+                Boolean(wirelessFrameImgByRoomRef.current[cRoom]?.complete && wirelessFrameImgByRoomRef.current[cRoom]?.naturalWidth > 0);
+
+              // Auto-bind if this slot matches roomCode OR if this scene has a single unconnected wireless slot
+              const shouldAutoBind =
+                cRoom === roomCode ||
+                ((status === "webrtc" || status === "relay") &&
+                  !isCConnected &&
+                  wirelessSlotsInScene.length === 1);
+
+              if (shouldAutoBind) {
                 matchingIds.push(c.id);
                 if (remoteStream) {
                   streamBySlotRef.current[c.id] = remoteStream;
@@ -1568,9 +1592,16 @@ function LiveBroadcastStudioContent() {
                 if (relayImg) {
                   wirelessFrameImgBySlotRef.current[c.id] = relayImg;
                 }
+                if (cRoom !== roomCode) {
+                  didUpdateSceneRoom = true;
+                  return { ...c, wirelessRoomCode: roomCode };
+                }
               }
-            }
-          }
+              return c;
+            });
+            return didUpdateSceneRoom ? { ...sc, cameras: updatedCams } : sc;
+          });
+
           setActiveSlotIds((prev) => {
             const next = { ...prev };
             for (const id of matchingIds) next[id] = true;
@@ -1584,7 +1615,7 @@ function LiveBroadcastStudioContent() {
             }
             return next;
           });
-          return currentScenes;
+          return didUpdateSceneRoom ? nextScenes : currentScenes;
         });
       };
 
@@ -1612,6 +1643,13 @@ function LiveBroadcastStudioContent() {
             event: "studio_ready",
             payload: { roomCode },
           });
+          if (wirelessHubChannelRef.current) {
+            void wirelessHubChannelRef.current.send({
+              type: "broadcast",
+              event: "studio_ready",
+              payload: { roomCode },
+            });
+          }
           void fetch("/api/wireless-cam", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -1643,7 +1681,10 @@ function LiveBroadcastStudioContent() {
       pendingIceCandidatesByRoomRef.current[roomCode] = [];
       wirelessHandledOfferTsByRoomRef.current[roomCode] = 0;
 
-      const syncDetectedPhonePlatform = (rawPlatform?: unknown) => {
+      const syncDetectedPhonePlatform = (rawPlatform?: unknown, rawZoom?: unknown) => {
+        if (typeof rawZoom === "number" && rawZoom >= 1) {
+          wirelessZoomByRoomRef.current[roomCode] = Math.min(5, Math.max(1, rawZoom));
+        }
         if (rawPlatform !== "iphone" && rawPlatform !== "android") return;
         const validPlatform: WirelessDevicePlatform = rawPlatform;
         setScenes((prev) =>
@@ -1689,12 +1730,14 @@ function LiveBroadcastStudioContent() {
       let isHandlingOffer = false;
       const handleIncomingWebRtcOffer = async (
         sdp: RTCSessionDescriptionInit,
-        devicePlatform?: unknown
+        devicePlatform?: unknown,
+        offerId?: string,
+        zoomLevel?: unknown
       ) => {
         if (isHandlingOffer) return;
         isHandlingOffer = true;
         try {
-          syncDetectedPhonePlatform(devicePlatform);
+          syncDetectedPhonePlatform(devicePlatform, zoomLevel);
           if (wirelessPcByRoomRef.current[roomCode]) {
             try {
               wirelessPcByRoomRef.current[roomCode].close();
@@ -1746,20 +1789,30 @@ function LiveBroadcastStudioContent() {
           pc.onicecandidate = (ev) => {
             if (ev.candidate) {
               const candidateJson = ev.candidate.toJSON();
+              const icePayload = {
+                roomCode,
+                offerId,
+                candidate: candidateJson,
+              };
               void ch.send({
                 type: "broadcast",
                 event: "webrtc_ice_from_studio",
-                payload: {
-                  roomCode,
-                  candidate: candidateJson,
-                },
+                payload: icePayload,
               });
+              if (wirelessHubChannelRef.current) {
+                void wirelessHubChannelRef.current.send({
+                  type: "broadcast",
+                  event: "webrtc_ice_from_studio",
+                  payload: icePayload,
+                });
+              }
               void fetch("/api/wireless-cam", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                   roomCode,
                   action: "studio_ice",
+                  offerId,
                   candidate: candidateJson,
                 }),
               }).catch(() => {});
@@ -1775,20 +1828,31 @@ function LiveBroadcastStudioContent() {
           const answer = await pc.createAnswer();
           await pc.setLocalDescription(answer);
 
+          const answerPayload = {
+            roomCode,
+            offerId,
+            sdp: pc.localDescription,
+          };
+
           await ch.send({
             type: "broadcast",
             event: "webrtc_answer",
-            payload: {
-              roomCode,
-              sdp: pc.localDescription,
-            },
+            payload: answerPayload,
           });
+          if (wirelessHubChannelRef.current) {
+            void wirelessHubChannelRef.current.send({
+              type: "broadcast",
+              event: "webrtc_answer",
+              payload: answerPayload,
+            });
+          }
 
           await fetch("/api/wireless-cam", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               roomCode,
+              offerId,
               action: "answer",
               sdp: pc.localDescription,
             }),
@@ -1803,10 +1867,11 @@ function LiveBroadcastStudioContent() {
       // Shared Relay Frame Handler (invoked by either Supabase Realtime OR HTTP Signaling Poll)
       const handleIncomingRelayFrame = (
         frameDataUrl: string,
-        devicePlatform?: unknown
+        devicePlatform?: unknown,
+        zoomLevel?: unknown
       ) => {
         if (!frameDataUrl) return;
-        syncDetectedPhonePlatform(devicePlatform);
+        syncDetectedPhonePlatform(devicePlatform, zoomLevel);
 
         // If direct WebRTC P2P is already actively decoding frames, prefer WebRTC HD
         const roomVid = wirelessVideoElByRoomRef.current[roomCode];
@@ -1827,7 +1892,7 @@ function LiveBroadcastStudioContent() {
       };
 
       ch.on("broadcast", { event: "phone_joined" }, ({ payload }) => {
-        syncDetectedPhonePlatform(payload?.devicePlatform);
+        syncDetectedPhonePlatform(payload?.devicePlatform, payload?.zoomLevel);
         void ch.send({
           type: "broadcast",
           event: "studio_ready",
@@ -1837,7 +1902,12 @@ function LiveBroadcastStudioContent() {
         .on("broadcast", { event: "webrtc_offer" }, async ({ payload }) => {
           if (!payload?.sdp) return;
           wirelessHandledOfferTsByRoomRef.current[roomCode] = Date.now();
-          await handleIncomingWebRtcOffer(payload.sdp, payload?.devicePlatform);
+          await handleIncomingWebRtcOffer(
+            payload.sdp,
+            payload?.devicePlatform,
+            payload?.offerId,
+            payload?.zoomLevel
+          );
         })
         .on(
           "broadcast",
@@ -1858,11 +1928,20 @@ function LiveBroadcastStudioContent() {
             } catch {}
           }
         )
+        .on("broadcast", { event: "camera_zoom" }, ({ payload }) => {
+          if (typeof payload?.zoomLevel === "number") {
+            wirelessZoomByRoomRef.current[roomCode] = Math.min(
+              5,
+              Math.max(1, payload.zoomLevel)
+            );
+          }
+        })
         .on("broadcast", { event: "video_frame" }, ({ payload }) => {
           if (!payload?.frameDataUrl) return;
           handleIncomingRelayFrame(
             payload.frameDataUrl,
-            payload?.devicePlatform
+            payload?.devicePlatform,
+            payload?.zoomLevel
           );
         })
         .subscribe((status) => {
@@ -1875,7 +1954,7 @@ function LiveBroadcastStudioContent() {
           }
         });
 
-      // Notify HTTP signaling endpoint that Studio is ready & poll every 400ms for HTTP WebRTC offers + live JPEG frames
+      // Notify HTTP signaling endpoint that Studio is ready & poll every 450ms for HTTP WebRTC offers + live JPEG frames
       void fetch("/api/wireless-cam", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1892,42 +1971,44 @@ function LiveBroadcastStudioContent() {
           const data = (await res.json()) as {
             ok?: boolean;
             devicePlatform?: "iphone" | "android";
+            zoomLevel?: number;
             offerSdp?: RTCSessionDescriptionInit | null;
+            offerId?: string | null;
             offerTimestamp?: number;
             phoneIceCandidates?: RTCIceCandidateInit[];
+            phoneCandidates?: RTCIceCandidateInit[];
             latestFrameDataUrl?: string | null;
             latestFrameTimestamp?: number;
+            latestFrameTs?: number;
           };
 
-          if (data.devicePlatform) {
-            syncDetectedPhonePlatform(data.devicePlatform);
+          if (data.devicePlatform || data.zoomLevel) {
+            syncDetectedPhonePlatform(data.devicePlatform, data.zoomLevel);
           }
 
+          const offerTs = data.offerTimestamp || 0;
           if (
             data.offerSdp &&
-            data.offerTimestamp &&
-            data.offerTimestamp >
-              (wirelessHandledOfferTsByRoomRef.current[roomCode] || 0)
+            offerTs > (wirelessHandledOfferTsByRoomRef.current[roomCode] || 0)
           ) {
-            wirelessHandledOfferTsByRoomRef.current[roomCode] =
-              data.offerTimestamp;
+            wirelessHandledOfferTsByRoomRef.current[roomCode] = offerTs;
             await handleIncomingWebRtcOffer(
               data.offerSdp,
-              data.devicePlatform
+              data.devicePlatform,
+              data.offerId || undefined,
+              data.zoomLevel
             );
           }
 
-          if (
-            Array.isArray(data.phoneIceCandidates) &&
-            data.phoneIceCandidates.length > 0
-          ) {
+          const iceCands = data.phoneIceCandidates || data.phoneCandidates || [];
+          if (Array.isArray(iceCands) && iceCands.length > 0) {
             const pc =
               wirelessPcByRoomRef.current[roomCode] ||
               wirelessPcBySlotRef.current[slot.id];
             if (!pendingIceCandidatesByRoomRef.current[roomCode]) {
               pendingIceCandidatesByRoomRef.current[roomCode] = [];
             }
-            for (const cand of data.phoneIceCandidates) {
+            for (const cand of iceCands) {
               await addIceCandidateSafely(
                 pc,
                 cand,
@@ -1936,20 +2017,22 @@ function LiveBroadcastStudioContent() {
             }
           }
 
+          const frameTs = data.latestFrameTimestamp || data.latestFrameTs || 0;
           if (
             data.latestFrameDataUrl &&
-            data.latestFrameTimestamp &&
-            Date.now() - data.latestFrameTimestamp < 12000
+            frameTs > 0 &&
+            Date.now() - frameTs < 12000
           ) {
             handleIncomingRelayFrame(
               data.latestFrameDataUrl,
-              data.devicePlatform
+              data.devicePlatform,
+              data.zoomLevel
             );
           }
         } catch {
           // ignore network poll blips
         }
-      }, 400);
+      }, 450);
     },
     []
   );
@@ -2128,7 +2211,166 @@ function LiveBroadcastStudioContent() {
     }
   }, [selectedTimelineVideo]);
 
-  // Helper: Draw a single Camera Slot (Real Webcam, Screen, or Simulated Court Angle) into a target rect
+  // Global Wireless Camera Hub Subscription + Real-Time ON AIR / PREVIEW Tally Broadcaster
+  useEffect(() => {
+    const hubCh = supabase.channel("boxscore-wireless-cam-hub", {
+      config: { broadcast: { self: false } },
+    });
+    wirelessHubChannelRef.current = hubCh;
+
+    const ensureRoomConnected = (payload?: {
+      roomCode?: string;
+      camName?: string;
+      devicePlatform?: "iphone" | "android";
+      zoomLevel?: number;
+    }) => {
+      const incomingRoom = String(payload?.roomCode || "")
+        .trim()
+        .toUpperCase();
+      if (!incomingRoom) return null;
+      if (typeof payload?.zoomLevel === "number" && payload.zoomLevel >= 1) {
+        wirelessZoomByRoomRef.current[incomingRoom] = Math.min(
+          5,
+          Math.max(1, payload.zoomLevel)
+        );
+      }
+      if (!wirelessChannelByRoomRef.current[incomingRoom]) {
+        connectWirelessPhoneSlot({
+          id: `hub-${incomingRoom}`,
+          label: payload?.camName || `Mobile Cam (${incomingRoom})`,
+          sourceType: "wireless_phone",
+          deviceId: "",
+          angleName: (payload?.camName || incomingRoom).toUpperCase(),
+          wirelessRoomCode: incomingRoom,
+          wirelessPlatform: payload?.devicePlatform || "iphone",
+        });
+      }
+      return incomingRoom;
+    };
+
+    hubCh
+      .on("broadcast", { event: "phone_joined" }, ({ payload }) => {
+        const rm = ensureRoomConnected(payload);
+        if (rm) {
+          void hubCh.send({
+            type: "broadcast",
+            event: "studio_ready",
+            payload: { roomCode: rm },
+          });
+        }
+      })
+      .on("broadcast", { event: "camera_zoom" }, ({ payload }) => {
+        const rm = String(payload?.roomCode || "").trim().toUpperCase();
+        if (rm && typeof payload?.zoomLevel === "number") {
+          wirelessZoomByRoomRef.current[rm] = Math.min(
+            5,
+            Math.max(1, payload.zoomLevel)
+          );
+        }
+      })
+      .on("broadcast", { event: "video_frame" }, ({ payload }) => {
+        const rm = ensureRoomConnected(payload);
+        if (!rm || !payload?.frameDataUrl) return;
+        lastConnectedWirelessRoomRef.current = rm;
+        const roomVid = wirelessVideoElByRoomRef.current[rm];
+        const isWebRtcDecoding =
+          Boolean(wirelessStreamByRoomRef.current[rm]?.active) &&
+          Boolean(roomVid && roomVid.readyState >= 2);
+        if (isWebRtcDecoding) return;
+
+        if (!wirelessFrameImgByRoomRef.current[rm]) {
+          wirelessFrameImgByRoomRef.current[rm] = new Image();
+        }
+        wirelessFrameImgByRoomRef.current[rm].src = payload.frameDataUrl;
+        setWirelessStatusByRoom((prev) =>
+          prev[rm] === "webrtc" ? prev : { ...prev, [rm]: "relay" }
+        );
+      })
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(hubCh);
+      wirelessHubChannelRef.current = null;
+    };
+  }, [connectWirelessPhoneSlot]);
+
+  // Broadcast ON AIR & PREVIEW Tally State to all connected Wireless Mobile Cameras in real-time
+  useEffect(() => {
+    const broadcastTallyState = () => {
+      const onAirSet = new Set<string>();
+      const previewSet = new Set<string>();
+
+      if (liveScene?.kind === "camera_scene") {
+        for (const c of liveScene.cameras) {
+          if (c.sourceType === "wireless_phone") {
+            const r = (
+              c.wirelessRoomCode || `CAM${c.id.slice(-4).toUpperCase()}`
+            )
+              .trim()
+              .toUpperCase();
+            onAirSet.add(r);
+            if (lastConnectedWirelessRoomRef.current) {
+              onAirSet.add(lastConnectedWirelessRoomRef.current);
+            }
+          }
+        }
+      }
+
+      if (previewScene?.kind === "camera_scene") {
+        for (const c of previewScene.cameras) {
+          if (c.sourceType === "wireless_phone") {
+            const r = (
+              c.wirelessRoomCode || `CAM${c.id.slice(-4).toUpperCase()}`
+            )
+              .trim()
+              .toUpperCase();
+            previewSet.add(r);
+            if (lastConnectedWirelessRoomRef.current) {
+              previewSet.add(lastConnectedWirelessRoomRef.current);
+            }
+          }
+        }
+      }
+
+      const tallyPayload = {
+        onAirRoomCodes: Array.from(onAirSet),
+        previewRoomCodes: Array.from(previewSet),
+        liveSceneName: liveScene?.name || "Main Court",
+        previewSceneName: previewScene?.name || "Preview",
+      };
+
+      if (wirelessHubChannelRef.current) {
+        void wirelessHubChannelRef.current.send({
+          type: "broadcast",
+          event: "studio_tally_state",
+          payload: tallyPayload,
+        });
+      }
+      Object.values(wirelessChannelByRoomRef.current).forEach((ch) => {
+        try {
+          void ch.send({
+            type: "broadcast",
+            event: "studio_tally_state",
+            payload: tallyPayload,
+          });
+        } catch {}
+      });
+      void fetch("/api/wireless-cam", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "studio_tally",
+          ...tallyPayload,
+        }),
+      }).catch(() => {});
+    };
+
+    broadcastTallyState();
+    const interval = setInterval(broadcastTallyState, 2000);
+    return () => clearInterval(interval);
+  }, [liveScene, previewScene, scenes, wirelessStatusByRoom]);
+
+  // Helper: Draw a single Camera Slot (Real Webcam, Screen, Wireless Phone, or Simulated Court Angle) into a target rect
   const drawCameraSlotRect = useCallback(
     (
       ctx: CanvasRenderingContext2D,
@@ -2145,7 +2387,7 @@ function LiveBroadcastStudioContent() {
       ctx.rect(rx, ry, rw, rh);
       ctx.clip();
 
-      const roomKey =
+      const rawRoomKey =
         slot.sourceType === "wireless_phone"
           ? (
               slot.wirelessRoomCode || `CAM${slot.id.slice(-4).toUpperCase()}`
@@ -2153,16 +2395,28 @@ function LiveBroadcastStudioContent() {
               .trim()
               .toUpperCase()
           : "";
+      const hasDirectRoomFeed =
+        Boolean(rawRoomKey && wirelessVideoElByRoomRef.current[rawRoomKey]?.readyState && wirelessVideoElByRoomRef.current[rawRoomKey].readyState >= 2) ||
+        Boolean(rawRoomKey && wirelessFrameImgByRoomRef.current[rawRoomKey]?.complete && wirelessFrameImgByRoomRef.current[rawRoomKey].naturalWidth > 0);
+      const effectiveRoomKey =
+        slot.sourceType === "wireless_phone" &&
+        !hasDirectRoomFeed &&
+        lastConnectedWirelessRoomRef.current
+          ? lastConnectedWirelessRoomRef.current
+          : rawRoomKey;
+
       const vidEl =
-        (roomKey && wirelessVideoElByRoomRef.current[roomKey]) ||
+        (effectiveRoomKey && wirelessVideoElByRoomRef.current[effectiveRoomKey]) ||
         videoElBySlotRef.current[slot.id];
       const wirelessImgEl =
-        (roomKey && wirelessFrameImgByRoomRef.current[roomKey]) ||
+        (effectiveRoomKey && wirelessFrameImgByRoomRef.current[effectiveRoomKey]) ||
         wirelessFrameImgBySlotRef.current[slot.id];
       const isWirelessSlotEnabled =
         slot.sourceType === "wireless_phone" &&
         activeSlotIds[slot.id] !== false &&
-        (Boolean(activeSlotIds[slot.id]) || Boolean(wirelessStatusByRoom[roomKey]));
+        (Boolean(activeSlotIds[slot.id]) ||
+          Boolean(wirelessStatusByRoom[effectiveRoomKey]) ||
+          Boolean(lastConnectedWirelessRoomRef.current));
       const isStreamReady =
         slot.sourceType !== "court_sim" &&
         (slot.sourceType === "wireless_phone"
@@ -2178,15 +2432,24 @@ function LiveBroadcastStudioContent() {
         wirelessImgEl.naturalWidth > 0;
 
       if (isStreamReady && vidEl) {
-        // Draw live webcam / capture card / WebRTC wireless phone stream with object-cover scaling
+        // Draw live webcam / capture card / WebRTC wireless phone stream with object-cover scaling + digital zoom crop
         const vw = vidEl.videoWidth || 1280;
         const vh = vidEl.videoHeight || 720;
-        const scale = Math.max(rw / vw, rh / vh);
-        const dw = vw * scale;
-        const dh = vh * scale;
+        const zoomFactor =
+          slot.sourceType === "wireless_phone" && effectiveRoomKey
+            ? Math.max(1, wirelessZoomByRoomRef.current[effectiveRoomKey] || 1)
+            : 1;
+        const srcW = vw / zoomFactor;
+        const srcH = vh / zoomFactor;
+        const srcX = (vw - srcW) / 2;
+        const srcY = (vh - srcH) / 2;
+
+        const scale = Math.max(rw / srcW, rh / srcH);
+        const dw = srcW * scale;
+        const dh = srcH * scale;
         const dx = rx + (rw - dw) / 2;
         const dy = ry + (rh - dh) / 2;
-        ctx.drawImage(vidEl, dx, dy, dw, dh);
+        ctx.drawImage(vidEl, srcX, srcY, srcW, srcH, dx, dy, dw, dh);
       } else if (isWirelessImgReady && wirelessImgEl) {
         // Draw wireless phone relay / IP camera frame with object-cover scaling
         const iw = wirelessImgEl.naturalWidth || 640;
@@ -4578,11 +4841,38 @@ function LiveBroadcastStudioContent() {
     if (!previewScene || previewScene.kind !== "camera_scene") return;
     const nextIdx = previewScene.cameras.length + 1;
     const slotId = `cam-${generateUUID().slice(0, 8)}`;
-    const roomCode = `CAM${Math.floor(100 + Math.random() * 900)}`;
+
+    // Reuse an existing saved or active wireless roomCode if this scene doesn't already use it
+    const existingSceneWirelessRooms = new Set(
+      previewScene.cameras
+        .filter((c) => c.sourceType === "wireless_phone")
+        .map((c) => (c.wirelessRoomCode || "").trim().toUpperCase())
+    );
+    const reusableSaved = savedWirelessCameras.find(
+      (w) => !existingSceneWirelessRooms.has(w.roomCode.toUpperCase())
+    );
+    const reusableRoomFromOtherScene = scenes
+      .flatMap((s) => s.cameras)
+      .find(
+        (c) =>
+          c.sourceType === "wireless_phone" &&
+          c.wirelessRoomCode &&
+          !existingSceneWirelessRooms.has(c.wirelessRoomCode.toUpperCase())
+      )?.wirelessRoomCode;
+
+    const roomCode = (
+      reusableSaved?.roomCode ||
+      reusableRoomFromOtherScene ||
+      lastConnectedWirelessRoomRef.current ||
+      `CAM${Math.floor(100 + Math.random() * 900)}`
+    )
+      .trim()
+      .toUpperCase();
     const defaultLabel =
-      platform === "android"
+      reusableSaved?.name ||
+      (platform === "android"
         ? `Android Cam ${nextIdx}`
-        : `iPhone Cam ${nextIdx}`;
+        : `iPhone Cam ${nextIdx}`);
     const newSlot: SceneCameraSlot = {
       id: slotId,
       label: defaultLabel,
@@ -4591,7 +4881,8 @@ function LiveBroadcastStudioContent() {
       angleName: defaultLabel.toUpperCase(),
       wirelessRoomCode: roomCode,
       wirelessIpUrl: "",
-      wirelessPlatform: platform,
+      wirelessPlatform: reusableSaved?.platform || platform,
+      savedWirelessCamId: reusableSaved?.id,
     };
 
     setScenes((prev) =>
