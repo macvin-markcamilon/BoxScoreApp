@@ -225,6 +225,13 @@ dialog::backdrop {
   .bg-emerald-600, .bg-emerald-600 *,
   .bg-sky-600, .bg-sky-600 *,
   .bg-purple-600, .bg-purple-600 *,
+  .bg-indigo-600, .bg-indigo-600 *,
+  .bg-violet-600, .bg-violet-600 *,
+  .bg-teal-600, .bg-teal-600 *,
+  .from-indigo-600, .from-indigo-600 *,
+  .from-violet-600, .from-violet-600 *,
+  .from-emerald-600, .from-emerald-600 *,
+  .from-rose-600, .from-rose-600 *,
   .studio-video-viewport, .studio-video-viewport *
 ) {
   color: #0f172a !important;

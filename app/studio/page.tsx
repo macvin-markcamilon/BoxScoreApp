@@ -375,8 +375,12 @@ function LiveBroadcastStudioContent() {
   const [showOverlayInPreview, setShowOverlayInPreview] = useState<boolean>(true);
   const [newSceneNameInput, setNewSceneNameInput] = useState<string>("");
 
-  // Custom / League Logo Transition (Stinger Wipe) State & Refs
+  // Custom / League Logo Transition (Stinger Wipe) State, Design & Duration
   const [customTransitionLogoUrl, setCustomTransitionLogoUrl] = useState<string>("");
+  const [transitionDurationMs, setTransitionDurationMs] = useState<number>(850);
+  const [selectedTransitionDesign, setSelectedTransitionDesign] = useState<
+    "slash_wipe" | "split_doors" | "diamond_burst"
+  >("slash_wipe");
   const transitionLogoImgRef = useRef<HTMLImageElement | null>(null);
   const stingerStateRef = useRef<{
     active: boolean;
@@ -384,12 +388,14 @@ function LiveBroadcastStudioContent() {
     durationMs: number;
     switchedScene: boolean;
     targetSceneId: string;
+    design: "slash_wipe" | "split_doors" | "diamond_burst" | "curtain_wipe";
   }>({
     active: false,
     startMs: 0,
     durationMs: 850,
     switchedScene: false,
     targetSceneId: "",
+    design: "slash_wipe",
   });
 
   // Audio Sources & Mixer State (Microphones + Uploaded Audio Files / BGM / SFX)
@@ -1461,11 +1467,43 @@ function LiveBroadcastStudioContent() {
           "boxscore_studio_transition_logo"
         );
         if (savedLogo) setCustomTransitionLogoUrl(savedLogo);
+        const savedDuration = window.localStorage.getItem(
+          "boxscore_studio_transition_duration"
+        );
+        if (savedDuration) {
+          const parsed = Number(savedDuration);
+          if (Number.isFinite(parsed) && parsed >= 150 && parsed <= 5000) {
+            setTransitionDurationMs(parsed);
+          }
+        }
+        const savedDesign = window.localStorage.getItem(
+          "boxscore_studio_transition_design"
+        );
+        if (
+          savedDesign === "slash_wipe" ||
+          savedDesign === "split_doors" ||
+          savedDesign === "diamond_burst"
+        ) {
+          setSelectedTransitionDesign(savedDesign);
+        }
       } catch {
         // ignore
       }
     }
   }, [refreshCameraDevices]);
+
+  const handleUpdateTransitionDuration = useCallback((ms: number) => {
+    const clamped = Math.max(150, Math.min(5000, Math.round(ms)));
+    setTransitionDurationMs(clamped);
+    try {
+      window.localStorage.setItem(
+        "boxscore_studio_transition_duration",
+        String(clamped)
+      );
+    } catch {
+      // ignore
+    }
+  }, []);
 
   // Active Transition Logo URL (Uploaded Custom Logo -> Active League Logo)
   const effectiveTransitionLogoUrl =
@@ -5000,104 +5038,80 @@ function LiveBroadcastStudioContent() {
     ]
   );
 
-  // Helper: Draw Broadcast Logo Stinger Wipe Transition on Live Program Canvas
+  // Helper: Draw 100% Solid Opaque Broadcast Transitions on Live Program Canvas (Slash Wipe, Split Doors, Diamond Shield Burst & Solid Curtain)
   const drawLogoStingerOverlay = useCallback(
     (
       ctx: CanvasRenderingContext2D,
       width: number,
       height: number,
-      progress: number
+      progress: number,
+      design: "slash_wipe" | "split_doors" | "diamond_burst" | "curtain_wipe" = "slash_wipe"
     ) => {
-      // progress goes from 0 -> 1 over ~850ms
-      // Smooth ease-in-out
-      const ease =
-        progress < 0.5
-          ? 2 * progress * progress
-          : 1 - Math.pow(-2 * progress + 2, 2) / 2;
+      const easeInOutCubic = (t: number) =>
+        t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+      const easeOutCubic = (t: number) => 1 - Math.pow(1 - t, 3);
 
-      const slant = 220;
-      const totalSpan = width + slant * 2 + 400;
-      // Sweep from left (-totalSpan/2) across center (0) to right (+totalSpan/2)
-      const centerOffset = (ease - 0.5) * totalSpan;
-
-      ctx.save();
-
-      // Secondary Crimson & Gold Leading/Trailing Ribbons
-      const drawAngledBand = (
-        offsetX: number,
-        bandWidth: number,
-        color: string
+      // Helper to draw a 100% solid, crisp, high-contrast League / Box Score Medallion at (cx, cy)
+      const drawSolidLogoMedallion = (
+        cx: number,
+        cy: number,
+        radius: number
       ) => {
-        ctx.fillStyle = color;
-        ctx.beginPath();
-        ctx.moveTo(offsetX - bandWidth / 2 + slant, 0);
-        ctx.lineTo(offsetX + bandWidth / 2 + slant, 0);
-        ctx.lineTo(offsetX + bandWidth / 2 - slant, height);
-        ctx.lineTo(offsetX - bandWidth / 2 - slant, height);
-        ctx.closePath();
-        ctx.fill();
-      };
-
-      const midX = width / 2 + centerOffset;
-      drawAngledBand(midX - 520, 260, "#e11d48");
-      drawAngledBand(midX + 520, 260, "#f59e0b");
-      drawAngledBand(midX, width + 320, "#0b172a");
-
-      // Subtle inner diagonal accent lines
-      ctx.strokeStyle = "rgba(56, 189, 248, 0.25)";
-      ctx.lineWidth = 6;
-      ctx.beginPath();
-      ctx.moveTo(midX - 380 + slant, 0);
-      ctx.lineTo(midX - 380 - slant, height);
-      ctx.moveTo(midX + 380 + slant, 0);
-      ctx.lineTo(midX + 380 - slant, height);
-      ctx.stroke();
-
-      // Center Logo Medallion (scales up in the middle of the transition)
-      const logoVisibility = Math.max(
-        0,
-        1 - Math.abs(progress - 0.5) * 2.5
-      );
-      if (logoVisibility > 0.02) {
-        const scale = 0.75 + 0.35 * Math.sin(logoVisibility * Math.PI);
-        const logoSize = Math.round(250 * scale);
-        const cx = width / 2;
-        const cy = height / 2;
-
         ctx.save();
-        ctx.globalAlpha = Math.min(1, logoVisibility * 1.35);
+        ctx.globalAlpha = 1.0;
+        ctx.shadowColor = "transparent";
+        ctx.shadowBlur = 0;
 
-        // Glowing backdrop circle
-        ctx.shadowColor = "rgba(225, 29, 72, 0.65)";
-        ctx.shadowBlur = 45;
+        // Outer Solid Gold Championship Ring
+        ctx.fillStyle = "#f59e0b";
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius + 22, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Middle Solid Crimson Ring
+        ctx.fillStyle = "#e11d48";
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius + 14, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Dark Broadcast Bezel Ring
         ctx.fillStyle = "#0f172a";
         ctx.beginPath();
-        ctx.arc(cx, cy, logoSize / 2 + 24, 0, Math.PI * 2);
+        ctx.arc(cx, cy, radius + 6, 0, Math.PI * 2);
         ctx.fill();
-
-        ctx.lineWidth = 5;
-        ctx.strokeStyle = "#f59e0b";
-        ctx.stroke();
-        ctx.shadowColor = "transparent";
 
         const logoImg = transitionLogoImgRef.current;
         if (logoImg && logoImg.complete && logoImg.naturalWidth > 0) {
+          // Solid Pure White Plate so dark/colored logo artwork has 100% crisp contrast and zero transparency
+          ctx.fillStyle = "#ffffff";
+          ctx.beginPath();
+          ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+          ctx.fill();
+
           ctx.save();
           ctx.beginPath();
-          ctx.arc(cx, cy, logoSize / 2 + 8, 0, Math.PI * 2);
+          ctx.arc(cx, cy, radius - 4, 0, Math.PI * 2);
           ctx.clip();
+          ctx.imageSmoothingEnabled = true;
+          ctx.imageSmoothingQuality = "high";
+          const maxDim = (radius - 6) * 2;
           const aspect = logoImg.naturalWidth / logoImg.naturalHeight;
-          let dw = logoSize;
-          let dh = logoSize;
+          let dw = maxDim;
+          let dh = maxDim;
           if (aspect > 1) {
-            dh = logoSize / aspect;
+            dh = maxDim / aspect;
           } else {
-            dw = logoSize * aspect;
+            dw = maxDim * aspect;
           }
           ctx.drawImage(logoImg, cx - dw / 2, cy - dh / 2, dw, dh);
           ctx.restore();
         } else {
-          // Fallback League / Box Score Broadcast Emblem
+          // Solid Fallback League / Box Score Broadcast Emblem
+          ctx.fillStyle = "#0f172a";
+          ctx.beginPath();
+          ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+          ctx.fill();
+
           ctx.fillStyle = "#ffffff";
           ctx.font = "900 42px 'Inter', sans-serif";
           ctx.textAlign = "center";
@@ -5105,13 +5119,283 @@ function LiveBroadcastStudioContent() {
           ctx.fillText(
             (activeLeague?.name || "BOX SCORE").slice(0, 12).toUpperCase(),
             cx,
-            cy - 8
+            cy - 10
           );
           ctx.fillStyle = "#f59e0b";
           ctx.font = "800 18px 'Inter', sans-serif";
-          ctx.fillText("OFFICIAL BROADCAST", cx, cy + 34);
+          ctx.fillText("OFFICIAL BROADCAST", cx, cy + 28);
         }
 
+        // Solid Championship Banner Plate under the Medallion
+        const bannerW = 340;
+        const bannerH = 40;
+        const bannerY = cy + radius + 34;
+        ctx.fillStyle = "#0f172a";
+        ctx.strokeStyle = "#f59e0b";
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.roundRect(cx - bannerW / 2, bannerY, bannerW, bannerH, 10);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = "#ffffff";
+        ctx.font = "900 17px 'Inter', sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(
+          (activeLeague?.name || "LIVE BROADCAST").slice(0, 24).toUpperCase(),
+          cx,
+          bannerY + bannerH / 2 + 1
+        );
+
+        ctx.restore();
+      };
+
+      ctx.save();
+      ctx.globalAlpha = 1.0;
+
+      if (design === "split_doors") {
+        // DESIGN 2: ARENA SHUTTER SPLIT DOORS (Left & Right Solid Gates Slam Shut & Lock Logo in Center)
+        let closeT = 0;
+        if (progress < 0.43) {
+          closeT = easeOutCubic(progress / 0.43);
+        } else if (progress <= 0.57) {
+          closeT = 1;
+        } else {
+          closeT = 1 - easeInOutCubic((progress - 0.57) / 0.43);
+        }
+        closeT = Math.max(0, Math.min(1, closeT));
+
+        const halfW = width / 2;
+        const leftDoorRightX = Math.round(halfW * closeT);
+        const rightDoorLeftX = Math.round(width - halfW * closeT);
+        const cy = height / 2;
+        const logoRadius = 135;
+
+        // 1. LEFT ARENA DOOR (0 -> leftDoorRightX)
+        if (leftDoorRightX > 0) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(0, 0, leftDoorRightX, height);
+          ctx.clip();
+
+          // Solid Deep Broadcast Navy Door Panel
+          ctx.fillStyle = "#0b172a";
+          ctx.fillRect(0, 0, leftDoorRightX, height);
+
+          // Solid Angled Crimson & Sky Blue Arena Chevrons anchored to Door Edge
+          ctx.fillStyle = "#e11d48";
+          ctx.beginPath();
+          ctx.moveTo(leftDoorRightX - 420, 0);
+          ctx.lineTo(leftDoorRightX - 270, 0);
+          ctx.lineTo(leftDoorRightX - 150, height / 2);
+          ctx.lineTo(leftDoorRightX - 270, height);
+          ctx.lineTo(leftDoorRightX - 420, height);
+          ctx.lineTo(leftDoorRightX - 300, height / 2);
+          ctx.closePath();
+          ctx.fill();
+
+          ctx.fillStyle = "#0284c7";
+          ctx.beginPath();
+          ctx.moveTo(leftDoorRightX - 230, 0);
+          ctx.lineTo(leftDoorRightX - 150, 0);
+          ctx.lineTo(leftDoorRightX - 30, height / 2);
+          ctx.lineTo(leftDoorRightX - 150, height);
+          ctx.lineTo(leftDoorRightX - 230, height);
+          ctx.lineTo(leftDoorRightX - 110, height / 2);
+          ctx.closePath();
+          ctx.fill();
+
+          // Gold Center Lock Seam Bar on Left Door
+          ctx.fillStyle = "#f59e0b";
+          ctx.fillRect(leftDoorRightX - 14, 0, 14, height);
+
+          // Left Half of Logo Medallion rides on Left Door Edge
+          drawSolidLogoMedallion(leftDoorRightX, cy, logoRadius);
+          ctx.restore();
+        }
+
+        // 2. RIGHT ARENA DOOR (rightDoorLeftX -> width)
+        if (rightDoorLeftX < width) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(rightDoorLeftX, 0, width - rightDoorLeftX, height);
+          ctx.clip();
+
+          // Solid Deep Broadcast Navy Door Panel
+          ctx.fillStyle = "#0b172a";
+          ctx.fillRect(rightDoorLeftX, 0, width - rightDoorLeftX, height);
+
+          // Solid Angled Gold & Crimson Arena Chevrons anchored to Right Door Edge
+          ctx.fillStyle = "#f59e0b";
+          ctx.beginPath();
+          ctx.moveTo(rightDoorLeftX + 420, 0);
+          ctx.lineTo(rightDoorLeftX + 270, 0);
+          ctx.lineTo(rightDoorLeftX + 150, height / 2);
+          ctx.lineTo(rightDoorLeftX + 270, height);
+          ctx.lineTo(rightDoorLeftX + 420, height);
+          ctx.lineTo(rightDoorLeftX + 300, height / 2);
+          ctx.closePath();
+          ctx.fill();
+
+          ctx.fillStyle = "#e11d48";
+          ctx.beginPath();
+          ctx.moveTo(rightDoorLeftX + 230, 0);
+          ctx.lineTo(rightDoorLeftX + 150, 0);
+          ctx.lineTo(rightDoorLeftX + 30, height / 2);
+          ctx.lineTo(rightDoorLeftX + 150, height);
+          ctx.lineTo(rightDoorLeftX + 230, height);
+          ctx.lineTo(rightDoorLeftX + 110, height / 2);
+          ctx.closePath();
+          ctx.fill();
+
+          // Gold Center Lock Seam Bar on Right Door
+          ctx.fillStyle = "#f59e0b";
+          ctx.fillRect(rightDoorLeftX, 0, 14, height);
+
+          // Right Half of Logo Medallion rides on Right Door Edge
+          drawSolidLogoMedallion(rightDoorLeftX, cy, logoRadius);
+          ctx.restore();
+        }
+      } else if (design === "diamond_burst") {
+        // DESIGN 3: GEOMETRIC SHIELD / DIAMOND BURST (Expands from Center to Cover 100%, then Collapses)
+        let burstT = 0;
+        if (progress < 0.44) {
+          burstT = easeOutCubic(progress / 0.44);
+        } else if (progress <= 0.56) {
+          burstT = 1;
+        } else {
+          burstT = 1 - easeInOutCubic((progress - 0.56) / 0.44);
+        }
+        burstT = Math.max(0, Math.min(1, burstT));
+
+        if (burstT > 0.005) {
+          const cx = width / 2;
+          const cy = height / 2;
+          const coreRx = 2200 * burstT;
+          const coreRy = 1260 * burstT;
+
+          const drawSolidDiamond = (rx: number, ry: number, color: string) => {
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            ctx.moveTo(cx, cy - ry);
+            ctx.lineTo(cx + rx, cy);
+            ctx.lineTo(cx, cy + ry);
+            ctx.lineTo(cx - rx, cy);
+            ctx.closePath();
+            ctx.fill();
+          };
+
+          // Outer Championship Gold Diamond Ring
+          drawSolidDiamond(coreRx + 240, coreRy + 135, "#f59e0b");
+          // Middle Crimson Diamond Ring
+          drawSolidDiamond(coreRx + 160, coreRy + 90, "#e11d48");
+          // Inner Broadcast Blue Diamond Ring
+          drawSolidDiamond(coreRx + 80, coreRy + 45, "#0284c7");
+          // Core Deep Broadcast Navy Diamond
+          drawSolidDiamond(coreRx, coreRy, "#0b172a");
+
+          // Clip strictly inside the Core Diamond so the Logo & Inner Accents are 100% solid and never bleed
+          ctx.save();
+          ctx.beginPath();
+          ctx.moveTo(cx, cy - coreRy);
+          ctx.lineTo(cx + coreRx, cy);
+          ctx.lineTo(cx, cy + coreRy);
+          ctx.lineTo(cx - coreRx, cy);
+          ctx.closePath();
+          ctx.clip();
+
+          // Solid Inner Geometric Ring Accents
+          ctx.strokeStyle = "#1e293b";
+          ctx.lineWidth = 10;
+          ctx.beginPath();
+          ctx.moveTo(cx, cy - 420);
+          ctx.lineTo(cx + 740, cy);
+          ctx.lineTo(cx, cy + 420);
+          ctx.lineTo(cx - 740, cy);
+          ctx.closePath();
+          ctx.stroke();
+
+          const logoScale = 0.85 + 0.15 * Math.min(1, burstT * 1.4);
+          drawSolidLogoMedallion(cx, cy - 12, Math.round(135 * logoScale));
+          ctx.restore();
+        }
+      } else if (design === "curtain_wipe") {
+        // SOLID BROADCAST CURTAIN WIPE (Used by FADE / CURTAIN button — 100% Non-Transparent!)
+        const ease = easeInOutCubic(progress);
+        const slant = 90;
+        const coreWidth = width + slant * 2 + 280;
+        const totalSpan = width * 2 + slant * 2 + 520;
+        const midX = width / 2 + (ease - 0.5) * totalSpan;
+
+        const drawBand = (offsetX: number, bw: number, color: string) => {
+          ctx.fillStyle = color;
+          ctx.beginPath();
+          ctx.moveTo(offsetX - bw / 2 + slant, 0);
+          ctx.lineTo(offsetX + bw / 2 + slant, 0);
+          ctx.lineTo(offsetX + bw / 2 - slant, height);
+          ctx.lineTo(offsetX - bw / 2 - slant, height);
+          ctx.closePath();
+          ctx.fill();
+        };
+
+        drawBand(midX - coreWidth / 2 - 90, 180, "#f59e0b");
+        drawBand(midX + coreWidth / 2 + 90, 180, "#f59e0b");
+        drawBand(midX, coreWidth, "#090d16");
+      } else {
+        // DESIGN 1 (DEFAULT): DIAGONAL SLASH LOGO WIPE (100% Solid Opaque)
+        const ease = easeInOutCubic(progress);
+        const slant = 200;
+        const coreWidth = width + slant * 2 + 440;
+        const totalSpan = width * 2 + slant * 2 + 960;
+        const midX = width / 2 + (ease - 0.5) * totalSpan;
+
+        const drawAngledBand = (
+          offsetX: number,
+          bandWidth: number,
+          color: string
+        ) => {
+          ctx.fillStyle = color;
+          ctx.beginPath();
+          ctx.moveTo(offsetX - bandWidth / 2 + slant, 0);
+          ctx.lineTo(offsetX + bandWidth / 2 + slant, 0);
+          ctx.lineTo(offsetX + bandWidth / 2 - slant, height);
+          ctx.lineTo(offsetX - bandWidth / 2 - slant, height);
+          ctx.closePath();
+          ctx.fill();
+        };
+
+        // Trailing & Leading Solid Ribbons
+        drawAngledBand(midX - coreWidth / 2 - 220, 200, "#e11d48");
+        drawAngledBand(midX - coreWidth / 2 - 70, 140, "#f59e0b");
+        drawAngledBand(midX + coreWidth / 2 + 220, 200, "#f59e0b");
+        drawAngledBand(midX + coreWidth / 2 + 70, 140, "#0284c7");
+
+        // Main Solid Deep Broadcast Navy Core Polygon
+        drawAngledBand(midX, coreWidth, "#0b172a");
+
+        // Clip strictly inside the Solid Core Polygon so the Logo Medallion is 100% opaque and never floats over video
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(midX - coreWidth / 2 + slant, 0);
+        ctx.lineTo(midX + coreWidth / 2 + slant, 0);
+        ctx.lineTo(midX + coreWidth / 2 - slant, height);
+        ctx.lineTo(midX - coreWidth / 2 - slant, height);
+        ctx.closePath();
+        ctx.clip();
+
+        // Solid Diagonal Sport Stripe Accents inside Core
+        ctx.strokeStyle = "#1e293b";
+        ctx.lineWidth = 10;
+        ctx.beginPath();
+        ctx.moveTo(midX - 420 + slant, 0);
+        ctx.lineTo(midX - 420 - slant, height);
+        ctx.moveTo(midX + 420 + slant, 0);
+        ctx.lineTo(midX + 420 - slant, height);
+        ctx.stroke();
+
+        // Crisp 100% Solid Center Logo Medallion
+        drawSolidLogoMedallion(width / 2, height / 2 - 12, 135);
         ctx.restore();
       }
 
@@ -5166,7 +5450,7 @@ function LiveBroadcastStudioContent() {
             nowMs
           );
 
-          // Check if Logo Stinger Wipe Transition is active
+          // Check if Broadcast Stinger / Wipe Transition is active
           const stinger = stingerStateRef.current;
           if (stinger.active) {
             const elapsed = nowMs - stinger.startMs;
@@ -5175,7 +5459,13 @@ function LiveBroadcastStudioContent() {
               stinger.switchedScene = true;
               setLiveSceneId(stinger.targetSceneId);
             }
-            drawLogoStingerOverlay(lCtx, lCanvas.width, lCanvas.height, progress);
+            drawLogoStingerOverlay(
+              lCtx,
+              lCanvas.width,
+              lCanvas.height,
+              progress,
+              stinger.design || "slash_wipe"
+            );
             if (progress >= 1) {
               stinger.active = false;
               setIsTransitioning(false);
@@ -5443,28 +5733,49 @@ function LiveBroadcastStudioContent() {
     });
   };
 
-  // OBS Transition Actions: CUT, FADE & LOGO WIPE STINGER
+  // OBS Transition Actions: CUT, SOLID WIPE & 3 LOGO STINGER DESIGNS
   const handleCutToLive = () => {
+    stingerStateRef.current.active = false;
+    setIsTransitioning(false);
     setLiveSceneId(previewSceneId);
   };
 
-  const handleLogoTransitionToLive = () => {
+  const handleLogoTransitionToLive = (
+    designOverride?: "slash_wipe" | "split_doors" | "diamond_burst"
+  ) => {
+    const design =
+      designOverride === "slash_wipe" ||
+      designOverride === "split_doors" ||
+      designOverride === "diamond_burst"
+        ? designOverride
+        : selectedTransitionDesign;
+    if (designOverride) {
+      setSelectedTransitionDesign(design);
+      try {
+        window.localStorage.setItem("boxscore_studio_transition_design", design);
+      } catch {}
+    }
     stingerStateRef.current = {
       active: true,
       startMs: performance.now(),
-      durationMs: 850,
+      durationMs: transitionDurationMs,
       switchedScene: false,
       targetSceneId: previewSceneId,
+      design,
     };
     setIsTransitioning(true);
   };
 
   const handleFadeToLive = () => {
+    stingerStateRef.current = {
+      active: true,
+      startMs: performance.now(),
+      durationMs: transitionDurationMs,
+      switchedScene: false,
+      targetSceneId: previewSceneId,
+      design: "curtain_wipe",
+    };
     setIsTransitioning(true);
-    setTimeout(() => {
-      setLiveSceneId(previewSceneId);
-      setIsTransitioning(false);
-    }, 280);
   };
 
   const handleSwapPreviewAndLive = () => {
@@ -8107,8 +8418,8 @@ function LiveBroadcastStudioContent() {
           )}
         </div>
 
-        {/* CENTER COLUMN: OBS STUDIO MODE TRANSITION BAR (WITH LOGO WIPE & UPLOAD) */}
-        <div className="lg:col-span-1 flex flex-wrap lg:flex-col items-center justify-center gap-2 p-2 rounded-xl border border-slate-800 bg-[#131926]">
+        {/* CENTER COLUMN: OBS STUDIO MODE TRANSITION BAR (3 LOGO DESIGNS, DURATION & UPLOAD) */}
+        <div className="lg:col-span-1 flex flex-wrap lg:flex-col items-center justify-center gap-1.5 p-2 rounded-xl border border-slate-800 bg-[#131926]">
           <span className="hidden lg:block text-[0.62rem] font-black uppercase tracking-widest text-slate-400 text-center">
             Transition
           </span>
@@ -8116,29 +8427,98 @@ function LiveBroadcastStudioContent() {
           <button
             type="button"
             onClick={handleCutToLive}
-            className="w-full rounded-xl bg-rose-600 hover:bg-rose-500 px-2.5 py-2.5 text-xs font-black uppercase tracking-wider text-white shadow-md transition-all cursor-pointer flex flex-col items-center gap-0.5"
+            className="w-full rounded-xl bg-rose-600 hover:bg-rose-500 px-2 py-2 text-xs font-black uppercase tracking-wider text-white shadow-md transition-all cursor-pointer flex flex-col items-center gap-0.5"
             title="Instant Cut from Left Preview to Right Live Output"
           >
             <span className="flex items-center gap-1">
               <span>CUT</span>
               <ArrowRight className="h-3.5 w-3.5" />
             </span>
-            <span className="text-[0.55rem] font-bold text-rose-200">Instant</span>
+            <span className="text-[0.52rem] font-bold text-rose-100">Instant</span>
           </button>
 
-          {/* LOGO STINGER WIPE TRANSITION */}
+          {/* DESIGN 1: DIAGONAL SLASH LOGO WIPE */}
           <button
             type="button"
-            onClick={handleLogoTransitionToLive}
-            className="w-full rounded-xl bg-gradient-to-r from-indigo-600 to-sky-600 hover:from-indigo-500 hover:to-sky-500 border border-sky-400/40 px-2.5 py-2.5 text-xs font-black uppercase tracking-wider text-white shadow-md transition-all cursor-pointer flex flex-col items-center gap-0.5"
-            title="Broadcast Logo Wipe Transition using your League or Uploaded Logo"
+            onClick={() => handleLogoTransitionToLive("slash_wipe")}
+            className={`w-full rounded-xl bg-gradient-to-r from-indigo-600 to-sky-600 hover:from-indigo-500 hover:to-sky-500 border px-2 py-2 text-xs font-black uppercase tracking-wider text-white shadow-md transition-all cursor-pointer flex flex-col items-center gap-0.5 ${
+              selectedTransitionDesign === "slash_wipe"
+                ? "border-amber-300 ring-1 ring-amber-400/60"
+                : "border-sky-400/40"
+            }`}
+            title="Design 1: Solid Diagonal Slash Logo Wipe Transition"
           >
-            <span className="flex items-center gap-1">
-              <Sparkles className="h-3.5 w-3.5 text-amber-300" />
+            <span className="flex items-center gap-1 text-white">
+              <Sparkles className="h-3.5 w-3.5 text-amber-300 shrink-0" />
               <span>LOGO</span>
             </span>
-            <span className="text-[0.55rem] font-bold text-sky-100">Logo Wipe</span>
+            <span className="text-[0.52rem] font-bold text-sky-100">
+              Logo Wipe
+            </span>
           </button>
+
+          {/* DESIGN 2 (NEW): ARENA SHUTTER SPLIT DOORS */}
+          <button
+            type="button"
+            onClick={() => handleLogoTransitionToLive("split_doors")}
+            className={`w-full rounded-xl bg-gradient-to-r from-violet-600 to-purple-600 hover:from-violet-500 hover:to-purple-500 border px-2 py-2 text-xs font-black uppercase tracking-wider text-white shadow-md transition-all cursor-pointer flex flex-col items-center gap-0.5 ${
+              selectedTransitionDesign === "split_doors"
+                ? "border-amber-300 ring-1 ring-amber-400/60"
+                : "border-purple-400/40"
+            }`}
+            title="Design 2: Solid Arena Shutter Doors Split Transition with Center Logo Lock"
+          >
+            <span className="flex items-center gap-1 text-white">
+              <Layout className="h-3.5 w-3.5 text-amber-300 shrink-0" />
+              <span>DOORS</span>
+            </span>
+            <span className="text-[0.52rem] font-bold text-purple-100">
+              Split Gate
+            </span>
+          </button>
+
+          {/* DESIGN 3 (NEW): DIAMOND SHIELD BURST */}
+          <button
+            type="button"
+            onClick={() => handleLogoTransitionToLive("diamond_burst")}
+            className={`w-full rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 border px-2 py-2 text-xs font-black uppercase tracking-wider text-white shadow-md transition-all cursor-pointer flex flex-col items-center gap-0.5 ${
+              selectedTransitionDesign === "diamond_burst"
+                ? "border-amber-300 ring-1 ring-amber-400/60"
+                : "border-emerald-400/40"
+            }`}
+            title="Design 3: Solid Geometric Shield Burst Logo Transition"
+          >
+            <span className="flex items-center gap-1 text-white">
+              <Layers className="h-3.5 w-3.5 text-amber-300 shrink-0" />
+              <span>SHIELD</span>
+            </span>
+            <span className="text-[0.52rem] font-bold text-emerald-100">
+              Diamond Burst
+            </span>
+          </button>
+
+          {/* TRANSITION DURATION SELECTOR */}
+          <div className="w-full rounded-xl border border-slate-700/80 bg-slate-900/90 p-1.5 flex flex-col items-center gap-1">
+            <span className="text-[0.5rem] font-black uppercase tracking-wider text-slate-400 flex items-center gap-0.5">
+              <Clock className="h-2.5 w-2.5 text-amber-400" />
+              <span>Duration</span>
+            </span>
+            <select
+              value={transitionDurationMs}
+              onChange={(e) =>
+                handleUpdateTransitionDuration(Number(e.target.value))
+              }
+              className="w-full rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-600 py-1 px-1 text-[0.58rem] font-black text-amber-300 text-center cursor-pointer focus:outline-none focus:border-amber-400"
+              title="Select Broadcast Transition Duration"
+            >
+              <option value={300}>300ms (Fast)</option>
+              <option value={500}>500ms (Quick)</option>
+              <option value={850}>850ms (Normal)</option>
+              <option value={1200}>1200ms (Smooth)</option>
+              <option value={1500}>1500ms (Slow)</option>
+              <option value={2000}>2000ms (Epic)</option>
+            </select>
+          </div>
 
           {/* UPLOAD TRANSITION LOGO (E.G. LEAGUE LOGO) */}
           <div className="w-full rounded-xl border border-slate-700/80 bg-slate-900/90 p-1.5 flex flex-col items-center gap-1">
@@ -8146,7 +8526,7 @@ function LiveBroadcastStudioContent() {
               <img
                 src={effectiveTransitionLogoUrl}
                 alt="Transition Logo"
-                className="h-7 w-7 rounded-full object-cover border border-amber-400/60"
+                className="h-7 w-7 rounded-full object-cover border border-amber-400/60 bg-white"
               />
             ) : (
               <span className="text-[0.52rem] font-bold text-slate-400 text-center">
@@ -8171,14 +8551,16 @@ function LiveBroadcastStudioContent() {
           <button
             type="button"
             onClick={handleFadeToLive}
-            className="w-full rounded-xl bg-amber-500 hover:bg-amber-400 px-2.5 py-2 text-xs font-black uppercase tracking-wider text-slate-950 shadow-md transition-all cursor-pointer flex flex-col items-center gap-0.5"
-            title="Smooth 300ms Fade from Preview to Live"
+            className="w-full rounded-xl bg-amber-500 hover:bg-amber-400 px-2 py-2 text-xs font-black uppercase tracking-wider text-slate-950 shadow-md transition-all cursor-pointer flex flex-col items-center gap-0.5"
+            title={`Solid Broadcast Wipe (${transitionDurationMs}ms) from Preview to Live`}
           >
             <span className="flex items-center gap-1">
-              <span>FADE</span>
+              <span>WIPE</span>
               <ArrowRight className="h-3.5 w-3.5" />
             </span>
-            <span className="text-[0.55rem] font-bold text-slate-800">300ms</span>
+            <span className="text-[0.52rem] font-bold text-slate-800">
+              {transitionDurationMs}ms
+            </span>
           </button>
 
           <button
@@ -8216,11 +8598,7 @@ function LiveBroadcastStudioContent() {
             </div>
           </div>
 
-          <div
-            className={`studio-video-viewport relative aspect-video w-full bg-black flex items-center justify-center transition-opacity duration-200 ${
-              isTransitioning ? "opacity-50" : "opacity-100"
-            }`}
-          >
+          <div className="studio-video-viewport relative aspect-video w-full bg-black flex items-center justify-center">
             <canvas
               ref={liveCanvasRef}
               width={1920}
@@ -11251,20 +11629,81 @@ function LiveBroadcastStudioContent() {
               </div>
             </div>
 
-            {/* Transition Stinger Logo Upload & Test Control */}
+            {/* Transition Stinger Logo Upload, Design & Duration Control */}
             <div className="rounded-lg border border-amber-500/30 bg-amber-950/15 p-2.5 space-y-2">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-[0.65rem] font-black uppercase text-amber-300">
-                  ✨ Transition Effect Logo (League / Custom)
+                  ✨ Transition Effect Logo & Design
                 </span>
                 {effectiveTransitionLogoUrl && (
                   <img
                     src={effectiveTransitionLogoUrl}
                     alt="Transition Logo"
-                    className="h-6 w-6 rounded-full object-contain bg-slate-900 border border-amber-400/50 p-0.5"
+                    className="h-6 w-6 rounded-full object-contain bg-white border border-amber-400/50 p-0.5"
                   />
                 )}
               </div>
+
+              {/* 3 Broadcast Transition Design Selectors */}
+              <div className="grid grid-cols-3 gap-1">
+                <button
+                  type="button"
+                  onClick={() => handleLogoTransitionToLive("slash_wipe")}
+                  className={`rounded-lg px-2 py-1 text-[0.58rem] font-black uppercase cursor-pointer border transition-all ${
+                    selectedTransitionDesign === "slash_wipe"
+                      ? "bg-indigo-600 border-amber-300 text-white"
+                      : "bg-slate-900 border-slate-700 text-slate-300 hover:bg-slate-800"
+                  }`}
+                >
+                  1. Slash Wipe
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleLogoTransitionToLive("split_doors")}
+                  className={`rounded-lg px-2 py-1 text-[0.58rem] font-black uppercase cursor-pointer border transition-all ${
+                    selectedTransitionDesign === "split_doors"
+                      ? "bg-purple-600 border-amber-300 text-white"
+                      : "bg-slate-900 border-slate-700 text-slate-300 hover:bg-slate-800"
+                  }`}
+                >
+                  2. Split Doors
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleLogoTransitionToLive("diamond_burst")}
+                  className={`rounded-lg px-2 py-1 text-[0.58rem] font-black uppercase cursor-pointer border transition-all ${
+                    selectedTransitionDesign === "diamond_burst"
+                      ? "bg-emerald-600 border-amber-300 text-white"
+                      : "bg-slate-900 border-slate-700 text-slate-300 hover:bg-slate-800"
+                  }`}
+                >
+                  3. Shield Burst
+                </button>
+              </div>
+
+              {/* Transition Duration Quick Selector */}
+              <div className="flex items-center justify-between gap-1.5">
+                <span className="text-[0.58rem] font-black uppercase text-slate-400">
+                  Duration:
+                </span>
+                <div className="flex flex-wrap items-center gap-1">
+                  {[300, 500, 850, 1200, 1500, 2000].map((ms) => (
+                    <button
+                      key={ms}
+                      type="button"
+                      onClick={() => handleUpdateTransitionDuration(ms)}
+                      className={`rounded px-1.5 py-0.5 text-[0.55rem] font-black cursor-pointer border transition-all ${
+                        transitionDurationMs === ms
+                          ? "bg-amber-500 border-amber-300 text-slate-950"
+                          : "bg-slate-900 border-slate-700 text-slate-300 hover:bg-slate-800"
+                      }`}
+                    >
+                      {ms}ms
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               <div className="flex items-center gap-1.5">
                 <label className="flex-1 inline-flex items-center justify-center gap-1 rounded-lg border border-amber-500/40 bg-amber-500/20 hover:bg-amber-500/30 px-2.5 py-1.5 text-[0.62rem] font-black uppercase text-amber-200 cursor-pointer">
                   <span>Upload Transition Logo</span>
@@ -11296,7 +11735,7 @@ function LiveBroadcastStudioContent() {
                 )}
                 <button
                   type="button"
-                  onClick={handleLogoTransitionToLive}
+                  onClick={() => handleLogoTransitionToLive()}
                   className="rounded-lg bg-amber-500 hover:bg-amber-400 px-2.5 py-1.5 text-[0.62rem] font-black uppercase text-slate-950 cursor-pointer"
                 >
                   Test Wipe
