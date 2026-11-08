@@ -3,6 +3,7 @@ import {
   EncodedFrameInput,
   getRtmpSessionMap,
   RtmpPublisherSession,
+  StreamMetaConfig,
 } from "@/lib/rtmp-publisher";
 
 export const runtime = "nodejs";
@@ -14,10 +15,12 @@ interface RtmpStreamRequestBody {
   rtmpUrl?: string;
   streamKey?: string;
   avcConfigBase64?: string;
+  metaConfig?: StreamMetaConfig;
   frames?: EncodedFrameInput[];
 }
 
 export async function POST(req: NextRequest) {
+  const reqStartMs = Date.now();
   try {
     const body = (await req.json()) as RtmpStreamRequestBody;
     const {
@@ -26,6 +29,7 @@ export async function POST(req: NextRequest) {
       rtmpUrl = "rtmps://live-api-s.facebook.com:443/rtmp/",
       streamKey = "",
       avcConfigBase64,
+      metaConfig,
       frames = [],
     } = body;
 
@@ -55,6 +59,7 @@ export async function POST(req: NextRequest) {
         ok: true,
         active: Boolean(existing?.isReady()),
         stats: existing?.getStats() || null,
+        serverLatencyMs: Date.now() - reqStartMs,
       });
     }
 
@@ -70,39 +75,64 @@ export async function POST(req: NextRequest) {
     }
 
     if (action === "start") {
-      const prev = sessions.get(sessionId);
-      if (prev) {
-        prev.close();
-        sessions.delete(sessionId);
+      // Close any existing session with same ID or same streamKey to prevent duplicate RTMP collisions
+      for (const [id, sess] of sessions.entries()) {
+        if (id === sessionId || sess.streamKey === streamKey.trim()) {
+          sess.close();
+          sessions.delete(id);
+        }
       }
 
       const session = new RtmpPublisherSession(sessionId, rtmpUrl, streamKey);
-      await session.connectAndPublish(avcConfigBase64);
+      await session.connectAndPublish(avcConfigBase64, metaConfig);
       sessions.set(sessionId, session);
+
+      let initialPush = {
+        bytesSent: 0,
+        framesSent: 0,
+        keyframesSent: 0,
+        skippedDeltaFrames: 0,
+        needsKeyframe: true,
+      };
+      if (frames.length > 0) {
+        initialPush = await session.pushFrames(frames, avcConfigBase64, metaConfig);
+      }
 
       return NextResponse.json({
         ok: true,
         sessionId,
         status: "publishing",
+        bytesSent: initialPush.bytesSent,
+        framesSent: initialPush.framesSent,
+        keyframesSent: initialPush.keyframesSent,
+        needsKeyframe: initialPush.needsKeyframe,
         stats: session.getStats(),
+        serverLatencyMs: Date.now() - reqStartMs,
       });
     }
 
     if (action === "push") {
       let session = sessions.get(sessionId);
+      let reconnected = false;
       if (!session || !session.isReady()) {
         session = new RtmpPublisherSession(sessionId, rtmpUrl, streamKey);
-        await session.connectAndPublish(avcConfigBase64);
+        await session.connectAndPublish(avcConfigBase64, metaConfig);
         sessions.set(sessionId, session);
+        reconnected = true;
       }
 
-      const result = await session.pushFrames(frames, avcConfigBase64);
+      const result = await session.pushFrames(frames, avcConfigBase64, metaConfig);
       return NextResponse.json({
         ok: true,
         sessionId,
+        reconnected,
         bytesSent: result.bytesSent,
         framesSent: result.framesSent,
+        keyframesSent: result.keyframesSent,
+        skippedDeltaFrames: result.skippedDeltaFrames,
+        needsKeyframe: result.needsKeyframe,
         stats: session.getStats(),
+        serverLatencyMs: Date.now() - reqStartMs,
       });
     }
 

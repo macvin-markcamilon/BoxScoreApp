@@ -565,6 +565,62 @@ function LiveBroadcastStudioContent() {
   const [showFbSetupModal, setShowFbSetupModal] = useState<boolean>(false);
   const [fbLivePublicUrl, setFbLivePublicUrl] = useState<string>("");
   const [streamSavedNotice, setStreamSavedNotice] = useState<string | null>(null);
+  const [streamQualityPreset, setStreamQualityPreset] = useState<"360p" | "540p" | "720p">("540p");
+  const [autoAdaptQuality, setAutoAdaptQuality] = useState<boolean>(true);
+  const [showStreamHealthDetails, setShowStreamHealthDetails] = useState<boolean>(true);
+  const [isTestingStreamHealth, setIsTestingStreamHealth] = useState<boolean>(false);
+  const [streamHealth, setStreamHealth] = useState<{
+    overallStatus: "healthy" | "warning" | "critical" | "idle";
+    overallScore: number;
+    internetStatus: "ok" | "slow" | "critical";
+    pingLatencyMs: number;
+    uploadBitrateKbps: number;
+    targetBitrateKbps: number;
+    downlinkMbps: number | null;
+    networkType: string;
+    networkStallsCount: number;
+    reconnectionsCount: number;
+    internetDiagnosis: string;
+    computerStatus: "ok" | "high_load" | "overloaded";
+    encodingFps: number;
+    targetFps: number;
+    encoderQueueSize: number;
+    cpuDroppedFrames: number;
+    cpuCores: number;
+    deviceMemoryGb: number | null;
+    computerDiagnosis: string;
+    videoSyncStatus: "synced" | "resyncing" | "waiting_keyframe";
+    keyframesSent: number;
+    lastKeyframeAgoSec: number;
+    greenScreenDiagnosis: string;
+    activeIssues: string[];
+  }>({
+    overallStatus: "idle",
+    overallScore: 100,
+    internetStatus: "ok",
+    pingLatencyMs: 0,
+    uploadBitrateKbps: 0,
+    targetBitrateKbps: 1000,
+    downlinkMbps: null,
+    networkType: "broadband",
+    networkStallsCount: 0,
+    reconnectionsCount: 0,
+    internetDiagnosis: "Ready to test or start livestream.",
+    computerStatus: "ok",
+    encodingFps: 24,
+    targetFps: 24,
+    encoderQueueSize: 0,
+    cpuDroppedFrames: 0,
+    cpuCores: 4,
+    deviceMemoryGb: null,
+    computerDiagnosis: "Hardware WebCodecs H.264 encoder ready.",
+    videoSyncStatus: "synced",
+    keyframesSent: 0,
+    lastKeyframeAgoSec: 0,
+    greenScreenDiagnosis:
+      "Strict IDR Keyframe & SPS/PPS Color Guard enabled — prevents green screen on slow connections.",
+    activeIssues: [],
+  });
 
   // Section Ordering (Camera Timeline vs Scenes and Live), Visibility & Theme Mode
   const [topSection, setTopSection] = useState<"timeline" | "scenes_and_live">("timeline");
@@ -620,7 +676,9 @@ function LiveBroadcastStudioContent() {
   // RTMP WebCodecs Encoder Refs
   const rtmpSessionIdRef = useRef<string>(`rtmp-${generateUUID().slice(0, 8)}`);
   const videoEncoderRef = useRef<{
+    configure: (cfg: Record<string, unknown>) => void;
     encode: (frame: unknown, opts?: { keyFrame?: boolean }) => void;
+    flush?: () => Promise<void>;
     close: () => void;
     state: string;
     encodeQueueSize?: number;
@@ -633,6 +691,27 @@ function LiveBroadcastStudioContent() {
     Array<{ timestampMs: number; isKeyframe: boolean; dataBase64: string }>
   >([]);
   const isFlushingRtmpRef = useRef<boolean>(false);
+  const forceNextKeyframeRef = useRef<boolean>(false);
+  const waitingForFreshKeyframeRef = useRef<boolean>(false);
+  const rtmpTelemetryRef = useRef<{
+    encodedFramesInWindow: number;
+    cpuDroppedFrames: number;
+    networkStallsCount: number;
+    reconnectionsCount: number;
+    keyframesSent: number;
+    lastKeyframeSentAtMs: number;
+    lastPushLatencyMs: number;
+    bytesSentInWindow: number;
+  }>({
+    encodedFramesInWindow: 0,
+    cpuDroppedFrames: 0,
+    networkStallsCount: 0,
+    reconnectionsCount: 0,
+    keyframesSent: 0,
+    lastKeyframeSentAtMs: 0,
+    lastPushLatencyMs: 0,
+    bytesSentInWindow: 0,
+  });
   const streamStartTimeRef = useRef<number>(0);
   const streamFrameCountRef = useRef<number>(0);
   const encoderCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -6876,7 +6955,164 @@ function LiveBroadcastStudioContent() {
     setTimeout(() => setStreamSavedNotice(null), 4000);
   };
 
-  const startRtmpLiveStream = async () => {
+  const getStreamPresetSpecs = useCallback(
+    (preset: "360p" | "540p" | "720p" = streamQualityPreset) => {
+      if (preset === "360p") {
+        return {
+          width: 640,
+          height: 360,
+          fps: 20,
+          bitrate: 550_000,
+          kbps: 550,
+          label: "360p Low Data (Fastest / Slow Internet)",
+        };
+      }
+      if (preset === "720p") {
+        return {
+          width: 1280,
+          height: 720,
+          fps: 24,
+          bitrate: 1_600_000,
+          kbps: 1600,
+          label: "720p HD (High Speed Internet & Fast PC)",
+        };
+      }
+      return {
+        width: 960,
+        height: 540,
+        fps: 24,
+        bitrate: 1_000_000,
+        kbps: 1000,
+        label: "540p Balanced HD (Recommended)",
+      };
+    },
+    [streamQualityPreset]
+  );
+
+  const runStreamHealthCheck = useCallback(async () => {
+    setIsTestingStreamHealth(true);
+    try {
+      const nav =
+        typeof navigator !== "undefined"
+          ? (navigator as Navigator & {
+              hardwareConcurrency?: number;
+              deviceMemory?: number;
+              connection?: {
+                downlink?: number;
+                rtt?: number;
+                effectiveType?: string;
+              };
+            })
+          : null;
+
+      const cpuCores = nav?.hardwareConcurrency || 4;
+      const deviceMemoryGb = nav?.deviceMemory ?? null;
+      const downlinkMbps = nav?.connection?.downlink ?? null;
+      const browserRttMs = nav?.connection?.rtt ?? 0;
+      const networkType = nav?.connection?.effectiveType || "broadband";
+
+      // Measure actual HTTP round-trip latency to /api/rtmp-stream relay
+      const t0 = performance.now();
+      let pingMs = browserRttMs || 120;
+      try {
+        const res = await fetch("/api/rtmp-stream", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "status",
+            sessionId: rtmpSessionIdRef.current,
+          }),
+        });
+        await res.json();
+        pingMs = Math.max(10, Math.round(performance.now() - t0));
+      } catch {
+        pingMs = 1500;
+      }
+
+      const specs = getStreamPresetSpecs(streamQualityPreset);
+      const activeCamCount = liveScene?.cameras.length || 1;
+
+      // Evaluate Internet Health
+      let internetStatus: "ok" | "slow" | "critical" = "ok";
+      let internetDiagnosis = `Internet OK (${pingMs}ms server ping${downlinkMbps ? ` • ~${downlinkMbps} Mbps link` : ""}). Ready for smooth ${streamQualityPreset} streaming.`;
+
+      if (pingMs > 1100 || (downlinkMbps !== null && downlinkMbps < 1.2) || networkType === "2g" || networkType === "slow-2g") {
+        internetStatus = "critical";
+        internetDiagnosis = `⚠️ Weak / Slow Internet (${pingMs}ms latency${downlinkMbps ? `, ${downlinkMbps} Mbps` : ""}). High latency delays H.264 Keyframes and causes Facebook Live Green Screen or timeouts. Switch to 360p Low Data mode!`;
+      } else if (pingMs > 550 || (downlinkMbps !== null && downlinkMbps < 2.5) || networkType === "3g") {
+        internetStatus = "slow";
+        internetDiagnosis = `Internet is moderate/slow (${pingMs}ms ping). Use 540p or 360p mode to prevent frame drops and green screen artifacts.`;
+      }
+
+      // Evaluate Computer Resource Health
+      let computerStatus: "ok" | "high_load" | "overloaded" = "ok";
+      let computerDiagnosis = `Computer Resources OK (${cpuCores} CPU cores${deviceMemoryGb ? ` • ${deviceMemoryGb}GB RAM` : ""}). Hardware H.264 encoding ready.`;
+
+      if (cpuCores <= 2 || (deviceMemoryGb !== null && deviceMemoryGb <= 4 && activeCamCount >= 2 && isRecording)) {
+        computerStatus = "overloaded";
+        computerDiagnosis = `⚠️ Computer Resources Tight (${cpuCores} cores${deviceMemoryGb ? `, ${deviceMemoryGb}GB RAM` : ""}) while running ${activeCamCount} cameras + recording. Use 360p or 540p to avoid CPU/GPU frame drops.`;
+      } else if (cpuCores <= 4 && activeCamCount >= 2 && streamQualityPreset === "720p") {
+        computerStatus = "high_load";
+        computerDiagnosis = `Moderate CPU/GPU load (${activeCamCount}-cam split screen at 720p on ${cpuCores} cores). 540p Balanced mode is recommended for cooler, smoother performance.`;
+      }
+
+      const activeIssues: string[] = [];
+      if (internetStatus !== "ok") activeIssues.push(internetDiagnosis);
+      if (computerStatus !== "ok") activeIssues.push(computerDiagnosis);
+
+      const overallStatus: "healthy" | "warning" | "critical" =
+        internetStatus === "critical" || computerStatus === "overloaded"
+          ? "critical"
+          : internetStatus === "slow" || computerStatus === "high_load"
+            ? "warning"
+            : "healthy";
+
+      const overallScore =
+        overallStatus === "healthy" ? 96 : overallStatus === "warning" ? 72 : 42;
+
+      setStreamHealth((prev) => ({
+        ...prev,
+        overallStatus,
+        overallScore,
+        internetStatus,
+        pingLatencyMs: pingMs,
+        targetBitrateKbps: specs.kbps,
+        downlinkMbps,
+        networkType,
+        internetDiagnosis,
+        computerStatus,
+        targetFps: specs.fps,
+        EncodingFps: specs.fps,
+        cpuCores,
+        deviceMemoryGb,
+        computerDiagnosis,
+        greenScreenDiagnosis:
+          overallStatus === "critical"
+            ? "⚠️ High Green Screen Risk on 720p due to slow internet/CPU. Auto-Keyframe Guard is enabled; switch to 360p/540p for best stability."
+            : "✓ Strict IDR Keyframe & SPS/PPS Color Guard active — prevents orphaned P-frames (the #1 cause of Facebook Live green screen).",
+        activeIssues,
+      }));
+    } finally {
+      setIsTestingStreamHealth(false);
+    }
+  }, [getStreamPresetSpecs, isRecording, liveScene?.cameras.length, streamQualityPreset]);
+
+  const forceStreamKeyframeResync = useCallback((customNotice?: string) => {
+    // Purge any queued delta P-frames and force an immediate full-color IDR Keyframe
+    pendingRtmpFramesRef.current = [];
+    waitingForFreshKeyframeRef.current = true;
+    forceNextKeyframeRef.current = true;
+    setStreamError(null);
+    setStreamHealth((prev) => ({
+      ...prev,
+      videoSyncStatus: "resyncing",
+      greenScreenDiagnosis:
+        customNotice ||
+        "🔄 Forced fresh H.264 IDR Keyframe + SPS/PPS Color Headers! Facebook Live preview will refresh in ~2–3 seconds.",
+    }));
+  }, []);
+
+  const startRtmpLiveStream = async (overridePreset?: "360p" | "540p" | "720p") => {
     setStreamError(null);
 
     if (!streamKey.trim()) {
@@ -6886,6 +7122,12 @@ function LiveBroadcastStudioContent() {
       setShowFbSetupModal(true);
       return;
     }
+
+    const activePreset = overridePreset || streamQualityPreset;
+    if (overridePreset && overridePreset !== streamQualityPreset) {
+      setStreamQualityPreset(overridePreset);
+    }
+    const specs = getStreamPresetSpecs(activePreset);
 
     const win = window as unknown as {
       VideoEncoder?: new (init: {
@@ -6902,6 +7144,7 @@ function LiveBroadcastStudioContent() {
       }) => {
         configure: (cfg: Record<string, unknown>) => void;
         encode: (frame: unknown, opts?: { keyFrame?: boolean }) => void;
+        flush?: () => Promise<void>;
         close: () => void;
         state: string;
         encodeQueueSize?: number;
@@ -6924,37 +7167,77 @@ function LiveBroadcastStudioContent() {
     rtmpSessionIdRef.current = sessionId;
     pendingRtmpFramesRef.current = [];
     avcConfigBase64Ref.current = undefined;
+    forceNextKeyframeRef.current = false;
+    waitingForFreshKeyframeRef.current = false;
     streamFrameCountRef.current = 0;
     streamStartTimeRef.current = performance.now();
+    rtmpTelemetryRef.current = {
+      encodedFramesInWindow: 0,
+      cpuDroppedFrames: 0,
+      networkStallsCount: 0,
+      reconnectionsCount: 0,
+      keyframesSent: 0,
+      lastKeyframeSentAtMs: Date.now(),
+      lastPushLatencyMs: 0,
+      bytesSentInWindow: 0,
+    };
 
     try {
-      // 1. Prepare 1280x720 30fps Broadcast Encoder Canvas
+      // 1. Prepare Broadcast Encoder Canvas matching selected quality preset
       if (!encoderCanvasRef.current) {
-        const c = document.createElement("canvas");
-        c.width = 1280;
-        c.height = 720;
-        encoderCanvasRef.current = c;
+        encoderCanvasRef.current = document.createElement("canvas");
       }
+      encoderCanvasRef.current.width = specs.width;
+      encoderCanvasRef.current.height = specs.height;
 
-      // 2. Configure Hardware H.264 Baseline Encoder (avc format for direct RTMP FLV muxing)
+      const maxQueueFrames = specs.fps * 3; // Max 3 seconds buffer
+
+      // 2. Configure Hardware H.264 Baseline Encoder with strict GOP/Keyframe continuity guard
       const encoder = new win.VideoEncoder({
         output: (chunk, meta) => {
+          const isKey = chunk.type === "key";
           if (meta?.decoderConfig?.description) {
             const descBytes = new Uint8Array(meta.decoderConfig.description);
             if (descBytes.length > 0) {
               avcConfigBase64Ref.current = uint8ArrayToBase64(descBytes);
             }
           }
+
+          // GREEN-SCREEN PREVENTION:
+          // If frames were dropped due to a network stall/timeout, never enqueue trailing delta P-frames!
+          // Wait until the newly requested IDR Keyframe arrives so Facebook's decoder never gets corrupted.
+          if (waitingForFreshKeyframeRef.current) {
+            if (!isKey) {
+              return;
+            }
+            waitingForFreshKeyframeRef.current = false;
+          }
+
           const buf = new Uint8Array(chunk.byteLength);
           chunk.copyTo(buf);
           pendingRtmpFramesRef.current.push({
             timestampMs: Math.max(0, Math.round(chunk.timestamp / 1000)),
-            isKeyframe: chunk.type === "key",
+            isKeyframe: isKey,
             dataBase64: uint8ArrayToBase64(buf),
           });
-          // Cap queue if network stalls
-          if (pendingRtmpFramesRef.current.length > 90) {
-            pendingRtmpFramesRef.current = pendingRtmpFramesRef.current.slice(-45);
+
+          // If internet upload stalls, prune only complete older GOPs up to the latest Keyframe
+          if (pendingRtmpFramesRef.current.length > maxQueueFrames) {
+            let lastKeyIdx = -1;
+            for (let i = pendingRtmpFramesRef.current.length - 1; i >= 0; i--) {
+              if (pendingRtmpFramesRef.current[i].isKeyframe) {
+                lastKeyIdx = i;
+                break;
+              }
+            }
+            if (lastKeyIdx > 0) {
+              pendingRtmpFramesRef.current = pendingRtmpFramesRef.current.slice(lastKeyIdx);
+            } else {
+              pendingRtmpFramesRef.current = [];
+              waitingForFreshKeyframeRef.current = true;
+              forceNextKeyframeRef.current = true;
+            }
+            rtmpTelemetryRef.current.networkStallsCount += 1;
           }
         },
         error: (err) => {
@@ -6964,29 +7247,38 @@ function LiveBroadcastStudioContent() {
 
       encoder.configure({
         codec: "avc1.42001f",
-        width: 1280,
-        height: 720,
-        bitrate: 2_500_000,
-        framerate: 30,
-        bitrateMode: "constant",
+        width: specs.width,
+        height: specs.height,
+        bitrate: specs.bitrate,
+        framerate: specs.fps,
+        hardwareAcceleration: "prefer-hardware",
+        bitrateMode: "variable",
         latencyMode: "realtime",
         avc: { format: "avc" },
       });
       videoEncoderRef.current = encoder;
 
-      // Encode initial keyframe immediately so avcC sequence header is ready
+      // Encode & FLUSH initial IDR keyframe BEFORE connecting so avcC + Keyframe #0 are ready immediately
       if (liveCanvasRef.current && encoderCanvasRef.current) {
         const eCtx = encoderCanvasRef.current.getContext("2d");
         if (eCtx) {
-          eCtx.drawImage(liveCanvasRef.current, 0, 0, 1280, 720);
+          eCtx.fillStyle = "#0b0f19";
+          eCtx.fillRect(0, 0, specs.width, specs.height);
+          eCtx.drawImage(liveCanvasRef.current, 0, 0, specs.width, specs.height);
           const firstVf = new win.VideoFrame(encoderCanvasRef.current, { timestamp: 0 });
           encoder.encode(firstVf, { keyFrame: true });
           firstVf.close();
+          if (typeof encoder.flush === "function") {
+            await encoder.flush();
+          }
           streamFrameCountRef.current = 1;
         }
       }
 
-      // 3. Connect to Facebook Live / YouTube Live RTMPS Server
+      const initialFramesBatch = pendingRtmpFramesRef.current.splice(0, 10);
+
+      // 3. Connect to Facebook Live / YouTube Live RTMPS Server & send initial headers + Keyframe #0
+      const startT0 = performance.now();
       const startRes = await fetch("/api/rtmp-stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -6996,11 +7288,21 @@ function LiveBroadcastStudioContent() {
           rtmpUrl: rtmpServerUrl,
           streamKey: streamKey.trim(),
           avcConfigBase64: avcConfigBase64Ref.current,
+          metaConfig: {
+            width: specs.width,
+            height: specs.height,
+            videodatarate: specs.kbps,
+            framerate: specs.fps,
+          },
+          frames: initialFramesBatch,
         }),
       });
 
       const startJson = (await startRes.json()) as {
         ok: boolean;
+        bytesSent?: number;
+        framesSent?: number;
+        keyframesSent?: number;
         error?: string;
       };
 
@@ -7011,33 +7313,51 @@ function LiveBroadcastStudioContent() {
         );
       }
 
+      rtmpTelemetryRef.current.lastPushLatencyMs = Math.round(performance.now() - startT0);
+      if (startJson.keyframesSent && startJson.keyframesSent > 0) {
+        rtmpTelemetryRef.current.keyframesSent += startJson.keyframesSent;
+        rtmpTelemetryRef.current.lastKeyframeSentAtMs = Date.now();
+      }
+
       setIsConnectingStream(false);
       setIsStreamingLive(true);
       setStreamDurationSec(0);
-      setStreamFramesSent(0);
-      setStreamBytesSent(0);
+      setStreamFramesSent(startJson.framesSent || 0);
+      setStreamBytesSent(startJson.bytesSent || 0);
 
-      // 4. Start 30fps Frame Encoding Loop from Right Live Program Canvas with Monotonic Clock
-      const frameDurationUs = 33333; // 1,000,000 us / 30 fps
+      // 4. Start Frame Encoding Loop from Right Live Program Canvas with 1-second Keyframe cadence
+      const frameDurationUs = Math.round(1_000_000 / specs.fps);
+      const intervalMs = Math.max(16, Math.round(1000 / specs.fps));
+
       encoderLoopRef.current = setInterval(() => {
         const lCanvas = liveCanvasRef.current;
         const eCanvas = encoderCanvasRef.current;
         const enc = videoEncoderRef.current;
         if (!lCanvas || !eCanvas || !enc || enc.state !== "configured") return;
 
-        // Skip encoding if backpressure is high to keep FPS steady
-        if (typeof enc.encodeQueueSize === "number" && enc.encodeQueueSize > 15) {
+        // Check computer hardware encoder queue backpressure
+        if (typeof enc.encodeQueueSize === "number" && enc.encodeQueueSize > 10) {
+          rtmpTelemetryRef.current.cpuDroppedFrames += 1;
+          forceNextKeyframeRef.current = true;
           return;
         }
 
         const eCtx = eCanvas.getContext("2d");
         if (!eCtx) return;
-        eCtx.drawImage(lCanvas, 0, 0, 1280, 720);
+        eCtx.fillStyle = "#0b0f19";
+        eCtx.fillRect(0, 0, eCanvas.width, eCanvas.height);
+        eCtx.drawImage(lCanvas, 0, 0, eCanvas.width, eCanvas.height);
 
         const currentFrameIndex = streamFrameCountRef.current;
         const frameTimestampUs = currentFrameIndex * frameDurationUs;
-        const isKey = currentFrameIndex % 60 === 0; // Keyframe every 2 seconds (60 frames)
+        // Emit an IDR Keyframe every 1 second (every `specs.fps` frames) OR immediately when resync requested
+        const isKey =
+          forceNextKeyframeRef.current || currentFrameIndex % specs.fps === 0;
+        if (forceNextKeyframeRef.current) {
+          forceNextKeyframeRef.current = false;
+        }
         streamFrameCountRef.current += 1;
+        rtmpTelemetryRef.current.encodedFramesInWindow += 1;
 
         try {
           const vf = new win.VideoFrame!(eCanvas, {
@@ -7047,15 +7367,16 @@ function LiveBroadcastStudioContent() {
           enc.encode(vf, { keyFrame: isKey });
           vf.close();
         } catch {}
-      }, 33);
+      }, intervalMs);
 
-      // 5. Start Sequential RTMPS Packet Flush Loop (every 100ms, pushing available frames in real-time)
+      // 5. Start Sequential RTMPS Packet Flush Loop (flushing up to 60 frames per batch)
       flushLoopRef.current = setInterval(async () => {
         if (isFlushingRtmpRef.current || pendingRtmpFramesRef.current.length === 0) {
           return;
         }
         isFlushingRtmpRef.current = true;
-        const batch = pendingRtmpFramesRef.current.splice(0, 15);
+        const batch = pendingRtmpFramesRef.current.splice(0, 60);
+        const pushT0 = performance.now();
 
         try {
           const pushRes = await fetch("/api/rtmp-stream", {
@@ -7067,31 +7388,185 @@ function LiveBroadcastStudioContent() {
               rtmpUrl: rtmpServerUrl,
               streamKey: streamKey.trim(),
               avcConfigBase64: avcConfigBase64Ref.current,
+              metaConfig: {
+                width: specs.width,
+                height: specs.height,
+                videodatarate: specs.kbps,
+                framerate: specs.fps,
+              },
               frames: batch,
             }),
           });
+          const rttMs = Math.round(performance.now() - pushT0);
+          rtmpTelemetryRef.current.lastPushLatencyMs = rttMs;
+
           const pushJson = (await pushRes.json()) as {
             ok: boolean;
+            reconnected?: boolean;
             bytesSent?: number;
             framesSent?: number;
+            keyframesSent?: number;
+            needsKeyframe?: boolean;
             error?: string;
           };
+
           if (pushJson.ok) {
-            setStreamFramesSent((prev) => prev + (pushJson.framesSent || batch.length));
-            setStreamBytesSent((prev) => prev + (pushJson.bytesSent || 0));
-          } else if (pushJson.error) {
-            setStreamError(pushJson.error);
+            const sentCount = pushJson.framesSent ?? batch.length;
+            const sentBytes = pushJson.bytesSent ?? 0;
+            setStreamFramesSent((prev) => prev + sentCount);
+            setStreamBytesSent((prev) => prev + sentBytes);
+            rtmpTelemetryRef.current.bytesSentInWindow += sentBytes;
+
+            if (pushJson.keyframesSent && pushJson.keyframesSent > 0) {
+              rtmpTelemetryRef.current.keyframesSent += pushJson.keyframesSent;
+              rtmpTelemetryRef.current.lastKeyframeSentAtMs = Date.now();
+            }
+            if (pushJson.reconnected) {
+              rtmpTelemetryRef.current.reconnectionsCount += 1;
+            }
+            if (pushJson.needsKeyframe || pushJson.reconnected) {
+              // Server reconnected or needs an IDR Keyframe — purge delta frames & force immediate Keyframe
+              pendingRtmpFramesRef.current = [];
+              waitingForFreshKeyframeRef.current = true;
+              forceNextKeyframeRef.current = true;
+            }
+            // Clear transient timeout warning once frames flow again
+            setStreamError((prev) =>
+              prev && prev.includes("Timed out") ? null : prev
+            );
+          } else {
+            // Push rejected or timed out — resync on a clean IDR Keyframe so green screen never occurs
+            pendingRtmpFramesRef.current = [];
+            waitingForFreshKeyframeRef.current = true;
+            forceNextKeyframeRef.current = true;
+            rtmpTelemetryRef.current.networkStallsCount += 1;
+            if (pushJson.error) {
+              setStreamError(pushJson.error);
+            }
           }
         } catch {
-          // Network blip; next batch will auto-reconnect
+          // Network blip / timeout — purge orphaned P-frames and force fresh IDR Keyframe
+          rtmpTelemetryRef.current.lastPushLatencyMs = Math.round(performance.now() - pushT0);
+          rtmpTelemetryRef.current.networkStallsCount += 1;
+          pendingRtmpFramesRef.current = [];
+          waitingForFreshKeyframeRef.current = true;
+          forceNextKeyframeRef.current = true;
         } finally {
           isFlushingRtmpRef.current = false;
         }
-      }, 100);
+      }, 120);
 
-      // 6. Elapsed Stream Uptime Counter
+      // 6. Elapsed Stream Uptime + Real-Time Livestream Health & Resource Telemetry Loop (every 1s)
       streamTimerRef.current = setInterval(() => {
         setStreamDurationSec((prev) => prev + 1);
+
+        const tel = rtmpTelemetryRef.current;
+        const enc = videoEncoderRef.current;
+        const queueSize = typeof enc?.encodeQueueSize === "number" ? enc.encodeQueueSize : 0;
+        const actualFps = Math.min(specs.fps, tel.encodedFramesInWindow);
+        const uploadKbps = Math.round((tel.bytesSentInWindow * 8) / 1000);
+        const pingMs = tel.lastPushLatencyMs;
+        const lastKeySec = Math.max(
+          0,
+          Math.round((Date.now() - tel.lastKeyframeSentAtMs) / 1000)
+        );
+
+        // Reset 1-second window counters
+        tel.encodedFramesInWindow = 0;
+        tel.bytesSentInWindow = 0;
+
+        const nav =
+          typeof navigator !== "undefined"
+            ? (navigator as Navigator & {
+                hardwareConcurrency?: number;
+                deviceMemory?: number;
+                connection?: { downlink?: number; effectiveType?: string };
+              })
+            : null;
+        const cpuCores = nav?.hardwareConcurrency || 4;
+        const deviceMemoryGb = nav?.deviceMemory ?? null;
+        const downlinkMbps = nav?.connection?.downlink ?? null;
+        const networkType = nav?.connection?.effectiveType || "broadband";
+
+        // 1. Diagnose Internet Connection
+        let internetStatus: "ok" | "slow" | "critical" = "ok";
+        let internetDiagnosis = `Internet OK (${pingMs}ms ping • ${uploadKbps} kbps upload)`;
+        if (pingMs > 1200 || pendingRtmpFramesRef.current.length > specs.fps * 2) {
+          internetStatus = "critical";
+          internetDiagnosis = `⚠️ Internet Connection Too Slow (${pingMs}ms latency • ${pendingRtmpFramesRef.current.length} frames queued). Upload bottleneck causes timeouts & Green Screen on higher bitrates!`;
+        } else if (pingMs > 600 || pendingRtmpFramesRef.current.length > specs.fps) {
+          internetStatus = "slow";
+          internetDiagnosis = `Internet upload is lagging (${pingMs}ms ping • ${uploadKbps} kbps). Lower quality to 360p if video stutters.`;
+        }
+
+        // 2. Diagnose Computer CPU/GPU Resources
+        let computerStatus: "ok" | "high_load" | "overloaded" = "ok";
+        let computerDiagnosis = `Computer CPU/GPU OK (${actualFps}/${specs.fps} FPS • Encoder Queue: ${queueSize})`;
+        if (queueSize > 8 || actualFps < specs.fps * 0.55) {
+          computerStatus = "overloaded";
+          computerDiagnosis = `⚠️ Computer CPU/GPU Overloaded (Encoding ${actualFps}/${specs.fps} FPS, Queue: ${queueSize}). Close extra tabs, pause local recording, or switch to 360p!`;
+        } else if (queueSize > 4 || actualFps < specs.fps * 0.8) {
+          computerStatus = "high_load";
+          computerDiagnosis = `Computer CPU/GPU under heavy load (${actualFps}/${specs.fps} FPS, Queue: ${queueSize}).`;
+        }
+
+        // 3. Diagnose Video / Green Screen Sync
+        const videoSyncStatus: "synced" | "resyncing" | "waiting_keyframe" =
+          waitingForFreshKeyframeRef.current
+            ? "resyncing"
+            : tel.keyframesSent === 0
+              ? "waiting_keyframe"
+              : "synced";
+
+        let greenScreenDiagnosis = `✓ H.264 IDR Keyframes Synced (${tel.keyframesSent} keyframes sent, last ${lastKeySec}s ago). Color headers healthy.`;
+        if (videoSyncStatus === "resyncing" || lastKeySec > 4) {
+          greenScreenDiagnosis = `🔄 Re-syncing H.264 IDR Keyframe after network stall so Facebook Live does not show a Green Screen...`;
+        }
+
+        const activeIssues: string[] = [];
+        if (internetStatus !== "ok") activeIssues.push(internetDiagnosis);
+        if (computerStatus !== "ok") activeIssues.push(computerDiagnosis);
+
+        const overallStatus: "healthy" | "warning" | "critical" =
+          internetStatus === "critical" || computerStatus === "overloaded"
+            ? "critical"
+            : internetStatus === "slow" || computerStatus === "high_load" || videoSyncStatus !== "synced"
+              ? "warning"
+              : "healthy";
+
+        const overallScore =
+          overallStatus === "healthy"
+            ? 98
+            : overallStatus === "warning"
+              ? 68
+              : 35;
+
+        setStreamHealth({
+          overallStatus,
+          overallScore,
+          internetStatus,
+          pingLatencyMs: pingMs,
+          uploadBitrateKbps: uploadKbps,
+          targetBitrateKbps: specs.kbps,
+          downlinkMbps,
+          networkType,
+          networkStallsCount: tel.networkStallsCount,
+          reconnectionsCount: tel.reconnectionsCount,
+          internetDiagnosis,
+          computerStatus,
+          encodingFps: actualFps,
+          targetFps: specs.fps,
+          encoderQueueSize: queueSize,
+          cpuDroppedFrames: tel.cpuDroppedFrames,
+          cpuCores,
+          deviceMemoryGb,
+          computerDiagnosis,
+          videoSyncStatus,
+          keyframesSent: tel.keyframesSent,
+          lastKeyframeAgoSec: lastKeySec,
+          greenScreenDiagnosis,
+          activeIssues,
+        });
       }, 1000);
     } catch (err) {
       await stopRtmpLiveStream();
@@ -7100,6 +7575,16 @@ function LiveBroadcastStudioContent() {
           ? err.message
           : "Failed to start Facebook Live stream."
       );
+    }
+  };
+
+  const handleSwitchStreamQualityLive = async (newPreset: "360p" | "540p" | "720p") => {
+    setStreamQualityPreset(newPreset);
+    if (isStreamingLive) {
+      await stopRtmpLiveStream();
+      setTimeout(() => {
+        void startRtmpLiveStream(newPreset);
+      }, 250);
     }
   };
 
@@ -8106,26 +8591,53 @@ function LiveBroadcastStudioContent() {
 
         {/* Right: Facebook Live Stream, Section Order, Light Mode & Quick Record Controls */}
         <div className="flex flex-wrap items-center gap-2">
-          {/* Direct Facebook / YouTube Live Button */}
+          {/* Direct Facebook / YouTube Live Button + Live Health Pill */}
           {!isStreamingLive ? (
             <button
               type="button"
-              onClick={() => setShowFbSetupModal(true)}
+              onClick={() => {
+                setShowFbSetupModal(true);
+                void runStreamHealthCheck();
+              }}
               className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 px-3.5 py-1.5 text-xs font-black uppercase tracking-wider text-white shadow-sm cursor-pointer"
             >
               <Radio className="h-3.5 w-3.5" />
               <span>Go Live on Facebook / YouTube</span>
             </button>
           ) : (
-            <div className="flex items-center gap-1.5 rounded-lg bg-emerald-950/90 border border-emerald-500 px-2.5 py-1">
+            <div className="flex flex-wrap items-center gap-1.5 rounded-lg bg-emerald-950/90 border border-emerald-500 px-2.5 py-1">
               <span className="h-2 w-2 rounded-full bg-emerald-400 animate-ping" />
               <span className="text-[0.68rem] font-black uppercase text-emerald-300">
-                ON AIR • {streamPlatform.toUpperCase()} ({formatClock(streamDurationSec)})
+                ON AIR • {streamPlatform.toUpperCase()} ({formatClock(streamDurationSec)}) • {streamQualityPreset.toUpperCase()}
+              </span>
+              <span
+                className={`rounded px-1.5 py-0.5 text-[0.58rem] font-black uppercase ${
+                  streamHealth.overallStatus === "critical"
+                    ? "bg-rose-600 text-white animate-pulse"
+                    : streamHealth.overallStatus === "warning"
+                      ? "bg-amber-500 text-slate-950"
+                      : "bg-emerald-600/40 text-emerald-200 border border-emerald-400/40"
+                }`}
+                title={`${streamHealth.internetDiagnosis} | ${streamHealth.computerDiagnosis}`}
+              >
+                {streamHealth.overallStatus === "critical"
+                  ? `⚠️ POOR NET/CPU (${streamHealth.pingLatencyMs}ms)`
+                  : streamHealth.overallStatus === "warning"
+                    ? `⚡ LAG RISK (${streamHealth.pingLatencyMs}ms)`
+                    : `✓ HEALTHY (${streamHealth.encodingFps}fps • ${streamHealth.pingLatencyMs}ms)`}
               </span>
               <button
                 type="button"
+                onClick={() => forceStreamKeyframeResync()}
+                className="rounded bg-amber-500 hover:bg-amber-400 px-2 py-0.5 text-[0.6rem] font-black uppercase text-slate-950 cursor-pointer"
+                title="Force an immediate full-color H.264 Keyframe if Facebook Live preview shows a green screen"
+              >
+                🔧 Fix Green
+              </button>
+              <button
+                type="button"
                 onClick={stopRtmpLiveStream}
-                className="ml-1 rounded bg-rose-600 hover:bg-rose-500 px-2 py-0.5 text-[0.62rem] font-black uppercase text-white cursor-pointer"
+                className="rounded bg-rose-600 hover:bg-rose-500 px-2 py-0.5 text-[0.62rem] font-black uppercase text-white cursor-pointer"
               >
                 End Stream
               </button>
@@ -12128,16 +12640,30 @@ function LiveBroadcastStudioContent() {
               <Radio className="h-3.5 w-3.5 text-blue-400" />
               4. Facebook Live &amp; Storage
             </span>
-            <button
-              type="button"
-              onClick={() => setShowFbSetupModal(true)}
-              className="rounded bg-blue-600/20 border border-blue-500/40 px-2 py-0.5 text-[0.6rem] font-black uppercase text-blue-300 hover:bg-blue-600 hover:text-white cursor-pointer"
-            >
-              Setup Guide
-            </button>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => void runStreamHealthCheck()}
+                disabled={isTestingStreamHealth}
+                className="rounded bg-emerald-600/20 border border-emerald-500/40 px-2 py-0.5 text-[0.58rem] font-black uppercase text-emerald-300 hover:bg-emerald-600 hover:text-white cursor-pointer disabled:opacity-50"
+                title="Test internet upload latency & computer CPU/GPU readiness"
+              >
+                {isTestingStreamHealth ? "Testing..." : "🩺 Check Health"}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowFbSetupModal(true);
+                  void runStreamHealthCheck();
+                }}
+                className="rounded bg-blue-600/20 border border-blue-500/40 px-2 py-0.5 text-[0.6rem] font-black uppercase text-blue-300 hover:bg-blue-600 hover:text-white cursor-pointer"
+              >
+                Setup Guide
+              </button>
+            </div>
           </div>
 
-          <div className="p-3 space-y-2.5 text-xs overflow-y-auto max-h-80">
+          <div className="p-3 space-y-2.5 text-xs overflow-y-auto max-h-[34rem]">
             {/* Direct Facebook Page / YouTube Live Stream Key Box */}
             <div className="rounded-xl border border-blue-500/40 bg-blue-950/20 p-2.5 space-y-2">
               <div className="flex items-center justify-between">
@@ -12192,6 +12718,57 @@ function LiveBroadcastStudioContent() {
                 </div>
               </div>
 
+              {/* Stream Quality / Bitrate Selector (Prevents Green Screen on Slow Internet or High CPU) */}
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <label className="block text-[0.6rem] font-black uppercase text-amber-300">
+                    Stream Resolution &amp; Internet Load:
+                  </label>
+                  <span className="text-[0.55rem] text-slate-400">
+                    Use 360p/540p if Facebook shows Green Screen
+                  </span>
+                </div>
+                <div className="grid grid-cols-3 gap-1">
+                  {(
+                    [
+                      {
+                        id: "360p",
+                        title: "360p Fast",
+                        sub: "550 kbps • Slow Net",
+                      },
+                      {
+                        id: "540p",
+                        title: "540p Balanced",
+                        sub: "1 Mbps • Recommended",
+                      },
+                      {
+                        id: "720p",
+                        title: "720p HD",
+                        sub: "1.6 Mbps • Fast Fiber",
+                      },
+                    ] as const
+                  ).map((q) => (
+                    <button
+                      key={q.id}
+                      type="button"
+                      onClick={() => void handleSwitchStreamQualityLive(q.id)}
+                      className={`rounded-lg border px-1.5 py-1 text-left cursor-pointer transition-all ${
+                        streamQualityPreset === q.id
+                          ? "border-blue-400 bg-blue-600/30 text-white shadow"
+                          : "border-slate-800 bg-slate-900/90 text-slate-400 hover:text-white"
+                      }`}
+                    >
+                      <div className="text-[0.62rem] font-black uppercase leading-tight">
+                        {q.title}
+                      </div>
+                      <div className="text-[0.52rem] text-slate-300 truncate">
+                        {q.sub}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               <div>
                 <div className="flex items-center justify-between mb-1">
                   <label className="text-[0.65rem] font-black uppercase text-blue-400">
@@ -12230,8 +12807,26 @@ function LiveBroadcastStudioContent() {
               </div>
 
               {streamError && (
-                <div className="rounded-lg bg-rose-950/70 border border-rose-500/50 px-2.5 py-1.5 text-[0.65rem] font-bold text-rose-200">
-                  ⚠️ {streamError}
+                <div className="rounded-lg bg-rose-950/70 border border-rose-500/50 px-2.5 py-1.5 text-[0.65rem] font-bold text-rose-200 space-y-1">
+                  <div>⚠️ {streamError}</div>
+                  <div className="flex flex-wrap gap-1 pt-0.5">
+                    <button
+                      type="button"
+                      onClick={() => forceStreamKeyframeResync()}
+                      className="rounded bg-amber-500 hover:bg-amber-400 px-2 py-0.5 text-[0.58rem] font-black uppercase text-slate-950 cursor-pointer"
+                    >
+                      🔧 Resync Keyframe Now
+                    </button>
+                    {streamQualityPreset !== "360p" && (
+                      <button
+                        type="button"
+                        onClick={() => void handleSwitchStreamQualityLive("360p")}
+                        className="rounded bg-blue-600 hover:bg-blue-500 px-2 py-0.5 text-[0.58rem] font-black uppercase text-white cursor-pointer"
+                      >
+                        ⚡ Switch to 360p (Low Internet Mode)
+                      </button>
+                    )}
+                  </div>
                 </div>
               )}
 
@@ -12239,14 +12834,14 @@ function LiveBroadcastStudioContent() {
                 <button
                   type="button"
                   disabled={isConnectingStream}
-                  onClick={startRtmpLiveStream}
+                  onClick={() => void startRtmpLiveStream()}
                   className="w-full rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-60 px-3 py-2 text-xs font-black uppercase tracking-wider text-white shadow-md cursor-pointer flex items-center justify-center gap-1.5"
                 >
                   <Radio className="h-3.5 w-3.5" />
                   <span>
                     {isConnectingStream
                       ? "Connecting to Facebook Live..."
-                      : `Connect & Stream to ${streamPlatform === "facebook" ? "Facebook Live" : "YouTube"}`}
+                      : `Connect & Stream (${streamQualityPreset.toUpperCase()}) to ${streamPlatform === "facebook" ? "Facebook Live" : "YouTube"}`}
                   </span>
                 </button>
               ) : (
@@ -12260,15 +12855,198 @@ function LiveBroadcastStudioContent() {
                       {streamFramesSent} frames • {(streamBytesSent / (1024 * 1024)).toFixed(1)} MB
                     </span>
                   </div>
-                  <button
-                    type="button"
-                    onClick={stopRtmpLiveStream}
-                    className="w-full rounded-xl bg-rose-600 hover:bg-rose-500 px-3 py-1.5 text-xs font-black uppercase tracking-wider text-white cursor-pointer"
-                  >
-                    Stop Live Stream
-                  </button>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => forceStreamKeyframeResync()}
+                      className="rounded-xl bg-amber-500 hover:bg-amber-400 px-2.5 py-1.5 text-[0.64rem] font-black uppercase tracking-wider text-slate-950 cursor-pointer"
+                      title="Force a fresh full-color H.264 Keyframe + SPS/PPS header to fix green screen on Facebook"
+                    >
+                      🔧 Fix Green Screen
+                    </button>
+                    <button
+                      type="button"
+                      onClick={stopRtmpLiveStream}
+                      className="rounded-xl bg-rose-600 hover:bg-rose-500 px-2.5 py-1.5 text-[0.64rem] font-black uppercase tracking-wider text-white cursor-pointer"
+                    >
+                      Stop Live Stream
+                    </button>
+                  </div>
                 </div>
               )}
+
+              {/* ===============================================================
+                  LIVESTREAM HEALTH & GREEN SCREEN DIAGNOSTICS MONITOR
+                 =============================================================== */}
+              <div className="rounded-xl border border-slate-700/80 bg-slate-950/90 p-2.5 space-y-2">
+                <div className="flex items-center justify-between">
+                  <button
+                    type="button"
+                    onClick={() => setShowStreamHealthDetails((v) => !v)}
+                    className="flex items-center gap-1.5 text-left cursor-pointer"
+                  >
+                    <Wifi className="h-3.5 w-3.5 text-emerald-400" />
+                    <span className="text-[0.65rem] font-black uppercase text-white">
+                      Livestream Health &amp; Diagnostics
+                    </span>
+                  </button>
+                  <div className="flex items-center gap-1">
+                    <span
+                      className={`rounded px-1.5 py-0.5 text-[0.56rem] font-black uppercase ${
+                        streamHealth.overallStatus === "critical"
+                          ? "bg-rose-600 text-white"
+                          : streamHealth.overallStatus === "warning"
+                            ? "bg-amber-500 text-slate-950"
+                            : streamHealth.overallStatus === "healthy"
+                              ? "bg-emerald-600 text-white"
+                              : "bg-slate-800 text-slate-300"
+                      }`}
+                    >
+                      {streamHealth.overallStatus === "critical"
+                        ? "🔴 CRITICAL (GREEN SCREEN RISK)"
+                        : streamHealth.overallStatus === "warning"
+                          ? "🟡 WARNING (LAG / SLOW)"
+                          : streamHealth.overallStatus === "healthy"
+                            ? "🟢 HEALTHY"
+                            : "⚪ READY"}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setShowStreamHealthDetails((v) => !v)}
+                      className="text-[0.58rem] font-bold text-slate-400 hover:text-white px-1 cursor-pointer"
+                    >
+                      {showStreamHealthDetails ? "Hide" : "Show"}
+                    </button>
+                  </div>
+                </div>
+
+                {showStreamHealthDetails && (
+                  <div className="space-y-1.5 pt-0.5">
+                    {/* 1. Internet Connection Check */}
+                    <div
+                      className={`rounded-lg border p-2 space-y-0.5 ${
+                        streamHealth.internetStatus === "critical"
+                          ? "border-rose-500/60 bg-rose-950/40"
+                          : streamHealth.internetStatus === "slow"
+                            ? "border-amber-500/60 bg-amber-950/30"
+                            : "border-slate-800 bg-slate-900/80"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-[0.6rem] font-black uppercase text-sky-300">
+                          🌐 1. Internet Upload Connection
+                        </span>
+                        <span
+                          className={`rounded px-1.5 py-0.2 text-[0.55rem] font-black uppercase ${
+                            streamHealth.internetStatus === "critical"
+                              ? "bg-rose-600 text-white"
+                              : streamHealth.internetStatus === "slow"
+                                ? "bg-amber-500 text-slate-950"
+                                : "bg-emerald-600/30 text-emerald-300"
+                          }`}
+                        >
+                          {streamHealth.internetStatus === "critical"
+                            ? "NOT OK • TOO SLOW"
+                            : streamHealth.internetStatus === "slow"
+                              ? "MODERATE / LAG"
+                              : "CONNECTION OK"}
+                        </span>
+                      </div>
+                      <p className="text-[0.58rem] text-slate-200 leading-snug">
+                        {streamHealth.internetDiagnosis}
+                      </p>
+                      <div className="flex flex-wrap gap-2 text-[0.54rem] font-mono text-slate-400 pt-0.5">
+                        <span>Ping: {streamHealth.pingLatencyMs}ms</span>
+                        <span>•</span>
+                        <span>
+                          Upload: {streamHealth.uploadBitrateKbps}/{streamHealth.targetBitrateKbps} kbps
+                        </span>
+                        <span>•</span>
+                        <span>Stalls: {streamHealth.networkStallsCount}</span>
+                      </div>
+                    </div>
+
+                    {/* 2. Computer CPU / GPU Resources Check */}
+                    <div
+                      className={`rounded-lg border p-2 space-y-0.5 ${
+                        streamHealth.computerStatus === "overloaded"
+                          ? "border-rose-500/60 bg-rose-950/40"
+                          : streamHealth.computerStatus === "high_load"
+                            ? "border-amber-500/60 bg-amber-950/30"
+                            : "border-slate-800 bg-slate-900/80"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-[0.6rem] font-black uppercase text-violet-300">
+                          💻 2. Computer CPU / GPU Resources
+                        </span>
+                        <span
+                          className={`rounded px-1.5 py-0.2 text-[0.55rem] font-black uppercase ${
+                            streamHealth.computerStatus === "overloaded"
+                              ? "bg-rose-600 text-white"
+                              : streamHealth.computerStatus === "high_load"
+                                ? "bg-amber-500 text-slate-950"
+                                : "bg-emerald-600/30 text-emerald-300"
+                          }`}
+                        >
+                          {streamHealth.computerStatus === "overloaded"
+                            ? "OVERLOADED"
+                            : streamHealth.computerStatus === "high_load"
+                              ? "HIGH LOAD"
+                              : "RESOURCES OK"}
+                        </span>
+                      </div>
+                      <p className="text-[0.58rem] text-slate-200 leading-snug">
+                        {streamHealth.computerDiagnosis}
+                      </p>
+                      <div className="flex flex-wrap gap-2 text-[0.54rem] font-mono text-slate-400 pt-0.5">
+                        <span>
+                          FPS: {streamHealth.encodingFps}/{streamHealth.targetFps}
+                        </span>
+                        <span>•</span>
+                        <span>Encoder Queue: {streamHealth.encoderQueueSize}</span>
+                        <span>•</span>
+                        <span>
+                          CPU: {streamHealth.cpuCores} cores
+                          {streamHealth.deviceMemoryGb ? ` / ${streamHealth.deviceMemoryGb}GB RAM` : ""}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* 3. Why Green Screen Happens & Decoder Status */}
+                    <div className="rounded-lg border border-emerald-500/40 bg-emerald-950/20 p-2 space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[0.6rem] font-black uppercase text-emerald-300">
+                          🟩 3. Why Green Screen Happens &amp; Auto-Guard
+                        </span>
+                        <span className="rounded bg-emerald-600/30 px-1.5 py-0.2 text-[0.54rem] font-black uppercase text-emerald-200">
+                          {streamHealth.keyframesSent} Keyframes
+                        </span>
+                      </div>
+                      <p className="text-[0.58rem] text-emerald-100 leading-snug">
+                        {streamHealth.greenScreenDiagnosis}
+                      </p>
+                      <div className="rounded bg-slate-950/80 border border-slate-800 p-1.5 text-[0.55rem] text-slate-300 space-y-0.5 leading-relaxed">
+                        <p className="font-bold text-amber-300">
+                          Why did Facebook Live turn Green?
+                        </p>
+                        <p>
+                          • <strong>1. Slow Internet / Timeout (`Timed out connecting...`):</strong>{" "}
+                          When upload lags, full H.264 Keyframes (I-frames) get delayed and only partial difference frames (P-frames) reach Facebook. Facebook&apos;s YUV420p decoder renders missing reference frames as <code className="text-emerald-400">Y=0, U=0, V=0</code> (solid green).
+                        </p>
+                        <p>
+                          • <strong>2. Heavy Computer Load:</strong> Running 2-Cam Split Screen + Scorebug + Recording at 720p 30fps can overload CPU/GPU &amp; upload bandwidth.
+                        </p>
+                        <p>
+                          • <strong>How to Fix Immediately:</strong> Click{" "}
+                          <strong className="text-amber-300">&ldquo;🔧 Fix Green Screen&rdquo;</strong>{" "}
+                          or select <strong className="text-blue-300">360p Fast / 540p Balanced</strong> above.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
 
             <label className="block text-[0.65rem] font-black uppercase text-slate-400 pt-1">
@@ -12325,11 +13103,11 @@ function LiveBroadcastStudioContent() {
          ===================================================================== */}
       {showFbSetupModal && (
         <div
-          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto"
           onClick={() => setShowFbSetupModal(false)}
         >
           <div
-            className="w-full max-w-xl rounded-2xl border border-blue-500/40 bg-[#131926] p-5 shadow-2xl space-y-4 text-slate-100"
+            className="w-full max-w-xl rounded-2xl border border-blue-500/40 bg-[#131926] p-5 shadow-2xl space-y-3.5 text-slate-100 max-h-[92vh] overflow-y-auto"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
@@ -12356,11 +13134,11 @@ function LiveBroadcastStudioContent() {
             </div>
 
             {/* Step-by-Step Instructions matching user's Facebook Live Producer screenshot */}
-            <div className="rounded-xl bg-slate-900/90 border border-slate-800 p-3.5 space-y-2.5 text-xs">
+            <div className="rounded-xl bg-slate-900/90 border border-slate-800 p-3 space-y-2 text-xs">
               <p className="font-black uppercase text-amber-400 text-[0.68rem]">
                 How to Connect Your Facebook Page (3 Quick Steps):
               </p>
-              <ol className="list-decimal list-inside space-y-1.5 text-slate-300 leading-relaxed">
+              <ol className="list-decimal list-inside space-y-1 text-slate-300 leading-relaxed">
                 <li>
                   In your <strong>Facebook Live Producer</strong> tab (left sidebar under{" "}
                   <span className="text-white font-bold">&ldquo;Choose where to post&rdquo;</span>),
@@ -12380,6 +13158,103 @@ function LiveBroadcastStudioContent() {
                   <strong className="text-blue-400">&ldquo;Go live&rdquo;</strong> on Facebook!
                 </li>
               </ol>
+            </div>
+
+            {/* Pre-Flight & Live Stream Health Summary inside Modal */}
+            <div className="rounded-xl border border-slate-700 bg-slate-950/90 p-3 space-y-2 text-xs">
+              <div className="flex items-center justify-between">
+                <span className="text-[0.68rem] font-black uppercase text-emerald-300 flex items-center gap-1.5">
+                  <Wifi className="h-3.5 w-3.5" />
+                  Computer Resources &amp; Internet Health Check
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void runStreamHealthCheck()}
+                  disabled={isTestingStreamHealth}
+                  className="rounded-lg bg-emerald-600/25 border border-emerald-500/40 hover:bg-emerald-600 px-2.5 py-1 text-[0.6rem] font-black uppercase text-emerald-200 hover:text-white cursor-pointer"
+                >
+                  {isTestingStreamHealth ? "Checking..." : "🩺 Re-Test Now"}
+                </button>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div className="rounded-lg bg-slate-900 border border-slate-800 p-2">
+                  <div className="flex items-center justify-between mb-0.5">
+                    <span className="text-[0.6rem] font-black uppercase text-sky-300">
+                      🌐 Internet Upload
+                    </span>
+                    <span
+                      className={`rounded px-1.5 py-0.2 text-[0.55rem] font-black uppercase ${
+                        streamHealth.internetStatus === "critical"
+                          ? "bg-rose-600 text-white"
+                          : streamHealth.internetStatus === "slow"
+                            ? "bg-amber-500 text-slate-950"
+                            : "bg-emerald-600/30 text-emerald-300"
+                      }`}
+                    >
+                      {streamHealth.internetStatus === "critical"
+                        ? "SLOW / RISK"
+                        : streamHealth.internetStatus === "slow"
+                          ? "MODERATE"
+                          : "OK"}
+                    </span>
+                  </div>
+                  <p className="text-[0.6rem] text-slate-300 leading-snug">
+                    {streamHealth.internetDiagnosis}
+                  </p>
+                </div>
+                <div className="rounded-lg bg-slate-900 border border-slate-800 p-2">
+                  <div className="flex items-center justify-between mb-0.5">
+                    <span className="text-[0.6rem] font-black uppercase text-violet-300">
+                      💻 Computer CPU/GPU
+                    </span>
+                    <span
+                      className={`rounded px-1.5 py-0.2 text-[0.55rem] font-black uppercase ${
+                        streamHealth.computerStatus === "overloaded"
+                          ? "bg-rose-600 text-white"
+                          : streamHealth.computerStatus === "high_load"
+                            ? "bg-amber-500 text-slate-950"
+                            : "bg-emerald-600/30 text-emerald-300"
+                      }`}
+                    >
+                      {streamHealth.computerStatus === "overloaded"
+                        ? "OVERLOADED"
+                        : streamHealth.computerStatus === "high_load"
+                          ? "HIGH LOAD"
+                          : "OK"}
+                    </span>
+                  </div>
+                  <p className="text-[0.6rem] text-slate-300 leading-snug">
+                    {streamHealth.computerDiagnosis}
+                  </p>
+                </div>
+              </div>
+              <div>
+                <label className="block text-[0.6rem] font-black uppercase text-amber-300 mb-1">
+                  Select Stream Quality (Use 360p or 540p to Prevent Green Screen on Slow Internet):
+                </label>
+                <div className="grid grid-cols-3 gap-2">
+                  {(
+                    [
+                      { id: "360p", label: "360p Fast (550 kbps)" },
+                      { id: "540p", label: "540p Balanced (1 Mbps)" },
+                      { id: "720p", label: "720p HD (1.6 Mbps)" },
+                    ] as const
+                  ).map((q) => (
+                    <button
+                      key={q.id}
+                      type="button"
+                      onClick={() => void handleSwitchStreamQualityLive(q.id)}
+                      className={`rounded-lg py-1.5 px-2 text-[0.62rem] font-black uppercase border cursor-pointer ${
+                        streamQualityPreset === q.id
+                          ? "bg-blue-600 border-blue-400 text-white"
+                          : "bg-slate-900 border-slate-800 text-slate-400 hover:text-white"
+                      }`}
+                    >
+                      {q.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
 
             {/* Platform & Server URL */}
@@ -12514,18 +13389,27 @@ function LiveBroadcastStudioContent() {
                     <span>
                       {isConnectingStream
                         ? "Connecting to Facebook RTMPS..."
-                        : "Connect & Stream to Facebook Live"}
+                        : `Connect & Stream (${streamQualityPreset.toUpperCase()})`}
                     </span>
                   </button>
                 ) : (
-                  <button
-                    type="button"
-                    onClick={stopRtmpLiveStream}
-                    className="inline-flex items-center gap-2 rounded-xl bg-rose-600 hover:bg-rose-500 px-5 py-2.5 text-xs font-black uppercase tracking-wider text-white shadow-lg cursor-pointer"
-                  >
-                    <Square className="h-4 w-4 fill-current" />
-                    <span>Stop Streaming ({formatClock(streamDurationSec)})</span>
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => forceStreamKeyframeResync()}
+                      className="inline-flex items-center gap-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 px-4 py-2.5 text-xs font-black uppercase tracking-wider text-slate-950 shadow-lg cursor-pointer"
+                    >
+                      <span>🔧 Fix Green Screen</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={stopRtmpLiveStream}
+                      className="inline-flex items-center gap-2 rounded-xl bg-rose-600 hover:bg-rose-500 px-5 py-2.5 text-xs font-black uppercase tracking-wider text-white shadow-lg cursor-pointer"
+                    >
+                      <Square className="h-4 w-4 fill-current" />
+                      <span>Stop Streaming ({formatClock(streamDurationSec)})</span>
+                    </button>
+                  </div>
                 )}
               </div>
             </div>

@@ -189,13 +189,54 @@ function buildAvcCFromSpsPps(sps: Buffer, pps: Buffer): Buffer {
   return header;
 }
 
-function convertAnnexBToAvcAndExtractConfig(buf: Buffer): {
+function isValidAvccBuffer(buf: Buffer): boolean {
+  if (buf.length < 5) return false;
+  let offset = 0;
+  let count = 0;
+  while (offset < buf.length) {
+    if (offset + 4 > buf.length) return false;
+    const naluLen = buf.readUInt32BE(offset);
+    if (naluLen <= 0 || offset + 4 + naluLen > buf.length) return false;
+    offset += 4 + naluLen;
+    count++;
+  }
+  return offset === buf.length && count > 0;
+}
+
+function splitAvccNalus(buf: Buffer): Buffer[] {
+  const nalus: Buffer[] = [];
+  let offset = 0;
+  while (offset + 4 <= buf.length) {
+    const naluLen = buf.readUInt32BE(offset);
+    if (naluLen <= 0 || offset + 4 + naluLen > buf.length) break;
+    nalus.push(buf.subarray(offset + 4, offset + 4 + naluLen));
+    offset += 4 + naluLen;
+  }
+  return nalus;
+}
+
+function sanitizeH264FrameAndExtractConfig(buf: Buffer): {
   avcPayload: Buffer;
   extractedAvcC: Buffer | null;
+  hasIdrSlice: boolean;
 } {
-  const nalus = splitAnnexBNalus(buf);
+  const nalus = isValidAvccBuffer(buf)
+    ? splitAvccNalus(buf)
+    : isAnnexB(buf)
+      ? splitAnnexBNalus(buf)
+      : [];
+
+  if (nalus.length === 0) {
+    return {
+      avcPayload: buf,
+      extractedAvcC: null,
+      hasIdrSlice: false,
+    };
+  }
+
   let sps: Buffer | null = null;
   let pps: Buffer | null = null;
+  let hasIdrSlice = false;
   const lengthPrefixedParts: Buffer[] = [];
 
   for (const nalu of nalus) {
@@ -209,9 +250,12 @@ function convertAnnexBToAvcAndExtractConfig(buf: Buffer): {
       pps = nalu;
       continue;
     }
-    if (nalType === 9) {
-      // Skip Access Unit Delimiter
+    if (nalType === 9 || nalType === 12) {
+      // Skip Access Unit Delimiter (9) & Filler Data (12) so FLV tags start cleanly with VCL/SEI
       continue;
+    }
+    if (nalType === 5) {
+      hasIdrSlice = true;
     }
     const lenBuf = Buffer.alloc(4);
     lenBuf.writeUInt32BE(nalu.length, 0);
@@ -222,6 +266,7 @@ function convertAnnexBToAvcAndExtractConfig(buf: Buffer): {
   return {
     avcPayload: Buffer.concat(lengthPrefixedParts),
     extractedAvcC,
+    hasIdrSlice,
   };
 }
 
@@ -235,6 +280,13 @@ export interface EncodedFrameInput {
   dataBase64: string;
 }
 
+export interface StreamMetaConfig {
+  width?: number;
+  height?: number;
+  videodatarate?: number;
+  framerate?: number;
+}
+
 export class RtmpPublisherSession {
   public readonly id: string;
   public readonly rtmpUrl: string;
@@ -243,12 +295,23 @@ export class RtmpPublisherSession {
   private isConnected = false;
   private isPublishing = false;
   private sentHeaders = false;
+  private hasSentVideoKeyframe = false;
+  private baseTimestampMs: number | null = null;
+  private lastVideoTsMs = 0;
   private avcConfig: Buffer | null = null;
   private lastAudioTsMs = 0;
   private totalBytesSent = 0;
   private totalFramesSent = 0;
+  private totalKeyframesSent = 0;
+  private skippedDeltaFrames = 0;
   private lastError: string | null = null;
   private lastActivityAt = Date.now();
+  private metaConfig: Required<StreamMetaConfig> = {
+    width: 1280,
+    height: 720,
+    videodatarate: 1500,
+    framerate: 24,
+  };
 
   constructor(id: string, rtmpUrl: string, streamKey: string) {
     this.id = id;
@@ -308,34 +371,61 @@ export class RtmpPublisherSession {
     return Boolean(this.socket && !this.socket.destroyed && this.isConnected && this.isPublishing);
   }
 
+  public setMetaConfig(cfg?: StreamMetaConfig) {
+    if (!cfg) return;
+    if (cfg.width) this.metaConfig.width = cfg.width;
+    if (cfg.height) this.metaConfig.height = cfg.height;
+    if (cfg.videodatarate) this.metaConfig.videodatarate = cfg.videodatarate;
+    if (cfg.framerate) this.metaConfig.framerate = cfg.framerate;
+  }
+
   public getStats() {
     return {
       id: this.id,
       isConnected: this.isConnected,
       isPublishing: this.isPublishing,
+      hasSentVideoKeyframe: this.hasSentVideoKeyframe,
       totalBytesSent: this.totalBytesSent,
       totalFramesSent: this.totalFramesSent,
+      totalKeyframesSent: this.totalKeyframesSent,
+      skippedDeltaFrames: this.skippedDeltaFrames,
       lastError: this.lastError,
       lastActivityAt: this.lastActivityAt,
     };
   }
 
-  public async connectAndPublish(initialAvcConfigBase64?: string): Promise<void> {
+  public async connectAndPublish(
+    initialAvcConfigBase64?: string,
+    metaConfig?: StreamMetaConfig
+  ): Promise<void> {
+    if (metaConfig) {
+      this.setMetaConfig(metaConfig);
+    }
     if (initialAvcConfigBase64) {
-      this.avcConfig = Buffer.from(initialAvcConfigBase64, "base64");
+      const cfg = Buffer.from(initialAvcConfigBase64, "base64");
+      if (cfg.length > 0) {
+        this.avcConfig = cfg;
+      }
     }
 
     if (this.isReady()) {
       return;
     }
 
+    this.sentHeaders = false;
+    this.hasSentVideoKeyframe = false;
+    this.baseTimestampMs = null;
+    this.lastVideoTsMs = 0;
+    this.lastAudioTsMs = 0;
+
     const { isTls, host, port, app, tcUrl } = this.parseTargetEndpoint();
+    const createStreamResultToken = Buffer.concat([amf0String("_result"), amf0Number(4)]);
 
     return new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.close();
         reject(new Error(`Timed out connecting to ${host}:${port}`));
-      }, 9000);
+      }, 12000);
 
       const onConnect = () => {
         // Send RTMP Handshake C0 + C1 (1537 bytes)
@@ -435,7 +525,7 @@ export class RtmpPublisherSession {
         }
 
         if (stage === "createStream") {
-          if (ascii.includes("_result")) {
+          if (recvBuf.includes(createStreamResultToken) || ascii.includes("_result")) {
             stage = "publish";
             recvBuf = Buffer.alloc(0);
 
@@ -463,8 +553,7 @@ export class RtmpPublisherSession {
           } else if (
             ascii.includes("NetStream.Publish.BadName") ||
             ascii.includes("NetStream.Publish.Rejected") ||
-            ascii.includes("Fail") ||
-            ascii.includes("Error")
+            ascii.includes("NetStream.Publish.Failed")
           ) {
             clearTimeout(timeout);
             this.lastError =
@@ -494,25 +583,25 @@ export class RtmpPublisherSession {
       sock.on("close", () => {
         this.isConnected = false;
         this.isPublishing = false;
+        this.hasSentVideoKeyframe = false;
       });
     });
   }
 
-  private sendInitialStreamHeadersIfPossible() {
-    if (this.sentHeaders || !this.socket || this.socket.destroyed || !this.avcConfig) {
-      return;
+  private buildInitialStreamHeadersBuffer(): Buffer | null {
+    if (!this.avcConfig || this.avcConfig.length === 0) {
+      return null;
     }
-    this.sentHeaders = true;
 
     // 1. @setDataFrame("onMetaData")
     const metaPayload = Buffer.concat([
       amf0String("@setDataFrame"),
       amf0String("onMetaData"),
       amf0EcmaArray({
-        width: 1280,
-        height: 720,
-        videodatarate: 2500,
-        framerate: 30,
+        width: this.metaConfig.width,
+        height: this.metaConfig.height,
+        videodatarate: this.metaConfig.videodatarate,
+        framerate: this.metaConfig.framerate,
         videocodecid: 7, // H.264 / AVC
         audiodatarate: 128,
         audiosamplerate: 44100,
@@ -531,29 +620,52 @@ export class RtmpPublisherSession {
       this.avcConfig,
     ]);
 
-    const combined = Buffer.concat([
+    return Buffer.concat([
       createRtmpChunks(4, 0, 18, 1, metaPayload),
       createRtmpChunks(5, 0, 8, 1, aacSeqHeader),
       createRtmpChunks(6, 0, 9, 1, avcSeqHeader),
     ]);
+  }
 
+  private sendInitialStreamHeadersIfPossible() {
+    if (this.sentHeaders || !this.socket || this.socket.destroyed || !this.avcConfig) {
+      return;
+    }
+    const combined = this.buildInitialStreamHeadersBuffer();
+    if (!combined) return;
+    this.sentHeaders = true;
     this.socket.write(combined);
     this.totalBytesSent += combined.length;
   }
 
   public async pushFrames(
     frames: EncodedFrameInput[],
-    avcConfigBase64?: string
-  ): Promise<{ bytesSent: number; framesSent: number }> {
+    avcConfigBase64?: string,
+    metaConfig?: StreamMetaConfig
+  ): Promise<{
+    bytesSent: number;
+    framesSent: number;
+    keyframesSent: number;
+    skippedDeltaFrames: number;
+    needsKeyframe: boolean;
+  }> {
+    if (metaConfig) {
+      this.setMetaConfig(metaConfig);
+    }
+
+    let avcConfigUpdated = false;
     if (avcConfigBase64) {
       const cfg = Buffer.from(avcConfigBase64, "base64");
-      if (!this.avcConfig && cfg.length > 0) {
-        this.avcConfig = cfg;
+      if (cfg.length > 0) {
+        if (!this.avcConfig || !this.avcConfig.equals(cfg)) {
+          this.avcConfig = cfg;
+          avcConfigUpdated = true;
+        }
       }
     }
 
     if (!this.isReady()) {
-      await this.connectAndPublish(avcConfigBase64);
+      await this.connectAndPublish(avcConfigBase64, metaConfig);
     }
 
     const outBuffers: Buffer[] = [];
@@ -561,26 +673,60 @@ export class RtmpPublisherSession {
     const silentAacFrame = Buffer.from([0xaf, 0x01, 0x21, 0x10, 0x04, 0x60, 0x8c, 0x1c]);
     const aacStepMs = 1024 / 44.1; // ~23.21995ms
 
+    let batchFramesSent = 0;
+    let batchKeyframesSent = 0;
+    let batchSkippedDeltas = 0;
+
     for (const f of frames) {
       const rawBuf = Buffer.from(f.dataBase64, "base64");
       if (rawBuf.length === 0) continue;
 
-      let avcPayload: Buffer = rawBuf;
-      if (isAnnexB(rawBuf)) {
-        const converted = convertAnnexBToAvcAndExtractConfig(rawBuf);
-        avcPayload = converted.avcPayload;
-        if (!this.avcConfig && converted.extractedAvcC) {
-          this.avcConfig = converted.extractedAvcC;
-        }
-      }
-
-      if (!this.sentHeaders && this.avcConfig) {
-        this.sendInitialStreamHeadersIfPossible();
+      // Always sanitize both AVCC and Annex-B frames to strip AUD (type 9) & extract in-band SPS/PPS
+      const sanitized = sanitizeH264FrameAndExtractConfig(rawBuf);
+      const avcPayload = sanitized.avcPayload;
+      if (sanitized.extractedAvcC && (!this.avcConfig || !this.avcConfig.equals(sanitized.extractedAvcC))) {
+        this.avcConfig = sanitized.extractedAvcC;
+        avcConfigUpdated = true;
       }
 
       if (avcPayload.length === 0) continue;
 
-      const ts = Math.max(0, Math.round(f.timestampMs));
+      const isKeyframe = Boolean(f.isKeyframe || sanitized.hasIdrSlice);
+
+      // CRITICAL GREEN-SCREEN GUARD:
+      // Never send P-frames (delta frames) before the first IDR Keyframe on this RTMP session.
+      // Orphaned P-frames cause Facebook Live's YUV420p decoder to render a solid green screen.
+      if (!this.hasSentVideoKeyframe && !isKeyframe) {
+        this.skippedDeltaFrames += 1;
+        batchSkippedDeltas += 1;
+        continue;
+      }
+
+      if (!this.sentHeaders && this.avcConfig) {
+        const hdrBuf = this.buildInitialStreamHeadersBuffer();
+        if (hdrBuf) {
+          this.sentHeaders = true;
+          outBuffers.push(hdrBuf);
+        }
+      }
+
+      if (this.baseTimestampMs === null) {
+        this.baseTimestampMs = Math.max(0, Math.round(f.timestampMs));
+      }
+
+      const rawRelativeTs = Math.max(0, Math.round(f.timestampMs) - this.baseTimestampMs);
+      const ts = Math.max(this.lastVideoTsMs, rawRelativeTs);
+      this.lastVideoTsMs = ts;
+
+      // Re-emit AVC Sequence Header right before keyframes if config changed or on first keyframe
+      if (isKeyframe && this.avcConfig && (avcConfigUpdated || !this.hasSentVideoKeyframe)) {
+        const avcSeqHeader = Buffer.concat([
+          Buffer.from([0x17, 0x00, 0x00, 0x00, 0x00]),
+          this.avcConfig,
+        ]);
+        outBuffers.push(createRtmpChunks(6, ts, 9, 1, avcSeqHeader));
+        avcConfigUpdated = false;
+      }
 
       // Initialize audio clock on first frame
       if (this.lastAudioTsMs === 0 && ts > 0) {
@@ -597,7 +743,7 @@ export class RtmpPublisherSession {
 
       // Emit H.264 Video NALU packet
       const videoTagHeader = Buffer.from([
-        f.isKeyframe ? 0x17 : 0x27,
+        isKeyframe ? 0x17 : 0x27,
         0x01, // AVC NALU
         0x00,
         0x00,
@@ -605,11 +751,24 @@ export class RtmpPublisherSession {
       ]);
       const videoPacket = Buffer.concat([videoTagHeader, avcPayload]);
       outBuffers.push(createRtmpChunks(6, ts, 9, 1, videoPacket));
+
+      this.hasSentVideoKeyframe = true;
       this.totalFramesSent += 1;
+      batchFramesSent += 1;
+      if (isKeyframe) {
+        this.totalKeyframesSent += 1;
+        batchKeyframesSent += 1;
+      }
     }
 
     if (outBuffers.length === 0 || !this.socket || this.socket.destroyed) {
-      return { bytesSent: 0, framesSent: 0 };
+      return {
+        bytesSent: 0,
+        framesSent: 0,
+        keyframesSent: 0,
+        skippedDeltaFrames: batchSkippedDeltas,
+        needsKeyframe: !this.hasSentVideoKeyframe,
+      };
     }
 
     const batchBuf = Buffer.concat(outBuffers);
@@ -624,7 +783,10 @@ export class RtmpPublisherSession {
     this.lastActivityAt = Date.now();
     return {
       bytesSent: batchBuf.length,
-      framesSent: frames.length,
+      framesSent: batchFramesSent,
+      keyframesSent: batchKeyframesSent,
+      skippedDeltaFrames: batchSkippedDeltas,
+      needsKeyframe: !this.hasSentVideoKeyframe,
     };
   }
 
@@ -646,6 +808,7 @@ export class RtmpPublisherSession {
     this.socket = null;
     this.isConnected = false;
     this.isPublishing = false;
+    this.hasSentVideoKeyframe = false;
   }
 }
 
