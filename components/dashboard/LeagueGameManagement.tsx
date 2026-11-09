@@ -474,6 +474,12 @@ export function LeagueGameManagement({
   const [syncSuccessBanner, setSyncSuccessBanner] = useState<string | null>(
     null
   );
+  const [displaySubsecondTenths, setDisplaySubsecondTenths] = useState<number>(0);
+  const clockStepAnchorPerfMsRef = useRef<number>(
+    typeof performance !== "undefined" ? performance.now() : Date.now()
+  );
+  const lastObservedClockSecRef = useRef<number | null>(null);
+  const lastObservedShotClockSecRef = useRef<number | null>(null);
 
   // Manual Clock Edit Inputs
   const [isEditingClock, setIsEditingClock] = useState(false);
@@ -567,10 +573,22 @@ export function LeagueGameManagement({
       }
 
       const defaultShotClock = league.rulesConfig.shotClockSeconds || 24;
-      const baseShotClock =
-        latest.shotClockSeconds <= 0 ? defaultShotClock : latest.shotClockSeconds;
+      // If the game clock is already less than the shot clock (or <= defaultShotClock when resetting), the shot clock is turned OFF
+      const isShotClockTurnedOff =
+        latest.clockSecondsRemaining < latest.shotClockSeconds ||
+        (latest.shotClockSeconds <= 0 &&
+          latest.clockSecondsRemaining <= defaultShotClock);
+
+      const baseShotClock = isShotClockTurnedOff
+        ? 0
+        : latest.shotClockSeconds <= 0
+        ? defaultShotClock
+        : latest.shotClockSeconds;
       const nextGameClock = Math.max(0, latest.clockSecondsRemaining - secondsToDeduct);
-      const nextShotClock = Math.max(0, baseShotClock - secondsToDeduct);
+      const nextShotClock =
+        isShotClockTurnedOff || nextGameClock < baseShotClock - secondsToDeduct
+          ? 0
+          : Math.max(0, baseShotClock - secondsToDeduct);
 
       // Increment secondsPlayed and compute minutesPlayed for all on-court players
       const updatedHomeStats = { ...latest.homePlayerStats };
@@ -602,6 +620,7 @@ export function LeagueGameManagement({
       }
 
       if (
+        !isShotClockTurnedOff &&
         nextShotClock === 0 &&
         baseShotClock > 0 &&
         nextGameClock > 0
@@ -636,6 +655,50 @@ export function LeagueGameManagement({
 
     return () => clearInterval(timer);
   }, [matchId, isClockRunning, session?.clockLeaderId, saveGameSession]);
+
+  // Sub-second tenths (milliseconds) ticker when Game Clock < 24s or Shot Clock < 5s
+  useEffect(() => {
+    const gameSec = session?.clockSecondsRemaining ?? 600;
+    const shotSec = session?.shotClockSeconds ?? 24;
+    if (
+      lastObservedClockSecRef.current !== gameSec ||
+      lastObservedShotClockSecRef.current !== shotSec
+    ) {
+      lastObservedClockSecRef.current = gameSec;
+      lastObservedShotClockSecRef.current = shotSec;
+      clockStepAnchorPerfMsRef.current =
+        typeof performance !== "undefined" ? performance.now() : Date.now();
+      setDisplaySubsecondTenths(0);
+    }
+  }, [session?.clockSecondsRemaining, session?.shotClockSeconds]);
+
+  useEffect(() => {
+    const gameSec = session?.clockSecondsRemaining ?? 600;
+    const shotSec = session?.shotClockSeconds ?? 24;
+    const needsSubsecond =
+      isClockRunning &&
+      ((gameSec > 0 && gameSec < 24) || (shotSec > 0 && shotSec < 5));
+    if (!needsSubsecond) {
+      setDisplaySubsecondTenths(0);
+      return;
+    }
+    clockStepAnchorPerfMsRef.current =
+      typeof performance !== "undefined" ? performance.now() : Date.now();
+    const subTimer = setInterval(() => {
+      const nowPerf =
+        typeof performance !== "undefined" ? performance.now() : Date.now();
+      const elapsedInSec = Math.min(
+        999,
+        Math.max(0, nowPerf - clockStepAnchorPerfMsRef.current)
+      );
+      const tenthsRemaining = Math.max(
+        0,
+        Math.min(9, Math.floor((1000 - elapsedInSec) / 100))
+      );
+      setDisplaySubsecondTenths(tenthsRemaining);
+    }, 80);
+    return () => clearInterval(subTimer);
+  }, [isClockRunning, session?.clockSecondsRemaining, session?.shotClockSeconds]);
 
   // Live Timeout Countdown Timer (60s official timeout countdown)
   useEffect(() => {
@@ -759,10 +822,15 @@ export function LeagueGameManagement({
           status: "LIVE",
         });
       }
-      // Automatically reset & start shot clock from 24s if starting game clock after a 24s shot clock violation (0s)
+      // Automatically reset & start shot clock from 24s if starting game clock after a 24s shot clock violation (0s),
+      // EXCEPT when the game clock is less than or equal to the shot clock (in which case shot clock is turned OFF).
       const nextShotClock =
-        nextRunning && prev.shotClockSeconds <= 0
-          ? shotClockDefault
+        prev.clockSecondsRemaining < prev.shotClockSeconds
+          ? 0
+          : nextRunning && prev.shotClockSeconds <= 0
+          ? prev.clockSecondsRemaining > shotClockDefault
+            ? shotClockDefault
+            : 0
           : prev.shotClockSeconds;
       return {
         ...prev,
@@ -778,13 +846,18 @@ export function LeagueGameManagement({
       alert("Permission Denied: Only Game Timers, Table Officials, or League Admins can adjust the game clock.");
       return;
     }
-    updateSession((prev) => ({
-      ...prev,
-      clockSecondsRemaining: Math.max(
+    updateSession((prev) => {
+      const nextGameClock = Math.max(
         0,
         prev.clockSecondsRemaining + deltaSeconds
-      ),
-    }));
+      );
+      return {
+        ...prev,
+        clockSecondsRemaining: nextGameClock,
+        shotClockSeconds:
+          nextGameClock < prev.shotClockSeconds ? 0 : prev.shotClockSeconds,
+      };
+    });
   };
 
   const handleResetPeriodClock = () => {
@@ -812,9 +885,12 @@ export function LeagueGameManagement({
     }
     const mins = Math.max(0, Number(manualMinutesInput) || 0);
     const secs = Math.min(59, Math.max(0, Number(manualSecondsInput) || 0));
+    const nextGameClock = mins * 60 + secs;
     updateSession((prev) => ({
       ...prev,
-      clockSecondsRemaining: mins * 60 + secs,
+      clockSecondsRemaining: nextGameClock,
+      shotClockSeconds:
+        nextGameClock < prev.shotClockSeconds ? 0 : prev.shotClockSeconds,
     }));
     setIsEditingClock(false);
   };
@@ -827,7 +903,9 @@ export function LeagueGameManagement({
     setHornAlertMessage(null);
     updateSession((prev) => ({
       ...prev,
-      shotClockSeconds: seconds,
+      // If the game clock is less than the requested shot clock reset, turn the shot clock off (0)
+      shotClockSeconds:
+        prev.clockSecondsRemaining < seconds ? 0 : seconds,
     }));
   };
 
@@ -1369,7 +1447,8 @@ export function LeagueGameManagement({
 
       return {
         ...prev,
-        shotClockSeconds: resolvedShotClock,
+        shotClockSeconds:
+          prev.clockSecondsRemaining < resolvedShotClock ? 0 : resolvedShotClock,
         activeBallPossession:
           nextPossessionSide ?? prev.activeBallPossession ?? side,
         homeScore: nextHomeScore,
@@ -1424,11 +1503,13 @@ export function LeagueGameManagement({
         awayScoreAfter: prev.awayScore,
         createdAt: new Date().toISOString(),
       };
+      const candidateShotClock = params.nextShotClock ?? prev.shotClockSeconds;
       return {
         ...prev,
         activeBallPossession:
           params.nextPossessionSide ?? prev.activeBallPossession,
-        shotClockSeconds: params.nextShotClock ?? prev.shotClockSeconds,
+        shotClockSeconds:
+          prev.clockSecondsRemaining < candidateShotClock ? 0 : candidateShotClock,
         playEvents: [newEvent, ...prev.playEvents],
       };
     });
@@ -3299,7 +3380,14 @@ export function LeagueGameManagement({
                           : "text-[#0B2F5C]"
                       }`}
                     >
-                      {formatClock(session.clockSecondsRemaining)}
+                      {session.clockSecondsRemaining < 24 &&
+                      session.clockSecondsRemaining > 0
+                        ? `${Math.max(
+                            0,
+                            session.clockSecondsRemaining -
+                              (session.isClockRunning ? 1 : 0)
+                          )}.${session.isClockRunning ? displaySubsecondTenths : 0}`
+                        : formatClock(session.clockSecondsRemaining)}
                     </div>
                   )}
 
@@ -3351,15 +3439,31 @@ export function LeagueGameManagement({
                   <span className="block text-[0.6rem] font-black uppercase text-[#8B0D0E]">
                     SHOT CLOCK
                   </span>
-                  <div
-                    className={`text-4xl sm:text-5xl font-black tabular-nums ${
-                      session.shotClockSeconds <= 5
-                        ? "text-rose-600 animate-pulse"
-                        : "text-[#8B0D0E]"
-                    }`}
-                  >
-                    {session.shotClockSeconds}
-                  </div>
+                  {session.clockSecondsRemaining < session.shotClockSeconds ||
+                  (session.shotClockSeconds <= 0 &&
+                    session.clockSecondsRemaining < shotClockDefault &&
+                    session.clockSecondsRemaining > 0) ? (
+                    <div className="text-3xl sm:text-4xl font-black uppercase tracking-wider text-slate-400 py-1">
+                      OFF
+                    </div>
+                  ) : (
+                    <div
+                      className={`text-4xl sm:text-5xl font-black tabular-nums ${
+                        session.shotClockSeconds <= 5
+                          ? "text-rose-600 animate-pulse"
+                          : "text-[#8B0D0E]"
+                      }`}
+                    >
+                      {session.shotClockSeconds < 5 &&
+                      session.shotClockSeconds > 0
+                        ? `${Math.max(
+                            0,
+                            session.shotClockSeconds -
+                              (session.isClockRunning ? 1 : 0)
+                          )}.${session.isClockRunning ? displaySubsecondTenths : 0}`
+                        : session.shotClockSeconds}
+                    </div>
+                  )}
                   <div className="mt-2 grid grid-cols-2 gap-1">
                     <button
                       type="button"

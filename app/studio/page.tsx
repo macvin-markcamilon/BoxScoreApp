@@ -490,6 +490,27 @@ function LiveBroadcastStudioContent() {
   const [manualAwayTopPerformerId, setManualAwayTopPerformerId] = useState<string>("");
   const [manualHomeTopPerformerId, setManualHomeTopPerformerId] = useState<string>("");
 
+  // Starting 5 Lineups Broadcast Overlay State (Matches NBA/Broadcast Starting Lineups Card & auto-turns OFF after scene transition)
+  const [showStartingLineupOverlay, setShowStartingLineupOverlay] = useState<boolean>(false);
+  const [awayOutNote, setAwayOutNote] = useState<string>("");
+  const [homeOutNote, setHomeOutNote] = useState<string>("");
+  const playerPortraitCacheRef = useRef<
+    Record<string, { url: string; img: HTMLImageElement }>
+  >({});
+
+  // Sub-second / Millisecond Clock Tracking Ref for Scorebug (<24s Game Clock & <5s Shot Clock)
+  const clockSubsecondRef = useRef<{
+    matchId: string;
+    lastClockSec: number;
+    lastShotClockSec: number;
+    anchorNowMs: number;
+  }>({
+    matchId: "",
+    lastClockSec: -1,
+    lastShotClockSec: -1,
+    anchorNowMs: 0,
+  });
+
   // Multiple Advertisement Images & Broadcast Ad Overlay State
   const [adItems, setAdItems] = useState<StudioAdItem[]>([]);
   const [activeAdId, setActiveAdId] = useState<string>("");
@@ -1334,6 +1355,27 @@ function LiveBroadcastStudioContent() {
         : trimmed;
     homeTopPerformerImgRef.current = img;
   }, [homeTopPerformer?.imageUrl]);
+
+  // Preload On-Court Starting 5 Player Portraits into CORS-safe HTMLImageElements
+  useEffect(() => {
+    const starters = [
+      ...onCourtAwayPlayers.slice(0, 5),
+      ...onCourtHomePlayers.slice(0, 5),
+    ];
+    for (const p of starters) {
+      const rawUrl = p.imageUrl?.trim();
+      if (!rawUrl) continue;
+      const existing = playerPortraitCacheRef.current[p.playerId];
+      if (existing && existing.url === rawUrl) continue;
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.src =
+        rawUrl.startsWith("http://") || rawUrl.startsWith("https://")
+          ? `/api/image-proxy?url=${encodeURIComponent(rawUrl)}`
+          : rawUrl;
+      playerPortraitCacheRef.current[p.playerId] = { url: rawUrl, img };
+    }
+  }, [onCourtAwayPlayers, onCourtHomePlayers]);
 
   // Active Preview & Live Scene objects
   const previewScene = useMemo(
@@ -3301,6 +3343,55 @@ function LiveBroadcastStudioContent() {
         return { bgStart: teamColorHex || "#e11d48", bgEnd: "#9f1239", text: "#ffffff", border: "#fda4af" };
       };
 
+      // Sub-second tenths (milliseconds) & Shot Clock OFF rule when Game Clock < Shot Clock
+      const subState = clockSubsecondRef.current;
+      if (
+        subState.matchId !== currentMatchKey ||
+        subState.lastClockSec !== clockSeconds ||
+        subState.lastShotClockSec !== shotClock
+      ) {
+        subState.matchId = currentMatchKey;
+        subState.lastClockSec = clockSeconds;
+        subState.lastShotClockSec = shotClock;
+        subState.anchorNowMs = nowMs;
+      }
+      const elapsedSubMs = isClockRunning
+        ? Math.min(999, Math.max(0, nowMs - subState.anchorNowMs))
+        : 0;
+      const subTenths = isClockRunning
+        ? Math.max(0, Math.min(9, Math.floor((1000 - elapsedSubMs) / 100)))
+        : 0;
+
+      const defaultLeagueShotClock =
+        activeMatchCategory?.rulesConfig?.shotClockSeconds ??
+        activeLeague?.rulesConfig?.shotClockSeconds ??
+        24;
+
+      // Rule 1: If the game clock is less than the shot clock, the shot clock should be OFF!
+      const isShotClockOffByGameClock =
+        clockSeconds < shotClock ||
+        (shotClock <= 0 &&
+          clockSeconds > 0 &&
+          clockSeconds < defaultLeagueShotClock);
+      const effectiveShowShotClock =
+        showShotClock && !isShotClockOffByGameClock;
+
+      // Rule 2: Add milliseconds (.tenths) if Game Clock < 24s or Shot Clock < 5s
+      const gameClockDisplayText =
+        clockSeconds > 0 && clockSeconds < 24
+          ? `${Math.max(0, clockSeconds - (isClockRunning ? 1 : 0))}.${subTenths}`
+          : formatClock(clockSeconds);
+
+      const shotClockBottomBarText =
+        shotClock > 0 && shotClock < 5
+          ? `${Math.max(0, shotClock - (isClockRunning ? 1 : 0))}.${subTenths}`
+          : String(Math.max(0, shotClock));
+
+      const shotClockCornerText =
+        shotClock > 0 && shotClock < 5
+          ? `${Math.max(0, shotClock - (isClockRunning ? 1 : 0))}.${subTenths}`
+          : `:${String(Math.max(0, shotClock)).padStart(2, "0")}`;
+
       if (scorebugPosition === "bottom_bar") {
         // =====================================================================
         // BOTTOM CENTER SCOREBUG (Image 1):
@@ -3586,16 +3677,18 @@ function LiveBroadcastStudioContent() {
         ctx.lineTo(clockBoxX + 84, bugY + bugH - 18);
         ctx.stroke();
 
-        // Middle segment inside box: Game Clock (e.g. 00:00)
-        const gameClockCenterX = showShotClock ? clockBoxX + 146 : clockBoxX + (clockBoxW + 84) / 2;
+        // Middle segment inside box: Game Clock (shows tenths when < 24s)
+        const gameClockCenterX = effectiveShowShotClock
+          ? clockBoxX + 146
+          : clockBoxX + (clockBoxW + 84) / 2;
         ctx.fillStyle = isClockRunning ? "#38bdf8" : "#f59e0b";
         ctx.font = "900 26px 'Inter', sans-serif";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
-        ctx.fillText(formatClock(clockSeconds), gameClockCenterX, bugY + bugH / 2);
+        ctx.fillText(gameClockDisplayText, gameClockCenterX, bugY + bugH / 2);
 
-        // Right segment inside box: Shot Clock (e.g. 24 or 0)
-        if (showShotClock) {
+        // Right segment inside box: Shot Clock (automatically OFF when Game Clock < Shot Clock; shows tenths when < 5s)
+        if (effectiveShowShotClock) {
           if (shotClock <= 0) {
             ctx.save();
             ctx.fillStyle = "rgba(239, 68, 68, 0.28)";
@@ -3612,10 +3705,10 @@ function LiveBroadcastStudioContent() {
 
           const shotClockCenterX = clockBoxX + 237;
           ctx.fillStyle = shotClock <= 5 ? "#ef4444" : "#eab308";
-          ctx.font = "900 28px 'Inter', sans-serif";
+          ctx.font = shotClock > 0 && shotClock < 5 ? "900 24px 'Inter', sans-serif" : "900 28px 'Inter', sans-serif";
           ctx.textAlign = "center";
           ctx.textBaseline = "middle";
-          ctx.fillText(String(Math.max(0, shotClock)), shotClockCenterX, bugY + bugH / 2);
+          ctx.fillText(shotClockBottomBarText, shotClockCenterX, bugY + bugH / 2);
         }
       } else {
         // =====================================================================
@@ -3898,7 +3991,7 @@ function LiveBroadcastStudioContent() {
         // ---------------------------------------------------------------------
         const clockColX = scoreColX + scoreColW;
 
-        // Top Row: Game Clock Box
+        // Top Row: Game Clock Box (shows tenths when < 24s)
         const topClockGrad = ctx.createLinearGradient(clockColX, bugY, clockColX, bugY + rowH);
         topClockGrad.addColorStop(0, "#2d3139");
         topClockGrad.addColorStop(1, "#181a20");
@@ -3910,14 +4003,14 @@ function LiveBroadcastStudioContent() {
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
         ctx.fillText(
-          formatClock(clockSeconds),
+          gameClockDisplayText,
           clockColX + clockColW / 2,
           bugY + rowH / 2 + 1
         );
 
-        // Bottom Row: Left = Quarter ("1ST", "2ND", "3RD", "4TH", "OT"), Right = Crimson Shot Clock (":24")
+        // Bottom Row: Left = Quarter ("1ST", "2ND", "3RD", "4TH", "OT"), Right = Crimson Shot Clock (":24" or "4.8" when < 5s; automatically OFF when Game Clock < Shot Clock)
         const bottomRowY = bugY + rowH;
-        const qBoxW = showShotClock ? Math.round(clockColW * 0.52) : clockColW;
+        const qBoxW = effectiveShowShotClock ? Math.round(clockColW * 0.52) : clockColW;
         const scBoxW = clockColW - qBoxW;
 
         const qGrad = ctx.createLinearGradient(clockColX, bottomRowY, clockColX, bottomRowY + rowH);
@@ -3936,7 +4029,7 @@ function LiveBroadcastStudioContent() {
           bottomRowY + rowH / 2 + 1
         );
 
-        if (showShotClock) {
+        if (effectiveShowShotClock) {
           const scX = clockColX + qBoxW;
           const scGrad = ctx.createLinearGradient(scX, bottomRowY, scX, bottomRowY + rowH);
           if (shotClock <= 5) {
@@ -3950,11 +4043,11 @@ function LiveBroadcastStudioContent() {
           ctx.fillRect(scX, bottomRowY, scBoxW, rowH);
 
           ctx.fillStyle = "#ffffff";
-          ctx.font = "900 23px 'Inter', sans-serif";
+          ctx.font = shotClock > 0 && shotClock < 5 ? "900 21px 'Inter', sans-serif" : "900 23px 'Inter', sans-serif";
           ctx.textAlign = "center";
           ctx.textBaseline = "middle";
           ctx.fillText(
-            `:${String(shotClock).padStart(2, "0")}`,
+            shotClockCornerText,
             scX + scBoxW / 2,
             bottomRowY + rowH / 2 + 1
           );
@@ -4824,6 +4917,434 @@ function LiveBroadcastStudioContent() {
     ]
   );
 
+  // Helper: Draw Broadcast Starting 5 Lineups Overlay (Matches NBA Broadcast Starting Lineups Card & Size; auto-turns off after transition)
+  const drawStartingLineupOverlay = useCallback(
+    (ctx: CanvasRenderingContext2D, width: number, height: number) => {
+      ctx.save();
+
+      // Exact Broadcast Proportion on 1920x1080 (approx 86% width x 79% height centered)
+      const boardW = 1656;
+      const boardH = 852;
+      const boardX = Math.round((width - boardW) / 2);
+      const boardY = Math.round((height - boardH) / 2);
+
+      // Outer Drop Shadow & Rounded Broadcast Container with Dual Metallic Blue-Rim Border
+      ctx.shadowColor = "rgba(0, 0, 0, 0.85)";
+      ctx.shadowBlur = 38;
+      ctx.shadowOffsetY = 12;
+
+      ctx.fillStyle = "#05070b";
+      ctx.beginPath();
+      ctx.roundRect(boardX, boardY, boardW, boardH, [24]);
+      ctx.fill();
+
+      ctx.shadowColor = "transparent";
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = homeColor || "#1d4ed8";
+      ctx.stroke();
+
+      // Inner subtle secondary metallic trim
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = "rgba(148, 163, 184, 0.35)";
+      ctx.beginPath();
+      ctx.roundRect(boardX + 6, boardY + 6, boardW - 12, boardH - 12, [20]);
+      ctx.stroke();
+
+      // -----------------------------------------------------------------------
+      // 1. TOP HEADER BAR ("STARTING LINEUPS", Optional OUT / Matchup Subtitle, Right League Logo)
+      // -----------------------------------------------------------------------
+      const headerX = boardX + 20;
+      const headerY = boardY + 18;
+      const headerW = boardW - 40;
+      const headerH = 114;
+
+      const headerGrad = ctx.createLinearGradient(headerX, headerY, headerX, headerY + headerH);
+      headerGrad.addColorStop(0, "#11151f");
+      headerGrad.addColorStop(0.5, "#07090e");
+      headerGrad.addColorStop(1, "#030407");
+      ctx.fillStyle = headerGrad;
+      ctx.beginPath();
+      ctx.roundRect(headerX, headerY, headerW, headerH, [16]);
+      ctx.fill();
+
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.65)";
+      ctx.stroke();
+
+      // "STARTING LINEUPS" Title
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "900 44px 'Inter', sans-serif";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.fillText("STARTING LINEUPS", headerX + 28, headerY + 42);
+
+      // Subtitle row: "OUT  AWAY: ...   HOME: ..." (or matchup / starters summary when no OUT note is entered)
+      const hasOutNotes = Boolean(awayOutNote.trim() || homeOutNote.trim());
+      if (hasOutNotes) {
+        ctx.fillStyle = "#facc15";
+        ctx.font = "900 23px 'Inter', sans-serif";
+        ctx.textAlign = "left";
+        ctx.fillText("OUT", headerX + 28, headerY + 86);
+
+        let curTextX = headerX + 104;
+        ctx.fillStyle = "#e2e8f0";
+        ctx.font = "600 23px 'Inter', sans-serif";
+        if (awayOutNote.trim()) {
+          const awayLabel = `${awayScorebugName}: ${awayOutNote.trim().toUpperCase()}`;
+          ctx.fillText(awayLabel, curTextX, headerY + 86);
+          curTextX += ctx.measureText(awayLabel).width + 44;
+        }
+        if (homeOutNote.trim()) {
+          const homeLabel = `${homeScorebugName}: ${homeOutNote.trim().toUpperCase()}`;
+          ctx.fillText(homeLabel, curTextX, headerY + 86);
+        }
+      } else {
+        ctx.fillStyle = "#facc15";
+        ctx.font = "900 21px 'Inter', sans-serif";
+        ctx.textAlign = "left";
+        ctx.fillText("ON COURT", headerX + 28, headerY + 86);
+
+        ctx.fillStyle = "#cbd5e1";
+        ctx.font = "700 21px 'Inter', sans-serif";
+        ctx.fillText(
+          `${awayTeamName.toUpperCase()} vs ${homeTeamName.toUpperCase()}  •  ${(
+            activeLeague?.name || "OFFICIAL BROADCAST"
+          ).toUpperCase()}`,
+          headerX + 162,
+          headerY + 86,
+          headerW - 310
+        );
+      }
+
+      // Right Circular League Logo Medallion inside Header
+      const logoSize = 88;
+      const logoX = headerX + headerW - logoSize - 24;
+      const logoY = headerY + Math.round((headerH - logoSize) / 2);
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(logoX + logoSize / 2, logoY + logoSize / 2, logoSize / 2, 0, Math.PI * 2);
+      const medalGrad = ctx.createRadialGradient(
+        logoX + logoSize * 0.35,
+        logoY + logoSize * 0.3,
+        6,
+        logoX + logoSize / 2,
+        logoY + logoSize / 2,
+        logoSize / 2
+      );
+      medalGrad.addColorStop(0, "#ffffff");
+      medalGrad.addColorStop(0.75, "#e2e8f0");
+      medalGrad.addColorStop(1, "#94a3b8");
+      ctx.fillStyle = medalGrad;
+      ctx.fill();
+      ctx.lineWidth = 2.5;
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.85)";
+      ctx.stroke();
+
+      const leagueLogoImg = transitionLogoImgRef.current;
+      if (leagueLogoImg && leagueLogoImg.complete && leagueLogoImg.naturalWidth > 0) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(logoX + logoSize / 2, logoY + logoSize / 2, logoSize / 2 - 4, 0, Math.PI * 2);
+        ctx.clip();
+        ctx.drawImage(leagueLogoImg, logoX + 6, logoY + 6, logoSize - 12, logoSize - 12);
+        ctx.restore();
+      } else {
+        const leagueInitials = (activeLeague?.name || "BOX SCORE")
+          .split(/\s+/)
+          .map((w) => w[0] || "")
+          .join("")
+          .slice(0, 3)
+          .toUpperCase();
+        ctx.fillStyle = "#0f172a";
+        ctx.font = "900 26px 'Inter', sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(leagueInitials || "BS", logoX + logoSize / 2, logoY + logoSize / 2 + 1);
+      }
+      ctx.restore();
+
+      // -----------------------------------------------------------------------
+      // 2. TWO ROWS OF 6 CARDS: [Team Logo Tile] + [5 Starting Player Cards]
+      // Row 1 = Away Team (5 Starters)
+      // Row 2 = Home Team (5 Starters)
+      // -----------------------------------------------------------------------
+      const gridStartX = boardX + 20;
+      const row1Y = headerY + headerH + 18;
+      const rowH = 330;
+      const rowGap = 20;
+      const row2Y = row1Y + rowH + rowGap;
+
+      const logoTileW = 216;
+      const tileGap = 16;
+      const playerTileW = Math.floor((boardW - 40 - logoTileW - tileGap * 5) / 5); // ~264px each
+
+      const getShortPosLetter = (pos: string | undefined, idx: number): string => {
+        const raw = (pos || "").trim().toUpperCase();
+        if (raw.includes("PG") || raw.includes("SG") || raw.startsWith("G")) return "G";
+        if (raw.includes("SF") || raw.includes("PF") || raw.startsWith("F")) return "F";
+        if (raw.startsWith("C")) return "C";
+        const fallbackOrder = ["G", "G", "F", "F", "C"];
+        return fallbackOrder[idx % 5];
+      };
+
+      const drawTeamStartingRow = (
+        rowY: number,
+        teamColorHex: string,
+        teamLogoImg: HTMLImageElement | null,
+        teamFullName: string,
+        teamShort: string,
+        starters: Array<
+          PlayerGameStats & {
+            teamSide: "AWAY" | "HOME";
+            teamName: string;
+            teamShortName: string;
+            teamColor: string;
+          }
+        >
+      ) => {
+        // A. Left Team Logo Card (with concentric circular embossing like the reference image)
+        ctx.save();
+        ctx.beginPath();
+        ctx.roundRect(gridStartX, rowY, logoTileW, rowH, [18]);
+        ctx.clip();
+
+        const tileGrad = ctx.createLinearGradient(gridStartX, rowY, gridStartX, rowY + rowH);
+        tileGrad.addColorStop(0, teamColorHex);
+        tileGrad.addColorStop(1, "#090d16");
+        ctx.fillStyle = tileGrad;
+        ctx.fillRect(gridStartX, rowY, logoTileW, rowH);
+
+        // Concentric embossed rings
+        const cx = gridStartX + logoTileW / 2;
+        const cy = rowY + rowH / 2;
+        [135, 102, 72].forEach((r, idx) => {
+          ctx.beginPath();
+          ctx.arc(cx, cy, r, 0, Math.PI * 2);
+          ctx.lineWidth = idx === 0 ? 14 : 10;
+          ctx.strokeStyle =
+            idx % 2 === 0 ? "rgba(0, 0, 0, 0.24)" : "rgba(255, 255, 255, 0.12)";
+          ctx.stroke();
+        });
+
+        // Team Logo Crest in Center
+        const crestSize = 148;
+        if (teamLogoImg && teamLogoImg.complete && teamLogoImg.naturalWidth > 0) {
+          ctx.save();
+          ctx.shadowColor = "rgba(0, 0, 0, 0.55)";
+          ctx.shadowBlur = 16;
+          const aspect = teamLogoImg.naturalWidth / teamLogoImg.naturalHeight;
+          let dw = crestSize;
+          let dh = crestSize;
+          if (aspect > 1) dh = crestSize / aspect;
+          else dw = crestSize * aspect;
+          ctx.drawImage(teamLogoImg, cx - dw / 2, cy - dh / 2, dw, dh);
+          ctx.restore();
+        } else {
+          ctx.beginPath();
+          ctx.arc(cx, cy, 64, 0, Math.PI * 2);
+          ctx.fillStyle = "rgba(15, 23, 42, 0.78)";
+          ctx.fill();
+          ctx.lineWidth = 3;
+          ctx.strokeStyle = "rgba(255, 255, 255, 0.7)";
+          ctx.stroke();
+
+          ctx.fillStyle = "#ffffff";
+          ctx.font = "900 34px 'Inter', sans-serif";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(teamShort.slice(0, 4).toUpperCase(), cx, cy + 1);
+        }
+
+        // Subtle border around Team Logo Tile
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.22)";
+        ctx.beginPath();
+        ctx.roundRect(gridStartX + 1, rowY + 1, logoTileW - 2, rowH - 2, [18]);
+        ctx.stroke();
+        ctx.restore();
+
+        // B. 5 Starting Player Portrait Cards
+        for (let i = 0; i < 5; i++) {
+          const p = starters[i];
+          const cardX = gridStartX + logoTileW + tileGap + i * (playerTileW + tileGap);
+
+          ctx.save();
+          ctx.beginPath();
+          ctx.roundRect(cardX, rowY, playerTileW, rowH, [18]);
+          ctx.clip();
+
+          // Team-colored vertical broadcast gradient backdrop
+          const pGrad = ctx.createLinearGradient(cardX, rowY, cardX, rowY + rowH);
+          pGrad.addColorStop(0, teamColorHex);
+          pGrad.addColorStop(0.68, teamColorHex);
+          pGrad.addColorStop(1, "#090d16");
+          ctx.fillStyle = pGrad;
+          ctx.fillRect(cardX, rowY, playerTileW, rowH);
+
+          // Top radial spotlight glow behind player headshot
+          const spotGrad = ctx.createRadialGradient(
+            cardX + playerTileW / 2,
+            rowY + rowH * 0.42,
+            12,
+            cardX + playerTileW / 2,
+            rowY + rowH * 0.42,
+            playerTileW * 0.75
+          );
+          spotGrad.addColorStop(0, "rgba(255, 255, 255, 0.22)");
+          spotGrad.addColorStop(1, "rgba(0, 0, 0, 0.32)");
+          ctx.fillStyle = spotGrad;
+          ctx.fillRect(cardX, rowY, playerTileW, rowH);
+
+          if (p) {
+            const cachedPortrait = playerPortraitCacheRef.current[p.playerId]?.img;
+            const hasPortrait =
+              cachedPortrait &&
+              cachedPortrait.complete &&
+              cachedPortrait.naturalWidth > 0;
+
+            if (hasPortrait && cachedPortrait) {
+              // Draw player portrait filling the card cleanly above the name pill
+              const targetH = rowH - 10;
+              const scale = Math.max(
+                playerTileW / cachedPortrait.naturalWidth,
+                targetH / cachedPortrait.naturalHeight
+              );
+              const dw = cachedPortrait.naturalWidth * scale;
+              const dh = cachedPortrait.naturalHeight * scale;
+              const dx = cardX + (playerTileW - dw) / 2;
+              const dy = rowY + 8;
+              try {
+                ctx.drawImage(cachedPortrait, dx, dy, dw, dh);
+              } catch {}
+            } else {
+              // Broadcast Silhouette + Large Jersey Number Avatar when player has no photo uploaded
+              const avatarCX = cardX + playerTileW / 2;
+              const avatarCY = rowY + 132;
+
+              // Head & Shoulders stylized broadcast silhouette
+              ctx.fillStyle = "rgba(15, 23, 42, 0.42)";
+              ctx.beginPath();
+              ctx.arc(avatarCX, avatarCY - 28, 44, 0, Math.PI * 2);
+              ctx.fill();
+
+              ctx.beginPath();
+              ctx.ellipse(avatarCX, avatarCY + 78, 88, 64, 0, Math.PI, 0, false);
+              ctx.fill();
+
+              // Jersey Number Badge in center
+              ctx.fillStyle = "rgba(255, 255, 255, 0.95)";
+              ctx.shadowColor = "rgba(0, 0, 0, 0.55)";
+              ctx.shadowBlur = 10;
+              ctx.font = "900 58px 'Inter', sans-serif";
+              ctx.textAlign = "center";
+              ctx.textBaseline = "middle";
+              ctx.fillText(`#${p.jerseyNumber}`, avatarCX, avatarCY + 8);
+              ctx.shadowColor = "transparent";
+            }
+
+            // Bottom Dark Broadcast Nameplate Pill: [ Pos | FIRST NAME / LAST NAME ]
+            const pillX = cardX + 14;
+            const pillW = playerTileW - 28;
+            const pillH = 62;
+            const pillY = rowY + rowH - pillH - 12;
+
+            ctx.fillStyle = "rgba(10, 14, 23, 0.9)";
+            ctx.beginPath();
+            ctx.roundRect(pillX, pillY, pillW, pillH, [12]);
+            ctx.fill();
+
+            ctx.lineWidth = 1.5;
+            ctx.strokeStyle = "rgba(255, 255, 255, 0.25)";
+            ctx.stroke();
+
+            // Position Letter on Left ("G", "F", "C")
+            const posLetter = getShortPosLetter(p.position, i);
+            ctx.fillStyle = "#ffffff";
+            ctx.font = "900 30px 'Inter', sans-serif";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(posLetter, pillX + 26, pillY + pillH / 2 + 1);
+
+            // Vertical divider inside pill
+            ctx.fillStyle = "rgba(255, 255, 255, 0.24)";
+            ctx.fillRect(pillX + 46, pillY + 10, 1.5, pillH - 20);
+
+            // First Name (top small uppercase) + Last Name (bottom bold uppercase)
+            const nameStartX = pillX + 56;
+            const maxNameW = pillW - 64;
+            const firstNameStr = (p.firstName || `#${p.jerseyNumber}`).trim().toUpperCase();
+            const lastNameStr = (p.lastName || p.firstName || "PLAYER").trim().toUpperCase();
+
+            ctx.fillStyle = "#cbd5e1";
+            ctx.font = "800 13px 'Inter', sans-serif";
+            ctx.textAlign = "left";
+            ctx.textBaseline = "middle";
+            ctx.fillText(
+              `${firstNameStr}  •  #${p.jerseyNumber}`,
+              nameStartX,
+              pillY + 19,
+              maxNameW
+            );
+
+            ctx.fillStyle = "#ffffff";
+            ctx.font = "900 24px 'Inter', sans-serif";
+            ctx.fillText(lastNameStr, nameStartX, pillY + 43, maxNameW);
+          } else {
+            // Empty starter slot fallback
+            ctx.fillStyle = "rgba(255, 255, 255, 0.5)";
+            ctx.font = "800 18px 'Inter', sans-serif";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(`STARTER #${i + 1}`, cardX + playerTileW / 2, rowY + rowH / 2);
+          }
+
+          // Subtle inner card border
+          ctx.lineWidth = 1.5;
+          ctx.strokeStyle = "rgba(255, 255, 255, 0.22)";
+          ctx.beginPath();
+          ctx.roundRect(cardX + 1, rowY + 1, playerTileW - 2, rowH - 2, [18]);
+          ctx.stroke();
+
+          ctx.restore();
+        }
+      };
+
+      drawTeamStartingRow(
+        row1Y,
+        awayColor,
+        awayLogoImgRef.current,
+        awayTeamName,
+        awayScorebugName,
+        onCourtAwayPlayers.slice(0, 5)
+      );
+
+      drawTeamStartingRow(
+        row2Y,
+        homeColor,
+        homeLogoImgRef.current,
+        homeTeamName,
+        homeScorebugName,
+        onCourtHomePlayers.slice(0, 5)
+      );
+
+      ctx.restore();
+    },
+    [
+      awayColor,
+      homeColor,
+      awayTeamName,
+      homeTeamName,
+      awayScorebugName,
+      homeScorebugName,
+      awayOutNote,
+      homeOutNote,
+      activeLeague?.name,
+      onCourtAwayPlayers,
+      onCourtHomePlayers,
+    ]
+  );
+
   // Helper: Draw Uploaded Advertisement Image Overlay in Selected Broadcast Position
   const drawAdvertisementOverlay = useCallback(
     (ctx: CanvasRenderingContext2D, width: number, height: number) => {
@@ -5505,6 +6026,11 @@ function LiveBroadcastStudioContent() {
         drawTopPerformersOverlay(ctx, width, height);
       }
 
+      // Render Starting 5 Lineups Overlay when toggled ON (automatically turns off on scene transition)
+      if (drawOverlay && showStartingLineupOverlay && !isPictureOrVideoScene) {
+        drawStartingLineupOverlay(ctx, width, height);
+      }
+
       // Render Advertisement Image Overlay when toggled ON
       if (drawOverlay && showAdOverlay && activeAdItem) {
         drawAdvertisementOverlay(ctx, width, height);
@@ -5516,6 +6042,7 @@ function LiveBroadcastStudioContent() {
       drawLivePlayerStatsOverlay,
       drawTeamComparisonOverlay,
       drawTopPerformersOverlay,
+      drawStartingLineupOverlay,
       drawAdvertisementOverlay,
       featuredOnCourtPlayer,
       scorebugPosition,
@@ -5526,6 +6053,7 @@ function LiveBroadcastStudioContent() {
       clockSeconds,
       showTeamComparisonOverlay,
       showTopPerformersOverlay,
+      showStartingLineupOverlay,
       showAdOverlay,
       activeAdItem,
     ]
@@ -5951,6 +6479,8 @@ function LiveBroadcastStudioContent() {
             if (progress >= 0.48 && !stinger.switchedScene) {
               stinger.switchedScene = true;
               setLiveSceneId(stinger.targetSceneId);
+              // Automatically turn OFF Starting 5 Lineups Overlay when transition switches to next scene
+              setShowStartingLineupOverlay(false);
             }
             drawLogoStingerOverlay(
               lCtx,
@@ -6245,6 +6775,8 @@ function LiveBroadcastStudioContent() {
     stingerStateRef.current.active = false;
     setIsTransitioning(false);
     setLiveSceneId(previewSceneId);
+    // Automatically turn OFF Starting 5 Lineups Overlay after transition
+    setShowStartingLineupOverlay(false);
   };
 
   const handleLogoTransitionToLive = (
@@ -6289,6 +6821,8 @@ function LiveBroadcastStudioContent() {
     const prev = previewSceneId;
     setPreviewSceneId(liveSceneId);
     setLiveSceneId(prev);
+    // Automatically turn OFF Starting 5 Lineups Overlay after scene swap
+    setShowStartingLineupOverlay(false);
   };
 
   // Scene & Multi-Camera Management Handlers
@@ -9540,6 +10074,7 @@ function LiveBroadcastStudioContent() {
                       if (next) {
                         setLiveFeaturedPlayerId("");
                         setShowTopPerformersOverlay(false);
+                        setShowStartingLineupOverlay(false);
                       }
                       return next;
                     });
@@ -9568,6 +10103,7 @@ function LiveBroadcastStudioContent() {
                       if (next) {
                         setLiveFeaturedPlayerId("");
                         setShowTeamComparisonOverlay(false);
+                        setShowStartingLineupOverlay(false);
                       }
                       return next;
                     });
@@ -9581,6 +10117,32 @@ function LiveBroadcastStudioContent() {
                 >
                   <span>
                     🏆 {showTopPerformersOverlay ? "Top Performers ON" : "Top Performer Per Team"}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  aria-pressed={showStartingLineupOverlay}
+                  onClick={() => {
+                    setShowStartingLineupOverlay((v) => {
+                      const next = !v;
+                      if (next) {
+                        setLiveFeaturedPlayerId("");
+                        setShowTeamComparisonOverlay(false);
+                        setShowTopPerformersOverlay(false);
+                      }
+                      return next;
+                    });
+                  }}
+                  className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-[0.62rem] font-black uppercase cursor-pointer border transition-all ${
+                    showStartingLineupOverlay
+                      ? "bg-blue-500 border-blue-300 text-white shadow"
+                      : "bg-slate-900 border-slate-700 text-slate-200 hover:border-blue-400"
+                  }`}
+                  title="Show or hide Starting 5 Lineups Broadcast Overlay (Automatically turns off after a scene transition)"
+                >
+                  <span>
+                    🏀 {showStartingLineupOverlay ? "Starting 5 ON (Auto-Off on Transition)" : "Starting 5 Lineups"}
                   </span>
                 </button>
 
@@ -12912,6 +13474,68 @@ function LiveBroadcastStudioContent() {
                       </option>
                     ))}
                   </select>
+                </div>
+              </div>
+            </div>
+
+            {/* STARTING 5 LINEUPS OVERLAY (AUTO-OFF ON TRANSITION) */}
+            <div className="rounded-lg border border-blue-500/35 bg-blue-950/20 p-2.5 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <span className="text-[0.65rem] font-black uppercase text-blue-300 block">
+                    🏀 Starting 5 Lineups Overlay
+                  </span>
+                  <span className="text-[0.55rem] font-semibold text-slate-400">
+                    NBA-sized full-court starting 5 board • Auto-turns OFF after scene transition
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowStartingLineupOverlay((v) => {
+                      const next = !v;
+                      if (next) {
+                        setLiveFeaturedPlayerId("");
+                        setShowTeamComparisonOverlay(false);
+                        setShowTopPerformersOverlay(false);
+                      }
+                      return next;
+                    });
+                  }}
+                  className={`rounded-lg px-2.5 py-1 text-[0.62rem] font-black uppercase cursor-pointer border transition-all ${
+                    showStartingLineupOverlay
+                      ? "bg-blue-500 border-blue-300 text-white shadow"
+                      : "bg-slate-900 border-slate-700 text-slate-300 hover:text-white"
+                  }`}
+                >
+                  {showStartingLineupOverlay ? "● Starting 5 ON" : "Show Starting 5"}
+                </button>
+              </div>
+
+              <div className="grid grid-cols-2 gap-1.5">
+                <div>
+                  <label className="block text-[0.54rem] font-black uppercase text-amber-300 mb-0.5">
+                    {awayScorebugName} OUT (Optional):
+                  </label>
+                  <input
+                    type="text"
+                    value={awayOutNote}
+                    onChange={(e) => setAwayOutNote(e.target.value)}
+                    placeholder="e.g. DONCIC"
+                    className="w-full rounded border border-slate-700 bg-slate-950 px-1.5 py-1 text-[0.6rem] font-bold text-white placeholder:text-slate-600"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[0.54rem] font-black uppercase text-amber-300 mb-0.5">
+                    {homeScorebugName} OUT (Optional):
+                  </label>
+                  <input
+                    type="text"
+                    value={homeOutNote}
+                    onChange={(e) => setHomeOutNote(e.target.value)}
+                    placeholder="e.g. DUREN, JOE"
+                    className="w-full rounded border border-slate-700 bg-slate-950 px-1.5 py-1 text-[0.6rem] font-bold text-white placeholder:text-slate-600"
+                  />
                 </div>
               </div>
             </div>

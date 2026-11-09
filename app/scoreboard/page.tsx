@@ -183,11 +183,41 @@ function ArenaScoreboardContent() {
     (currentLeague?.rulesConfig?.periodLengthMinutes
       ? currentLeague.rulesConfig.periodLengthMinutes * 60
       : 600);
-  const shotClock =
+  const rawShotClock =
     liveSession?.shotClockSeconds ??
     currentLeague?.rulesConfig?.shotClockSeconds ??
     24;
+  const defaultShotClock = currentLeague?.rulesConfig?.shotClockSeconds ?? 24;
+  const isShotClockOff =
+    clockSeconds < rawShotClock ||
+    (rawShotClock <= 0 && clockSeconds < defaultShotClock);
+  const shotClock = isShotClockOff ? 0 : rawShotClock;
   const isClockRunning = liveSession?.isClockRunning ?? false;
+
+  const [subTenths, setSubTenths] = useState(0);
+  useEffect(() => {
+    if (!isClockRunning || (clockSeconds >= 24 && (isShotClockOff || shotClock >= 5))) {
+      setSubTenths(0);
+      return;
+    }
+    const anchor = performance.now();
+    const timer = setInterval(() => {
+      const elapsed = (performance.now() - anchor) % 1000;
+      setSubTenths(Math.max(0, Math.min(9, 9 - Math.floor(elapsed / 100))));
+    }, 80);
+    return () => clearInterval(timer);
+  }, [isClockRunning, clockSeconds, shotClock, isShotClockOff]);
+
+  const formattedGameClock =
+    clockSeconds > 0 && clockSeconds < 24
+      ? `${String(Math.max(0, clockSeconds - (isClockRunning ? 1 : 0))).padStart(2, "0")}.${subTenths}`
+      : formatClock(clockSeconds);
+
+  const formattedShotClock = isShotClockOff
+    ? "OFF"
+    : shotClock > 0 && shotClock < 5
+    ? `${Math.max(0, shotClock - (isClockRunning ? 1 : 0))}.${subTenths}`
+    : String(shotClock);
 
   const homeQuarterScores = liveSession?.homeQuarterScores ?? [0, 0, 0, 0];
   const awayQuarterScores = liveSession?.awayQuarterScores ?? [0, 0, 0, 0];
@@ -627,7 +657,7 @@ function ArenaScoreboardContent() {
                   transition: "color 0.4s, text-shadow 0.4s",
                 }}
               >
-                {formatClock(clockSeconds)}
+                {formattedGameClock}
               </div>
 
               {/* Sub-row: HOME fouls | SHOT CLOCK | AWAY fouls */}
@@ -672,11 +702,19 @@ function ArenaScoreboardContent() {
                     flexDirection: "column",
                     alignItems: "center",
                     background: "rgba(0,0,0,0.5)",
-                    border: `2px solid ${shotClock <= 5 ? "#ef4444" : "#14532d"}`,
+                    border: `2px solid ${
+                      isShotClockOff
+                        ? "#334155"
+                        : shotClock <= 5
+                        ? "#ef4444"
+                        : "#14532d"
+                    }`,
                     borderRadius: "10px",
                     padding: "4px 14px",
                     minWidth: "70px",
-                    boxShadow: shotClock <= 5
+                    boxShadow: isShotClockOff
+                      ? "none"
+                      : shotClock <= 5
                       ? "0 0 12px #ef444466"
                       : "0 0 8px #16a34a33",
                     transition: "border-color 0.3s, box-shadow 0.3s",
@@ -684,7 +722,11 @@ function ArenaScoreboardContent() {
                 >
                   <span
                     style={{
-                      color: shotClock <= 5 ? "#ef4444" : "#22c55e",
+                      color: isShotClockOff
+                        ? "#64748b"
+                        : shotClock <= 5
+                        ? "#ef4444"
+                        : "#22c55e",
                       fontSize: "0.5rem",
                       fontWeight: 900,
                       letterSpacing: "0.14em",
@@ -698,16 +740,21 @@ function ArenaScoreboardContent() {
                       fontFamily: "monospace",
                       fontSize: "clamp(1.8rem, 4vw, 3rem)",
                       fontWeight: 900,
-                      color: shotClock <= 5 ? "#ef4444" : "#22c55e",
-                      textShadow:
-                        shotClock <= 5
-                          ? "0 0 16px #ef4444, 0 0 32px #ef444466"
-                          : "0 0 16px #22c55e, 0 0 32px #22c55e66",
+                      color: isShotClockOff
+                        ? "#64748b"
+                        : shotClock <= 5
+                        ? "#ef4444"
+                        : "#22c55e",
+                      textShadow: isShotClockOff
+                        ? "none"
+                        : shotClock <= 5
+                        ? "0 0 16px #ef4444, 0 0 32px #ef444466"
+                        : "0 0 16px #22c55e, 0 0 32px #22c55e66",
                       lineHeight: 1,
                       transition: "color 0.3s, text-shadow 0.3s",
                     }}
                   >
-                    {shotClock}
+                    {formattedShotClock}
                   </span>
                 </div>
 
