@@ -13,7 +13,7 @@ export const viewport: Viewport = {
 export const metadata: Metadata = {
   title: "BOX SCORE | Basketball League Management & Courtside Engine",
   description:
-    "Production-grade basketball league management, zero-latency courtside stat-keeping engine, AI awardee analytics, and OBS livestream overlays.",
+    "Production-grade basketball league management, zero-latency courtside stat-keeping engine, AI awardee analytics, and BoxScore Studio livestream overlays.",
   manifest: "/manifest.webmanifest",
   appleWebApp: {
     capable: true,

@@ -6,7 +6,7 @@ export default function manifest(): MetadataRoute.Manifest {
     name: "BOX SCORE | Basketball League & Broadcast Studio",
     short_name: "BOX SCORE",
     description:
-      "Production-grade basketball league management, zero-latency courtside stat-keeping engine, AI awardee analytics, and OBS livestream studio.",
+      "Production-grade basketball league management, zero-latency courtside stat-keeping engine, AI awardee analytics, and BoxScore Studio.",
     start_url: "/",
     scope: "/",
     display: "standalone",
@@ -37,9 +37,9 @@ export default function manifest(): MetadataRoute.Manifest {
     ],
     shortcuts: [
       {
-        name: "OBS Broadcast Studio",
+        name: "BoxScore Studio",
         short_name: "Studio",
-        description: "Open Multi-Cam OBS Studio & Replay Timeline",
+        description: "Open Multi-Cam BoxScore Studio & Replay Timeline",
         url: "/studio",
         icons: [{ src: "/icon-192.png", sizes: "192x192", type: "image/png" }],
       },

@@ -878,6 +878,33 @@ function LiveBroadcastStudioContent() {
   const period = liveSession?.currentPeriod ?? 1;
   const isClockRunning = liveSession?.isClockRunning ?? false;
 
+  // Score Change Transition Animation State (+1, +2, +3 in Scorebug)
+  const scoreChangeAnimRef = useRef<{
+    matchId: string;
+    prevAwayScore: number | null;
+    prevHomeScore: number | null;
+    awayAnim: {
+      delta: number;
+      oldScore: number;
+      newScore: number;
+      startedAtMs: number;
+      durationMs: number;
+    } | null;
+    homeAnim: {
+      delta: number;
+      oldScore: number;
+      newScore: number;
+      startedAtMs: number;
+      durationMs: number;
+    } | null;
+  }>({
+    matchId: "",
+    prevAwayScore: null,
+    prevHomeScore: null,
+    awayAnim: null,
+    homeAnim: null,
+  });
+
   const homeTeamName = homeTeam?.name ?? activeMatch?.homeTeamPlaceholder ?? "HOME";
   const awayTeamName = awayTeam?.name ?? activeMatch?.awayTeamPlaceholder ?? "AWAY";
   // Scorebug Team Name: Team Initials if set; otherwise the first word of the team name
@@ -3201,6 +3228,79 @@ function LiveBroadcastStudioContent() {
 
       ctx.save();
 
+      // Track score changes (+1, +2, +3, etc.) for broadcast transition animation
+      const nowMs = performance.now();
+      const currentMatchKey = activeMatch?.id || "default";
+      const animState = scoreChangeAnimRef.current;
+
+      if (animState.matchId !== currentMatchKey) {
+        animState.matchId = currentMatchKey;
+        animState.prevAwayScore = awayScore;
+        animState.prevHomeScore = homeScore;
+        animState.awayAnim = null;
+        animState.homeAnim = null;
+      } else {
+        if (animState.prevAwayScore !== null && awayScore !== animState.prevAwayScore) {
+          const delta = awayScore - animState.prevAwayScore;
+          if (delta > 0) {
+            animState.awayAnim = {
+              delta,
+              oldScore: animState.prevAwayScore,
+              newScore: awayScore,
+              startedAtMs: nowMs,
+              durationMs: 2200,
+            };
+          } else {
+            animState.awayAnim = null;
+          }
+          animState.prevAwayScore = awayScore;
+        } else if (animState.prevAwayScore === null) {
+          animState.prevAwayScore = awayScore;
+        }
+
+        if (animState.prevHomeScore !== null && homeScore !== animState.prevHomeScore) {
+          const delta = homeScore - animState.prevHomeScore;
+          if (delta > 0) {
+            animState.homeAnim = {
+              delta,
+              oldScore: animState.prevHomeScore,
+              newScore: homeScore,
+              startedAtMs: nowMs,
+              durationMs: 2200,
+            };
+          } else {
+            animState.homeAnim = null;
+          }
+          animState.prevHomeScore = homeScore;
+        } else if (animState.prevHomeScore === null) {
+          animState.prevHomeScore = homeScore;
+        }
+      }
+
+      if (animState.awayAnim && nowMs - animState.awayAnim.startedAtMs > animState.awayAnim.durationMs) {
+        animState.awayAnim = null;
+      }
+      if (animState.homeAnim && nowMs - animState.homeAnim.startedAtMs > animState.homeAnim.durationMs) {
+        animState.homeAnim = null;
+      }
+
+      const activeAwayAnim = animState.awayAnim;
+      const activeHomeAnim = animState.homeAnim;
+
+      // Helper for +1 / +2 / +3 badge colors
+      const getScoreDeltaColors = (delta: number, teamColorHex: string) => {
+        if (delta === 3) {
+          return { bgStart: "#f59e0b", bgEnd: "#d97706", text: "#0f172a", border: "#fde047" };
+        }
+        if (delta === 2) {
+          return { bgStart: "#10b981", bgEnd: "#059669", text: "#ffffff", border: "#6ee7b7" };
+        }
+        if (delta === 1) {
+          return { bgStart: "#0ea5e9", bgEnd: "#0284c7", text: "#ffffff", border: "#7dd3fc" };
+        }
+        return { bgStart: teamColorHex || "#e11d48", bgEnd: "#9f1239", text: "#ffffff", border: "#fda4af" };
+      };
+
       if (scorebugPosition === "bottom_bar") {
         // =====================================================================
         // BOTTOM CENTER SCOREBUG (Image 1):
@@ -3264,10 +3364,89 @@ function LiveBroadcastStudioContent() {
           "left"
         );
 
-        ctx.fillStyle = textColor;
-        ctx.font = "900 36px 'Inter', sans-serif";
-        ctx.textAlign = "right";
-        ctx.fillText(String(awayScore), bugX + 366, bugY + bugH / 2);
+        // Away Score with transition animation (+1, +2, +3)
+        {
+          ctx.save();
+          const scoreAnchorX = bugX + 366;
+          const scoreCenterY = bugY + bugH / 2;
+          if (activeAwayAnim) {
+            const elapsed = Math.max(0, nowMs - activeAwayAnim.startedAtMs);
+            const flipT = Math.min(1, elapsed / 420);
+            const easeOutBack = 1 + 1.8 * Math.pow(flipT - 1, 3) + 0.8 * Math.pow(flipT - 1, 2);
+            const badgeFade =
+              elapsed < 1750 ? 1 : Math.max(0, 1 - (elapsed - 1750) / (activeAwayAnim.durationMs - 1750));
+            const colors = getScoreDeltaColors(activeAwayAnim.delta, awayColor);
+
+            // Highlight glow behind Away score
+            ctx.save();
+            ctx.globalAlpha = badgeFade * 0.28;
+            ctx.fillStyle = colors.bgStart;
+            ctx.beginPath();
+            ctx.roundRect(bugX + 298, bugY + 12, 78, bugH - 24, [10]);
+            ctx.fill();
+            ctx.restore();
+
+            // Old score sliding up & fading out during first 320ms
+            if (flipT < 1) {
+              ctx.save();
+              ctx.globalAlpha = Math.max(0, 1 - flipT * 1.35);
+              ctx.fillStyle = textColor;
+              ctx.font = "900 36px 'Inter', sans-serif";
+              ctx.textAlign = "right";
+              ctx.textBaseline = "middle";
+              ctx.fillText(String(activeAwayAnim.oldScore), scoreAnchorX, scoreCenterY - flipT * 24);
+              ctx.restore();
+            }
+
+            // New score sliding up & popping in
+            ctx.save();
+            const scale = flipT < 1 ? 0.85 + 0.25 * easeOutBack : 1 + Math.sin((elapsed / 180) * Math.PI) * 0.04 * badgeFade;
+            ctx.translate(scoreAnchorX - 22, scoreCenterY + (1 - flipT) * 20);
+            ctx.scale(scale, scale);
+            ctx.fillStyle = elapsed < 650 ? colors.border : textColor;
+            ctx.font = "900 36px 'Inter', sans-serif";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(String(awayScore), 0, 0);
+            ctx.restore();
+
+            // Floating +1 / +2 / +3 callout pill above Away score
+            ctx.save();
+            const popIn = Math.min(1, elapsed / 220);
+            const floatOffsetY = (1 - popIn) * 14 - (elapsed / activeAwayAnim.durationMs) * 6;
+            const pillW = 54;
+            const pillH = 26;
+            const pillX = bugX + 310;
+            const pillY = bugY - 20 + floatOffsetY;
+            ctx.globalAlpha = badgeFade * popIn;
+            ctx.shadowColor = "rgba(0, 0, 0, 0.55)";
+            ctx.shadowBlur = 10;
+            const pillGrad = ctx.createLinearGradient(pillX, pillY, pillX, pillY + pillH);
+            pillGrad.addColorStop(0, colors.bgStart);
+            pillGrad.addColorStop(1, colors.bgEnd);
+            ctx.fillStyle = pillGrad;
+            ctx.beginPath();
+            ctx.roundRect(pillX, pillY, pillW, pillH, [8]);
+            ctx.fill();
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = colors.border;
+            ctx.stroke();
+            ctx.shadowColor = "transparent";
+            ctx.fillStyle = colors.text;
+            ctx.font = "900 16px 'Inter', sans-serif";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(`+${activeAwayAnim.delta}`, pillX + pillW / 2, pillY + pillH / 2 + 1);
+            ctx.restore();
+          } else {
+            ctx.fillStyle = textColor;
+            ctx.font = "900 36px 'Inter', sans-serif";
+            ctx.textAlign = "right";
+            ctx.textBaseline = "middle";
+            ctx.fillText(String(awayScore), scoreAnchorX, scoreCenterY);
+          }
+          ctx.restore();
+        }
 
         // Center Divider between Away & Home
         ctx.strokeStyle = borderColor;
@@ -3277,10 +3456,86 @@ function LiveBroadcastStudioContent() {
         ctx.stroke();
 
         // 3. Home Team Score + Short Name/Initials + Timeouts/Penalty + Logo + Color Accent
-        ctx.fillStyle = textColor;
-        ctx.font = "900 36px 'Inter', sans-serif";
-        ctx.textAlign = "left";
-        ctx.fillText(String(homeScore), bugX + 398, bugY + bugH / 2);
+        {
+          ctx.save();
+          const scoreAnchorX = bugX + 398;
+          const scoreCenterY = bugY + bugH / 2;
+          if (activeHomeAnim) {
+            const elapsed = Math.max(0, nowMs - activeHomeAnim.startedAtMs);
+            const flipT = Math.min(1, elapsed / 420);
+            const easeOutBack = 1 + 1.8 * Math.pow(flipT - 1, 3) + 0.8 * Math.pow(flipT - 1, 2);
+            const badgeFade =
+              elapsed < 1750 ? 1 : Math.max(0, 1 - (elapsed - 1750) / (activeHomeAnim.durationMs - 1750));
+            const colors = getScoreDeltaColors(activeHomeAnim.delta, homeColor);
+
+            // Highlight glow behind Home score
+            ctx.save();
+            ctx.globalAlpha = badgeFade * 0.28;
+            ctx.fillStyle = colors.bgStart;
+            ctx.beginPath();
+            ctx.roundRect(bugX + 388, bugY + 12, 78, bugH - 24, [10]);
+            ctx.fill();
+            ctx.restore();
+
+            if (flipT < 1) {
+              ctx.save();
+              ctx.globalAlpha = Math.max(0, 1 - flipT * 1.35);
+              ctx.fillStyle = textColor;
+              ctx.font = "900 36px 'Inter', sans-serif";
+              ctx.textAlign = "left";
+              ctx.textBaseline = "middle";
+              ctx.fillText(String(activeHomeAnim.oldScore), scoreAnchorX, scoreCenterY - flipT * 24);
+              ctx.restore();
+            }
+
+            ctx.save();
+            const scale = flipT < 1 ? 0.85 + 0.25 * easeOutBack : 1 + Math.sin((elapsed / 180) * Math.PI) * 0.04 * badgeFade;
+            ctx.translate(scoreAnchorX + 22, scoreCenterY + (1 - flipT) * 20);
+            ctx.scale(scale, scale);
+            ctx.fillStyle = elapsed < 650 ? colors.border : textColor;
+            ctx.font = "900 36px 'Inter', sans-serif";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(String(homeScore), 0, 0);
+            ctx.restore();
+
+            // Floating +1 / +2 / +3 callout pill above Home score
+            ctx.save();
+            const popIn = Math.min(1, elapsed / 220);
+            const floatOffsetY = (1 - popIn) * 14 - (elapsed / activeHomeAnim.durationMs) * 6;
+            const pillW = 54;
+            const pillH = 26;
+            const pillX = bugX + 400;
+            const pillY = bugY - 20 + floatOffsetY;
+            ctx.globalAlpha = badgeFade * popIn;
+            ctx.shadowColor = "rgba(0, 0, 0, 0.55)";
+            ctx.shadowBlur = 10;
+            const pillGrad = ctx.createLinearGradient(pillX, pillY, pillX, pillY + pillH);
+            pillGrad.addColorStop(0, colors.bgStart);
+            pillGrad.addColorStop(1, colors.bgEnd);
+            ctx.fillStyle = pillGrad;
+            ctx.beginPath();
+            ctx.roundRect(pillX, pillY, pillW, pillH, [8]);
+            ctx.fill();
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = colors.border;
+            ctx.stroke();
+            ctx.shadowColor = "transparent";
+            ctx.fillStyle = colors.text;
+            ctx.font = "900 16px 'Inter', sans-serif";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(`+${activeHomeAnim.delta}`, pillX + pillW / 2, pillY + pillH / 2 + 1);
+            ctx.restore();
+          } else {
+            ctx.fillStyle = textColor;
+            ctx.font = "900 36px 'Inter', sans-serif";
+            ctx.textAlign = "left";
+            ctx.textBaseline = "middle";
+            ctx.fillText(String(homeScore), scoreAnchorX, scoreCenterY);
+          }
+          ctx.restore();
+        }
 
         ctx.fillStyle = textColor;
         ctx.font = "900 22px 'Inter', sans-serif";
@@ -3509,17 +3764,28 @@ function LiveBroadcastStudioContent() {
         );
 
         // ---------------------------------------------------------------------
-        // COLUMN 2: Stacked White Score Boxes with Vertical BONUS Strip (Image 2)
+        // COLUMN 2: Stacked White Score Boxes (Single clean BONUS in Team Bar; no duplicate vertical BONUS strip)
         // ---------------------------------------------------------------------
         const scoreColX = teamColX + teamColW;
 
         const drawWhiteScoreBox = (
           rowY: number,
           scoreVal: number,
-          inPenalty: boolean,
-          teamAccentColor: string
+          teamAccentColor: string,
+          scoreAnim: {
+            delta: number;
+            oldScore: number;
+            newScore: number;
+            startedAtMs: number;
+            durationMs: number;
+          } | null
         ) => {
           ctx.save();
+          // Clip strictly to this row's white score box so vertical slot-roll stays crisp
+          ctx.beginPath();
+          ctx.rect(scoreColX, rowY, scoreColW, rowH);
+          ctx.clip();
+
           // Crisp white / light-silver broadcast box
           const scoreGrad = ctx.createLinearGradient(scoreColX, rowY, scoreColX, rowY + rowH);
           scoreGrad.addColorStop(0, "#ffffff");
@@ -3527,40 +3793,103 @@ function LiveBroadcastStudioContent() {
           ctx.fillStyle = scoreGrad;
           ctx.fillRect(scoreColX, rowY, scoreColW, rowH);
 
-          // Vertical BONUS indicator along left edge of white score box
-          if (inPenalty) {
-            ctx.fillStyle = teamAccentColor || "#dc2626";
-            ctx.fillRect(scoreColX, rowY, 13, rowH);
+          // Subtle vertical accent strip along left edge (no duplicate "BONUS" text)
+          ctx.fillStyle = "rgba(15, 23, 42, 0.14)";
+          ctx.fillRect(scoreColX, rowY, 3, rowH);
+
+          const centerX = scoreColX + scoreColW / 2;
+          const centerY = rowY + rowH / 2 + 1;
+
+          if (scoreAnim) {
+            const elapsed = Math.max(0, nowMs - scoreAnim.startedAtMs);
+            const flipT = Math.min(1, elapsed / 420);
+            const easeOutBack = 1 + 1.8 * Math.pow(flipT - 1, 3) + 0.8 * Math.pow(flipT - 1, 2);
+            const badgeFade =
+              elapsed < 1750 ? 1 : Math.max(0, 1 - (elapsed - 1750) / (scoreAnim.durationMs - 1750));
+            const colors = getScoreDeltaColors(scoreAnim.delta, teamAccentColor);
+
+            // Flash highlight overlay inside white score box
             ctx.save();
-            ctx.translate(scoreColX + 6.5, rowY + rowH / 2);
-            ctx.rotate(-Math.PI / 2);
-            ctx.fillStyle = "#ffffff";
-            ctx.font = "900 7.5px 'Inter', sans-serif";
+            ctx.globalAlpha = badgeFade * (elapsed < 500 ? 0.32 : 0.16);
+            ctx.fillStyle = colors.bgStart;
+            ctx.fillRect(scoreColX + 3, rowY, scoreColW - 3, rowH);
+            ctx.restore();
+
+            // Left accent bar flash in delta color
+            ctx.fillStyle = colors.bgStart;
+            ctx.fillRect(scoreColX, rowY, 4, rowH);
+
+            // Shift score slightly left while the +1/+2/+3 badge is visible inside the box
+            const scoreOffsetX = -13 * badgeFade;
+
+            // Old score sliding up & out
+            if (flipT < 1) {
+              ctx.save();
+              ctx.globalAlpha = Math.max(0, 1 - flipT * 1.35);
+              ctx.fillStyle = "#475569";
+              ctx.font = "900 30px 'Inter', sans-serif";
+              ctx.textAlign = "center";
+              ctx.textBaseline = "middle";
+              ctx.fillText(
+                String(scoreAnim.oldScore),
+                centerX + scoreOffsetX,
+                centerY - flipT * 28
+              );
+              ctx.restore();
+            }
+
+            // New score sliding up & popping in
+            ctx.save();
+            const scale =
+              flipT < 1
+                ? 0.84 + 0.22 * easeOutBack
+                : 1 + Math.sin((elapsed / 180) * Math.PI) * 0.035 * badgeFade;
+            ctx.translate(centerX + scoreOffsetX, centerY + (1 - flipT) * 26);
+            ctx.scale(scale, scale);
+            ctx.fillStyle = "#0f172a";
+            ctx.font = "900 31px 'Inter', sans-serif";
             ctx.textAlign = "center";
             ctx.textBaseline = "middle";
-            ctx.fillText("BONUS", 0, 0);
+            ctx.fillText(String(scoreVal), 0, 0);
+            ctx.restore();
+
+            // Prominent +1 / +2 / +3 pill badge on the right side of the score box
+            ctx.save();
+            const popIn = Math.min(1, elapsed / 220);
+            const pillScale = popIn < 1 ? 0.6 + 0.4 * popIn : 1;
+            const pillW = 28;
+            const pillH = 20;
+            const pillCenterX = scoreColX + scoreColW - 17;
+            const pillCenterY = rowY + rowH / 2;
+            ctx.globalAlpha = badgeFade * popIn;
+            ctx.translate(pillCenterX, pillCenterY);
+            ctx.scale(pillScale, pillScale);
+            const pillGrad = ctx.createLinearGradient(0, -pillH / 2, 0, pillH / 2);
+            pillGrad.addColorStop(0, colors.bgStart);
+            pillGrad.addColorStop(1, colors.bgEnd);
+            ctx.fillStyle = pillGrad;
+            ctx.beginPath();
+            ctx.roundRect(-pillW / 2, -pillH / 2, pillW, pillH, [5]);
+            ctx.fill();
+            ctx.fillStyle = colors.text;
+            ctx.font = "900 12.5px 'Inter', sans-serif";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(`+${scoreAnim.delta}`, 0, 0.5);
             ctx.restore();
           } else {
-            // Subtle vertical tick strip when not in bonus
-            ctx.fillStyle = "rgba(15, 23, 42, 0.12)";
-            ctx.fillRect(scoreColX, rowY, 4, rowH);
+            // Bold Black Score Number (centered cleanly)
+            ctx.fillStyle = "#0f172a";
+            ctx.font = "900 32px 'Inter', sans-serif";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(String(scoreVal), centerX, centerY);
           }
-
-          // Bold Black Score Number
-          ctx.fillStyle = "#0f172a";
-          ctx.font = "900 32px 'Inter', sans-serif";
-          ctx.textAlign = "center";
-          ctx.textBaseline = "middle";
-          ctx.fillText(
-            String(scoreVal),
-            scoreColX + (inPenalty ? (scoreColW + 11) / 2 : scoreColW / 2),
-            rowY + rowH / 2 + 1
-          );
           ctx.restore();
         };
 
-        drawWhiteScoreBox(bugY, awayScore, isAwayInPenalty, awayColor);
-        drawWhiteScoreBox(bugY + rowH, homeScore, isHomeInPenalty, homeColor);
+        drawWhiteScoreBox(bugY, awayScore, awayColor, activeAwayAnim);
+        drawWhiteScoreBox(bugY + rowH, homeScore, homeColor, activeHomeAnim);
 
         // ---------------------------------------------------------------------
         // COLUMN 3: Right Clock / Quarter / Shot Clock Column (Image 2)
@@ -3641,6 +3970,90 @@ function LiveBroadcastStudioContent() {
         ctx.strokeRect(bugX + 1, bugY + 1, bugW - 2, bugH - 2);
 
         ctx.restore();
+
+        // Floating Broadcast Score Callout Banner above/next to the Scorebug (+1, +2, +3)
+        const drawFloatingScoreCallout = (
+          anim: {
+            delta: number;
+            oldScore: number;
+            newScore: number;
+            startedAtMs: number;
+            durationMs: number;
+          } | null,
+          teamLabel: string,
+          teamColorHex: string,
+          rowIndex: 0 | 1
+        ) => {
+          if (!anim) return;
+          const elapsed = Math.max(0, nowMs - anim.startedAtMs);
+          if (elapsed > anim.durationMs) return;
+          const popIn = Math.min(1, elapsed / 240);
+          const fadeOut =
+            elapsed < 1750 ? 1 : Math.max(0, 1 - (elapsed - 1750) / (anim.durationMs - 1750));
+          const colors = getScoreDeltaColors(anim.delta, teamColorHex);
+
+          const calloutW = 106;
+          const calloutH = 30;
+          // Place above the Score Column when bottom_left, or to the right of the Scorebug
+          const calloutX = scoreColX + (scoreColW - calloutW) / 2 + rowIndex * 6;
+          const baseCalloutY =
+            scorebugPosition === "bottom_left"
+              ? bugY - calloutH - 8 - (1 - rowIndex) * 4
+              : bugY + bugH + 8 + rowIndex * 4;
+          const slideOffsetY =
+            scorebugPosition === "bottom_left"
+              ? (1 - popIn) * 14 - (elapsed / anim.durationMs) * 6
+              : -(1 - popIn) * 14 + (elapsed / anim.durationMs) * 6;
+          const calloutY = baseCalloutY + slideOffsetY;
+
+          ctx.save();
+          ctx.globalAlpha = fadeOut * popIn;
+          ctx.shadowColor = "rgba(0, 0, 0, 0.65)";
+          ctx.shadowBlur = 12;
+          ctx.shadowOffsetY = 4;
+
+          const bgGrad = ctx.createLinearGradient(calloutX, calloutY, calloutX + calloutW, calloutY + calloutH);
+          bgGrad.addColorStop(0, teamColorHex || "#1e293b");
+          bgGrad.addColorStop(0.55, "#0f172a");
+          bgGrad.addColorStop(1, colors.bgEnd);
+          ctx.fillStyle = bgGrad;
+          ctx.beginPath();
+          ctx.roundRect(calloutX, calloutY, calloutW, calloutH, [7]);
+          ctx.fill();
+
+          ctx.lineWidth = 2;
+          ctx.strokeStyle = colors.border;
+          ctx.stroke();
+          ctx.shadowColor = "transparent";
+
+          // Team Short Name on Left
+          ctx.fillStyle = "#ffffff";
+          ctx.font = "900 11.5px 'Inter', sans-serif";
+          ctx.textAlign = "left";
+          ctx.textBaseline = "middle";
+          ctx.fillText(teamLabel.slice(0, 5).toUpperCase(), calloutX + 9, calloutY + calloutH / 2 + 0.5);
+
+          // Highlighted +1 / +2 / +3 Pill on Right
+          const deltaBadgeW = 40;
+          const deltaBadgeH = 22;
+          const deltaBadgeX = calloutX + calloutW - deltaBadgeW - 4;
+          const deltaBadgeY = calloutY + (calloutH - deltaBadgeH) / 2;
+          ctx.fillStyle = colors.bgStart;
+          ctx.beginPath();
+          ctx.roundRect(deltaBadgeX, deltaBadgeY, deltaBadgeW, deltaBadgeH, [5]);
+          ctx.fill();
+
+          ctx.fillStyle = colors.text;
+          ctx.font = "900 14px 'Inter', sans-serif";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(`+${anim.delta}`, deltaBadgeX + deltaBadgeW / 2, deltaBadgeY + deltaBadgeH / 2 + 0.5);
+
+          ctx.restore();
+        };
+
+        drawFloatingScoreCallout(activeAwayAnim, awayScorebugName, awayColor, 0);
+        drawFloatingScoreCallout(activeHomeAnim, homeScorebugName, homeColor, 1);
       }
 
       if (showSponsorTag) {
@@ -3659,6 +4072,7 @@ function LiveBroadcastStudioContent() {
       ctx.restore();
     },
     [
+      activeMatch?.id,
       scorebugTheme,
       scorebugPosition,
       activeLeague?.name,
@@ -8527,7 +8941,7 @@ function LiveBroadcastStudioContent() {
             </span>
             <h1 className="text-xs sm:text-sm font-black uppercase tracking-wider text-white flex items-center gap-1.5">
               <Radio className="h-4 w-4 text-rose-500" />
-              Box Score OBS Studio Mode
+              BoxScore Studio
             </h1>
           </div>
         </div>
@@ -13114,7 +13528,7 @@ function LiveBroadcastStudioContent() {
                     Go Live on Your Facebook Page
                   </h2>
                   <p className="text-xs text-slate-400">
-                    Connect Box Score OBS Studio directly to Facebook Live Producer
+                    Connect BoxScore Studio directly to Facebook Live Producer
                   </p>
                 </div>
               </div>
@@ -13844,7 +14258,7 @@ export default function BroadcastStudioPage() {
         <div className="min-h-screen bg-slate-950 text-white flex flex-col items-center justify-center p-6 gap-3">
           <BoxScoreLogo size="md" variant="dark-bg" />
           <p className="text-xs font-black uppercase tracking-widest text-slate-400">
-            Loading OBS Studio Mode...
+            Loading BoxScore Studio...
           </p>
         </div>
       }

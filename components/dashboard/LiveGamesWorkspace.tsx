@@ -326,7 +326,7 @@ export function LiveGamesWorkspace() {
             No Active Facebook Live Streams Found
           </h2>
           <p className="mt-1 text-xs text-slate-500 max-w-md mx-auto">
-            When a game goes live on Facebook Live, connect its stream URL in <strong>Live Game Scoring</strong> or the <strong>OBS Live Studio</strong> to broadcast it here for all spectators and the iOS app.
+            When a game goes live on Facebook Live, connect its stream URL in <strong>Live Game Scoring</strong> or the <strong>BoxScore Studio</strong> to broadcast it here for all spectators and the iOS app.
           </p>
 
           <div className="mt-6 flex flex-wrap items-center justify-center gap-3">

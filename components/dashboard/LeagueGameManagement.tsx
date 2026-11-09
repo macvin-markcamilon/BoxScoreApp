@@ -566,8 +566,11 @@ export function LeagueGameManagement({
         return;
       }
 
+      const defaultShotClock = league.rulesConfig.shotClockSeconds || 24;
+      const baseShotClock =
+        latest.shotClockSeconds <= 0 ? defaultShotClock : latest.shotClockSeconds;
       const nextGameClock = Math.max(0, latest.clockSecondsRemaining - secondsToDeduct);
-      const nextShotClock = Math.max(0, latest.shotClockSeconds - secondsToDeduct);
+      const nextShotClock = Math.max(0, baseShotClock - secondsToDeduct);
 
       // Increment secondsPlayed and compute minutesPlayed for all on-court players
       const updatedHomeStats = { ...latest.homePlayerStats };
@@ -600,7 +603,7 @@ export function LeagueGameManagement({
 
       if (
         nextShotClock === 0 &&
-        latest.shotClockSeconds > 0 &&
+        baseShotClock > 0 &&
         nextGameClock > 0
       ) {
         saveGameSession(matchId, {
@@ -614,7 +617,7 @@ export function LeagueGameManagement({
         });
         playShotClockBuzzer(isBuzzerMutedRef.current);
         setHornAlertMessage(
-          "24-SECOND SHOT CLOCK VIOLATION BUZZER! Clock paused — reset shot clock to continue."
+          "24-SECOND SHOT CLOCK VIOLATION BUZZER! Clock paused — starting the game clock will automatically restart the 24s shot clock."
         );
         return;
       }
@@ -756,9 +759,15 @@ export function LeagueGameManagement({
           status: "LIVE",
         });
       }
+      // Automatically reset & start shot clock from 24s if starting game clock after a 24s shot clock violation (0s)
+      const nextShotClock =
+        nextRunning && prev.shotClockSeconds <= 0
+          ? shotClockDefault
+          : prev.shotClockSeconds;
       return {
         ...prev,
         isClockRunning: nextRunning,
+        shotClockSeconds: nextShotClock,
         clockLeaderId: nextRunning ? clientInstanceIdRef.current : undefined,
       };
     });
