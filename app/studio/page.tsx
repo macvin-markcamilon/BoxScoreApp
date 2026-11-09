@@ -5551,20 +5551,34 @@ function LiveBroadcastStudioContent() {
             }
           }
 
-          // Mirror Live Program Canvas directly to Pop-Out Clean Program Window if open
+          // Expose Live Program Canvas on window & mirror directly to Clean Feed New Tab if open
+          if (typeof window !== "undefined") {
+            (
+              window as unknown as { __boxScoreLiveCanvas?: HTMLCanvasElement | null }
+            ).__boxScoreLiveCanvas = lCanvas;
+          }
           const popupWin = cleanPopupWindowRef.current;
-          const popupCanvas = cleanPopupCanvasRef.current;
-          if (popupWin && !popupWin.closed && popupCanvas) {
-            const popCtx = popupCanvas.getContext("2d");
-            if (popCtx) {
-              popCtx.drawImage(
-                lCanvas,
-                0,
-                0,
-                popupCanvas.width,
-                popupCanvas.height
-              );
-            }
+          if (popupWin && !popupWin.closed) {
+            try {
+              const popupCanvas =
+                cleanPopupCanvasRef.current ||
+                (popupWin.document?.getElementById(
+                  "cleanProgCanvas"
+                ) as HTMLCanvasElement | null);
+              if (popupCanvas) {
+                cleanPopupCanvasRef.current = popupCanvas;
+                const popCtx = popupCanvas.getContext("2d");
+                if (popCtx) {
+                  popCtx.drawImage(
+                    lCanvas,
+                    0,
+                    0,
+                    popupCanvas.width,
+                    popupCanvas.height
+                  );
+                }
+              }
+            } catch {}
           }
         }
       }
@@ -7012,21 +7026,26 @@ function LiveBroadcastStudioContent() {
       const networkType = nav?.connection?.effectiveType || "broadband";
 
       // Measure actual HTTP round-trip latency to /api/rtmp-stream relay
-      const t0 = performance.now();
+      // (When already streaming live, reuse live push latency so we never trigger a second concurrent serverless instance!)
       let pingMs = browserRttMs || 120;
-      try {
-        const res = await fetch("/api/rtmp-stream", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            action: "status",
-            sessionId: rtmpSessionIdRef.current,
-          }),
-        });
-        await res.json();
-        pingMs = Math.max(10, Math.round(performance.now() - t0));
-      } catch {
-        pingMs = 1500;
+      if (isStreamingLive || isFlushingRtmpRef.current) {
+        pingMs = rtmpTelemetryRef.current.lastPushLatencyMs || browserRttMs || 140;
+      } else {
+        const t0 = performance.now();
+        try {
+          const res = await fetch("/api/rtmp-stream", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              action: "status",
+              sessionId: rtmpSessionIdRef.current,
+            }),
+          });
+          await res.json();
+          pingMs = Math.max(10, Math.round(performance.now() - t0));
+        } catch {
+          pingMs = 1500;
+        }
       }
 
       const specs = getStreamPresetSpecs(streamQualityPreset);
@@ -7588,48 +7607,23 @@ function LiveBroadcastStudioContent() {
     }
   };
 
-  // Pop-Out Clean 16:9 Program Window (Zero-latency direct canvas mirror for Facebook Screen Share / OBS / Dual-Monitor)
+  // Open Clean 16:9 Program Feed in a New Browser Tab (Zero-latency direct canvas mirror for Facebook Screen Share / OBS / Dual-Monitor)
   const openCleanProgramWindow = () => {
     const lCanvas = liveCanvasRef.current;
     if (!lCanvas) return;
-    const popup = window.open(
-      "",
-      "BoxScoreCleanProgramOut",
-      "width=1280,height=720,menubar=no,toolbar=no,location=no,status=no"
-    );
-    if (!popup) {
-      alert("Please allow pop-ups to open the Clean 16:9 Live Program Window.");
+    if (typeof window !== "undefined") {
+      (
+        window as unknown as { __boxScoreLiveCanvas?: HTMLCanvasElement | null }
+      ).__boxScoreLiveCanvas = lCanvas;
+    }
+    cleanPopupCanvasRef.current = null;
+    // Omit window feature dimensions so the browser opens a real New Tab at /studio/clean-feed (not an about:blank popup)
+    const newTab = window.open("/studio/clean-feed", "_blank");
+    if (!newTab) {
+      alert("Please allow pop-ups/new tabs to open the Clean 16:9 Live Feed tab.");
       return;
     }
-    cleanPopupWindowRef.current = popup;
-    popup.document.open();
-    popup.document.write(`
-      <!DOCTYPE html>
-      <html>
-        <head>
-          <title>BOX SCORE - Clean Live Program Feed (Share this window in Facebook Live)</title>
-          <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; }
-            body { background: #000; width: 100vw; height: 100vh; overflow: hidden; display: flex; align-items: center; justify-content: center; }
-            canvas { width: 100%; height: 100%; object-fit: contain; display: block; }
-          </style>
-        </head>
-        <body>
-          <canvas id="cleanProgCanvas" width="1920" height="1080"></canvas>
-        </body>
-      </html>
-    `);
-    popup.document.close();
-    const popCanvas = popup.document.getElementById(
-      "cleanProgCanvas"
-    ) as HTMLCanvasElement | null;
-    if (popCanvas) {
-      cleanPopupCanvasRef.current = popCanvas;
-      const popCtx = popCanvas.getContext("2d");
-      if (popCtx) {
-        popCtx.drawImage(lCanvas, 0, 0, popCanvas.width, popCanvas.height);
-      }
-    }
+    cleanPopupWindowRef.current = newTab;
   };
 
   const displayTimelineFrames = useMemo(() => {
@@ -8710,12 +8704,12 @@ function LiveBroadcastStudioContent() {
             )}
           </button>
 
-          {/* Clean 16:9 Program Window Pop-Out */}
+          {/* Clean 16:9 Program Feed New Tab */}
           <button
             type="button"
             onClick={openCleanProgramWindow}
             className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 px-2.5 py-1.5 text-xs font-bold text-slate-200 cursor-pointer"
-            title="Pop out a clean 16:9 Live Program window (for Facebook Live Screen Share or external OBS)"
+            title="Open a clean 16:9 Live Program feed in a new browser tab (/studio/clean-feed)"
           >
             <Tv className="h-3.5 w-3.5 text-sky-400" />
             <span className="hidden sm:inline">Clean Feed Pop-Out</span>
@@ -13373,7 +13367,7 @@ function LiveBroadcastStudioContent() {
                   className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 px-3.5 py-2.5 text-xs font-bold text-slate-200 cursor-pointer"
                 >
                   <Tv className="h-4 w-4 text-sky-400" />
-                  <span>Or Pop-Out Clean 16:9 Window</span>
+                  <span>Or Open Clean 16:9 Feed in New Tab</span>
                 </button>
 
                 {!isStreamingLive ? (
