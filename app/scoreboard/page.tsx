@@ -183,41 +183,48 @@ function ArenaScoreboardContent() {
     (currentLeague?.rulesConfig?.periodLengthMinutes
       ? currentLeague.rulesConfig.periodLengthMinutes * 60
       : 600);
+  const clockTenths = liveSession?.clockTenthsRemaining ?? 0;
   const rawShotClock =
     liveSession?.shotClockSeconds ??
     currentLeague?.rulesConfig?.shotClockSeconds ??
     24;
+  const rawShotTenths = liveSession?.shotClockTenthsRemaining ?? 0;
   const defaultShotClock = currentLeague?.rulesConfig?.shotClockSeconds ?? 24;
+  const baseGameTenths = clockSeconds * 10 + clockTenths;
+  const baseShotTenths = rawShotClock * 10 + rawShotTenths;
   const isShotClockOff =
-    clockSeconds < rawShotClock ||
-    (rawShotClock <= 0 && clockSeconds < defaultShotClock);
+    baseGameTenths < baseShotTenths ||
+    (baseShotTenths <= 0 && baseGameTenths < defaultShotClock * 10);
   const shotClock = isShotClockOff ? 0 : rawShotClock;
   const isClockRunning = liveSession?.isClockRunning ?? false;
 
-  const [subTenths, setSubTenths] = useState(0);
+  const [elapsedTenths, setElapsedTenths] = useState(0);
   useEffect(() => {
-    if (!isClockRunning || (clockSeconds >= 24 && (isShotClockOff || shotClock >= 5))) {
-      setSubTenths(0);
+    if (!isClockRunning || (clockSeconds > 24 && (isShotClockOff || shotClock > 5))) {
+      setElapsedTenths(0);
       return;
     }
     const anchor = performance.now();
     const timer = setInterval(() => {
-      const elapsed = (performance.now() - anchor) % 1000;
-      setSubTenths(Math.max(0, Math.min(9, 9 - Math.floor(elapsed / 100))));
+      const elapsed = Math.min(999, Math.max(0, performance.now() - anchor));
+      setElapsedTenths(Math.max(0, Math.min(9, Math.floor(elapsed / 100))));
     }, 80);
     return () => clearInterval(timer);
-  }, [isClockRunning, clockSeconds, shotClock, isShotClockOff]);
+  }, [isClockRunning, baseGameTenths, baseShotTenths, isShotClockOff, clockSeconds, shotClock]);
+
+  const liveGameTenths = Math.max(0, baseGameTenths - (isClockRunning ? elapsedTenths : 0));
+  const liveShotTenths = Math.max(0, baseShotTenths - (isClockRunning ? elapsedTenths : 0));
 
   const formattedGameClock =
-    clockSeconds > 0 && clockSeconds < 24
-      ? `${String(Math.max(0, clockSeconds - (isClockRunning ? 1 : 0))).padStart(2, "0")}.${subTenths}`
-      : formatClock(clockSeconds);
+    liveGameTenths > 0 && liveGameTenths < 240
+      ? `${String(Math.floor(liveGameTenths / 10)).padStart(2, "0")}.${liveGameTenths % 10}`
+      : formatClock(Math.floor(liveGameTenths / 10));
 
   const formattedShotClock = isShotClockOff
     ? "OFF"
-    : shotClock > 0 && shotClock < 5
-    ? `${Math.max(0, shotClock - (isClockRunning ? 1 : 0))}.${subTenths}`
-    : String(shotClock);
+    : liveShotTenths > 0 && liveShotTenths < 50
+    ? `${Math.floor(liveShotTenths / 10)}.${liveShotTenths % 10}`
+    : String(Math.floor(liveShotTenths / 10));
 
   const homeQuarterScores = liveSession?.homeQuarterScores ?? [0, 0, 0, 0];
   const awayQuarterScores = liveSession?.awayQuarterScores ?? [0, 0, 0, 0];

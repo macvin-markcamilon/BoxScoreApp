@@ -271,7 +271,17 @@ function readLocalCache<T>(key: string, fallback: T): T {
 function writeLocalCache<T>(key: string, value: T) {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(key, JSON.stringify(value));
+    const serialized = JSON.stringify(value);
+    window.localStorage.setItem(key, serialized);
+    if (key === STORAGE_KEYS.GAME_SESSIONS) {
+      lastRawGameSessionsCache = serialized;
+    } else if (key === STORAGE_KEYS.TOURNAMENTS) {
+      lastRawTournamentsCache = serialized;
+    } else if (key === STORAGE_KEYS.LEAGUES) {
+      lastRawLeaguesCache = serialized;
+    } else if (key === STORAGE_KEYS.TEAMS) {
+      lastRawTeamsCache = serialized;
+    }
     // Mirror to IndexedDB as high-capacity backing store
     void idbSet(key, value);
   } catch {
@@ -409,6 +419,36 @@ async function syncTeamsToUserMetadata(_teams: LeagueTeam[]) {
 
 let sessionSaveCloudDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let lastCloudSaveTime = 0;
+let lastRawGameSessionsCache = "";
+let lastRawTournamentsCache = "";
+let lastRawLeaguesCache = "";
+let lastRawTeamsCache = "";
+let sharedGamesBroadcastChannel: BroadcastChannel | null = null;
+let sharedNotifBroadcastChannel: BroadcastChannel | null = null;
+
+function getSharedGamesBroadcastChannel(): BroadcastChannel | null {
+  if (typeof window === "undefined" || !("BroadcastChannel" in window)) return null;
+  if (!sharedGamesBroadcastChannel) {
+    try {
+      sharedGamesBroadcastChannel = new BroadcastChannel("boxscore_game_sessions_sync");
+    } catch {
+      return null;
+    }
+  }
+  return sharedGamesBroadcastChannel;
+}
+
+function getSharedNotifBroadcastChannel(): BroadcastChannel | null {
+  if (typeof window === "undefined" || !("BroadcastChannel" in window)) return null;
+  if (!sharedNotifBroadcastChannel) {
+    try {
+      sharedNotifBroadcastChannel = new BroadcastChannel("boxscore_notifications_sync");
+    } catch {
+      return null;
+    }
+  }
+  return sharedNotifBroadcastChannel;
+}
 
 export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
   isAuthLoading: true,
@@ -509,15 +549,15 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
     set({ gameSessionsByMatchId: nextSessions });
     writeLocalCache(STORAGE_KEYS.GAME_SESSIONS, nextSessions);
 
-    // 1. Broadcast across browser tabs and windows via BroadcastChannel
-    if (typeof window !== "undefined") {
-      try {
-        const bc = new BroadcastChannel("boxscore_game_sessions_sync");
-        bc.postMessage({ type: "GAME_SESSION_UPDATE", matchId, session });
-        bc.close();
-      } catch {
-        // Fallback to localStorage events
-      }
+    // 1. Broadcast across browser tabs and windows via reusable BroadcastChannel (zero main-thread allocation lag)
+    try {
+      getSharedGamesBroadcastChannel()?.postMessage({
+        type: "GAME_SESSION_UPDATE",
+        matchId,
+        session,
+      });
+    } catch {
+      // Fallback to localStorage events
     }
 
     // 2. Broadcast via Supabase Realtime so other devices and browsers sync immediately
@@ -532,84 +572,124 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
       // Ignore
     }
 
-    // 3. Persist live game sessions to Supabase Cloud
-    // Throttled: if clock is running, debounce every 2500ms; if stopped/paused/scored, persist immediately
+    // 3. Persist live game sessions to Supabase Cloud off the main frame thread
+    // Always debounce cloud persistence so clicking Start/Pause or scoring never blocks video rendering
     const leagueId = session.leagueId;
     if (leagueId) {
-      const now = Date.now();
-      const isTick = session.isClockRunning;
-      if (isTick) {
-        if (now - lastCloudSaveTime > 2500) {
-          lastCloudSaveTime = now;
-          void get().persistLeagueGamesToCloud(leagueId);
-        } else {
-          if (sessionSaveCloudDebounceTimer) {
-            clearTimeout(sessionSaveCloudDebounceTimer);
-          }
-          sessionSaveCloudDebounceTimer = setTimeout(() => {
-            lastCloudSaveTime = Date.now();
-            void get().persistLeagueGamesToCloud(leagueId);
-          }, 2500);
-        }
-      } else {
-        if (sessionSaveCloudDebounceTimer) {
-          clearTimeout(sessionSaveCloudDebounceTimer);
-          sessionSaveCloudDebounceTimer = null;
-        }
-        lastCloudSaveTime = now;
-        void get().persistLeagueGamesToCloud(leagueId);
+      if (sessionSaveCloudDebounceTimer) {
+        clearTimeout(sessionSaveCloudDebounceTimer);
       }
+      const delayMs = session.isClockRunning ? 2500 : 120;
+      sessionSaveCloudDebounceTimer = setTimeout(() => {
+        sessionSaveCloudDebounceTimer = null;
+        lastCloudSaveTime = Date.now();
+        void get().persistLeagueGamesToCloud(leagueId);
+      }, delayMs);
     }
   },
 
   syncFromLocalStorage: () => {
-    const deletedIds = readLocalCache<string[]>(STORAGE_KEYS.DELETED_LEAGUES, []);
-    const cachedSessions = readLocalCache<Record<string, LiveGameSession>>(
-      STORAGE_KEYS.GAME_SESSIONS,
-      {}
-    );
-    const cachedTournaments = readLocalCache<
-      Record<string, LeagueTournamentData>
-    >(STORAGE_KEYS.TOURNAMENTS, {});
-    const cachedLeagues = readLocalCache<LeagueRecord[]>(
-      STORAGE_KEYS.LEAGUES,
-      []
-    )
-      .filter((l) => !deletedIds.includes(l.id))
-      .map(hydrateLeagueImageFromVault);
-    const cachedTeams = readLocalCache<LeagueTeam[]>(
-      STORAGE_KEYS.TEAMS,
-      []
-    )
-      .filter((t) => !deletedIds.includes(t.leagueId))
-      .map(hydrateTeamImagesFromVault);
+    if (typeof window === "undefined") return;
+    try {
+      const rawSessions = window.localStorage.getItem(STORAGE_KEYS.GAME_SESSIONS) || "";
+      const rawTournaments = window.localStorage.getItem(STORAGE_KEYS.TOURNAMENTS) || "";
+      const rawLeagues = window.localStorage.getItem(STORAGE_KEYS.LEAGUES) || "";
+      const rawTeams = window.localStorage.getItem(STORAGE_KEYS.TEAMS) || "";
 
-    const currentSessions = get().gameSessionsByMatchId;
-    const mergedSessions: Record<string, LiveGameSession> = {
-      ...currentSessions,
-    };
-    for (const [mId, cached] of Object.entries(cachedSessions)) {
-      const current = currentSessions[mId];
-      if (!current) {
-        mergedSessions[mId] = cached;
-      } else {
-        const currentUpdated = new Date(current.updatedAt || 0).getTime();
-        const cachedUpdated = new Date(cached.updatedAt || 0).getTime();
-        if (cachedUpdated >= currentUpdated) {
-          mergedSessions[mId] = cached;
+      const sessionsChanged = rawSessions !== lastRawGameSessionsCache;
+      const tournamentsChanged = rawTournaments !== lastRawTournamentsCache;
+      const leaguesChanged = rawLeagues !== lastRawLeaguesCache;
+      const teamsChanged = rawTeams !== lastRawTeamsCache;
+
+      // Fast-path no-op: if nothing in localStorage changed since last check, skip JSON.parse & skip Zustand set() completely!
+      if (!sessionsChanged && !tournamentsChanged && !leaguesChanged && !teamsChanged) {
+        return;
+      }
+
+      const updates: Partial<BoxScoreState> = {};
+
+      if (sessionsChanged) {
+        lastRawGameSessionsCache = rawSessions;
+        const cachedSessions: Record<string, LiveGameSession> = rawSessions
+          ? (JSON.parse(rawSessions) as Record<string, LiveGameSession>)
+          : {};
+        const currentSessions = get().gameSessionsByMatchId;
+        const mergedSessions: Record<string, LiveGameSession> = {
+          ...currentSessions,
+        };
+        let anyDiff = false;
+        for (const [mId, cached] of Object.entries(cachedSessions)) {
+          const current = currentSessions[mId];
+          if (!current) {
+            mergedSessions[mId] = cached;
+            anyDiff = true;
+          } else {
+            const currentUpdated = new Date(current.updatedAt || 0).getTime();
+            const cachedUpdated = new Date(cached.updatedAt || 0).getTime();
+            if (
+              cachedUpdated > currentUpdated ||
+              (cachedUpdated === currentUpdated &&
+                (cached.isClockRunning !== current.isClockRunning ||
+                  cached.clockSecondsRemaining !== current.clockSecondsRemaining ||
+                  cached.clockTenthsRemaining !== current.clockTenthsRemaining ||
+                  cached.shotClockSeconds !== current.shotClockSeconds ||
+                  cached.shotClockTenthsRemaining !== current.shotClockTenthsRemaining ||
+                  cached.homeScore !== current.homeScore ||
+                  cached.awayScore !== current.awayScore))
+            ) {
+              mergedSessions[mId] = cached;
+              anyDiff = true;
+            }
+          }
+        }
+        if (anyDiff) {
+          updates.gameSessionsByMatchId = mergedSessions;
         }
       }
-    }
 
-    set({
-      gameSessionsByMatchId: mergedSessions,
-      tournamentsByLeagueId: {
-        ...get().tournamentsByLeagueId,
-        ...cachedTournaments,
-      },
-      leagues: cachedLeagues.length > 0 ? cachedLeagues : get().leagues,
-      teams: cachedTeams.length > 0 ? cachedTeams : get().teams,
-    });
+      if (tournamentsChanged) {
+        lastRawTournamentsCache = rawTournaments;
+        const cachedTournaments: Record<string, LeagueTournamentData> = rawTournaments
+          ? (JSON.parse(rawTournaments) as Record<string, LeagueTournamentData>)
+          : {};
+        updates.tournamentsByLeagueId = {
+          ...get().tournamentsByLeagueId,
+          ...cachedTournaments,
+        };
+      }
+
+      if (leaguesChanged || teamsChanged) {
+        const deletedIds = readLocalCache<string[]>(STORAGE_KEYS.DELETED_LEAGUES, []);
+        if (leaguesChanged) {
+          lastRawLeaguesCache = rawLeagues;
+          const cachedLeagues = (
+            rawLeagues ? (JSON.parse(rawLeagues) as LeagueRecord[]) : []
+          )
+            .filter((l) => !deletedIds.includes(l.id))
+            .map(hydrateLeagueImageFromVault);
+          if (cachedLeagues.length > 0) {
+            updates.leagues = cachedLeagues;
+          }
+        }
+        if (teamsChanged) {
+          lastRawTeamsCache = rawTeams;
+          const cachedTeams = (
+            rawTeams ? (JSON.parse(rawTeams) as LeagueTeam[]) : []
+          )
+            .filter((t) => !deletedIds.includes(t.leagueId))
+            .map(hydrateTeamImagesFromVault);
+          if (cachedTeams.length > 0) {
+            updates.teams = cachedTeams;
+          }
+        }
+      }
+
+      if (Object.keys(updates).length > 0) {
+        set(updates);
+      }
+    } catch {
+      // Ignore parse errors
+    }
   },
 
   saveLeagueTournamentData: (leagueId, data) => {
@@ -820,21 +900,21 @@ export const useBoxScoreStore = create<BoxScoreState>((set, get) => ({
     }
 
     // 3. Broadcast tournament / game session update across browser tabs and Supabase Realtime
-    if (typeof window !== "undefined") {
-      try {
-        const bcNotif = new BroadcastChannel("boxscore_notifications_sync");
-        bcNotif.postMessage({ type: "TOURNAMENT_UPDATED", leagueId });
-        bcNotif.close();
-      } catch {
-        // Ignore
-      }
-      try {
-        const bcGames = new BroadcastChannel("boxscore_game_sessions_sync");
-        bcGames.postMessage({ type: "TOURNAMENT_UPDATED", leagueId });
-        bcGames.close();
-      } catch {
-        // Ignore
-      }
+    try {
+      getSharedNotifBroadcastChannel()?.postMessage({
+        type: "TOURNAMENT_UPDATED",
+        leagueId,
+      });
+    } catch {
+      // Ignore
+    }
+    try {
+      getSharedGamesBroadcastChannel()?.postMessage({
+        type: "TOURNAMENT_UPDATED",
+        leagueId,
+      });
+    } catch {
+      // Ignore
     }
 
     try {

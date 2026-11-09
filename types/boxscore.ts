@@ -179,6 +179,8 @@ export interface LiveGameSession {
   currentPeriod: number;
   clockSecondsRemaining: number;
   shotClockSeconds: number;
+  clockTenthsRemaining?: number;
+  shotClockTenthsRemaining?: number;
   isClockRunning: boolean;
   clockLeaderId?: string;
   possessionArrow: "HOME" | "AWAY";

@@ -462,8 +462,14 @@ function LiveBroadcastStudioContent() {
 
   // Scorebug Overlay Customization
   const [scorebugPosition, setScorebugPosition] = useState<
-    "bottom_bar" | "bottom_left" | "top_corner"
+    "bottom_bar" | "bottom_left" | "top_corner" | "off"
   >("bottom_bar");
+  const lastActiveScorebugPosRef = useRef<"bottom_bar" | "bottom_left" | "top_corner">("bottom_bar");
+  useEffect(() => {
+    if (scorebugPosition !== "off") {
+      lastActiveScorebugPosRef.current = scorebugPosition;
+    }
+  }, [scorebugPosition]);
   const [scorebugTheme, setScorebugTheme] = useState<"broadcast_dark" | "clean_light">("broadcast_dark");
   const [showShotClock, setShowShotClock] = useState<boolean>(true);
   const [showSponsorTag, setShowSponsorTag] = useState<boolean>(true);
@@ -895,7 +901,9 @@ function LiveBroadcastStudioContent() {
   const homeScore = liveSession?.homeScore ?? activeMatch?.homeScore ?? 0;
   const awayScore = liveSession?.awayScore ?? activeMatch?.awayScore ?? 0;
   const clockSeconds = liveSession?.clockSecondsRemaining ?? 600;
+  const clockTenths = liveSession?.clockTenthsRemaining ?? 0;
   const shotClock = liveSession?.shotClockSeconds ?? 24;
+  const shotClockTenths = liveSession?.shotClockTenthsRemaining ?? 0;
   const period = liveSession?.currentPeriod ?? 1;
   const isClockRunning = liveSession?.isClockRunning ?? false;
 
@@ -3344,23 +3352,29 @@ function LiveBroadcastStudioContent() {
       };
 
       // Sub-second tenths (milliseconds) & Shot Clock OFF rule when Game Clock < Shot Clock
+      const baseGameTenths = clockSeconds * 10 + clockTenths;
+      const baseShotTenths = shotClock * 10 + shotClockTenths;
+
       const subState = clockSubsecondRef.current;
       if (
         subState.matchId !== currentMatchKey ||
-        subState.lastClockSec !== clockSeconds ||
-        subState.lastShotClockSec !== shotClock
+        subState.lastClockSec !== baseGameTenths ||
+        subState.lastShotClockSec !== baseShotTenths
       ) {
         subState.matchId = currentMatchKey;
-        subState.lastClockSec = clockSeconds;
-        subState.lastShotClockSec = shotClock;
+        subState.lastClockSec = baseGameTenths;
+        subState.lastShotClockSec = baseShotTenths;
         subState.anchorNowMs = nowMs;
       }
       const elapsedSubMs = isClockRunning
         ? Math.min(999, Math.max(0, nowMs - subState.anchorNowMs))
         : 0;
-      const subTenths = isClockRunning
-        ? Math.max(0, Math.min(9, Math.floor((1000 - elapsedSubMs) / 100)))
+      const elapsedTenths = isClockRunning
+        ? Math.max(0, Math.min(9, Math.floor(elapsedSubMs / 100)))
         : 0;
+
+      const liveGameTenths = Math.max(0, baseGameTenths - elapsedTenths);
+      const liveShotTenths = Math.max(0, baseShotTenths - elapsedTenths);
 
       const defaultLeagueShotClock =
         activeMatchCategory?.rulesConfig?.shotClockSeconds ??
@@ -3369,28 +3383,45 @@ function LiveBroadcastStudioContent() {
 
       // Rule 1: If the game clock is less than the shot clock, the shot clock should be OFF!
       const isShotClockOffByGameClock =
-        clockSeconds < shotClock ||
-        (shotClock <= 0 &&
-          clockSeconds > 0 &&
-          clockSeconds < defaultLeagueShotClock);
+        baseGameTenths < baseShotTenths ||
+        (baseShotTenths <= 0 &&
+          baseGameTenths > 0 &&
+          baseGameTenths < defaultLeagueShotClock * 10);
       const effectiveShowShotClock =
         showShotClock && !isShotClockOffByGameClock;
 
-      // Rule 2: Add milliseconds (.tenths) if Game Clock < 24s or Shot Clock < 5s
+      // Rule 2: Add milliseconds (.tenths) if Game Clock < 24s or Shot Clock < 5s (and stop on exact seconds.tenths when paused!)
       const gameClockDisplayText =
-        clockSeconds > 0 && clockSeconds < 24
-          ? `${Math.max(0, clockSeconds - (isClockRunning ? 1 : 0))}.${subTenths}`
-          : formatClock(clockSeconds);
+        liveGameTenths > 0 && liveGameTenths < 240
+          ? `${Math.floor(liveGameTenths / 10)}.${liveGameTenths % 10}`
+          : formatClock(Math.floor(liveGameTenths / 10));
 
       const shotClockBottomBarText =
-        shotClock > 0 && shotClock < 5
-          ? `${Math.max(0, shotClock - (isClockRunning ? 1 : 0))}.${subTenths}`
-          : String(Math.max(0, shotClock));
+        liveShotTenths > 0 && liveShotTenths < 50
+          ? `${Math.floor(liveShotTenths / 10)}.${liveShotTenths % 10}`
+          : String(Math.floor(liveShotTenths / 10));
 
       const shotClockCornerText =
-        shotClock > 0 && shotClock < 5
-          ? `${Math.max(0, shotClock - (isClockRunning ? 1 : 0))}.${subTenths}`
-          : `:${String(Math.max(0, shotClock)).padStart(2, "0")}`;
+        liveShotTenths > 0 && liveShotTenths < 50
+          ? `${Math.floor(liveShotTenths / 10)}.${liveShotTenths % 10}`
+          : `:${String(Math.floor(liveShotTenths / 10)).padStart(2, "0")}`;
+
+      if (scorebugPosition === "off") {
+        if (showSponsorTag) {
+          ctx.fillStyle = "rgba(15, 23, 42, 0.82)";
+          ctx.beginPath();
+          ctx.roundRect(width - 250, 24, 215, 36, [10]);
+          ctx.fill();
+
+          ctx.fillStyle = "#ffffff";
+          ctx.font = "900 13px 'Inter', sans-serif";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(`🔴 ${sponsorText}`, width - 142, 42);
+        }
+        ctx.restore();
+        return;
+      }
 
       if (scorebugPosition === "bottom_bar") {
         // =====================================================================
@@ -4181,9 +4212,11 @@ function LiveBroadcastStudioContent() {
       isHomeInPenalty,
       isClockRunning,
       clockSeconds,
+      clockTenths,
       period,
       showShotClock,
       shotClock,
+      shotClockTenths,
       showSponsorTag,
       sponsorText,
     ]
@@ -6425,6 +6458,30 @@ function LiveBroadcastStudioContent() {
     [activeLeague?.name]
   );
 
+  // Latest render refs so the Dual-Monitor 60fps requestAnimationFrame loop & Web Worker NEVER tear down or recreate when game clock / score ticks!
+  const latestRenderLoopPropsRef = useRef({
+    scenes,
+    previewScene,
+    liveScene,
+    showOverlayInPreview,
+    renderSceneToCanvas,
+    drawLogoStingerOverlay,
+    availableStudioCameras,
+    drawCameraSlotRect,
+    syncFromLocalStorage,
+  });
+  latestRenderLoopPropsRef.current = {
+    scenes,
+    previewScene,
+    liveScene,
+    showOverlayInPreview,
+    renderSceneToCanvas,
+    drawLogoStingerOverlay,
+    availableStudioCameras,
+    drawCameraSlotRect,
+    syncFromLocalStorage,
+  };
+
   // Dual-Monitor Continuous Render Loop (Left = Preview Canvas, Right = Live Program Canvas, Clean Raw Program Canvas, Multi-Camera Raw Canvases, + Bottom Scene Preview Strip)
   useEffect(() => {
     let isRunning = true;
@@ -6434,20 +6491,30 @@ function LiveBroadcastStudioContent() {
 
     const tick = (nowMs: number) => {
       if (!isRunning) return;
+      const {
+        scenes: curScenes,
+        previewScene: curPreviewScene,
+        liveScene: curLiveScene,
+        showOverlayInPreview: curShowOverlayInPreview,
+        renderSceneToCanvas: curRenderSceneToCanvas,
+        drawLogoStingerOverlay: curDrawLogoStingerOverlay,
+        availableStudioCameras: curAvailableStudioCameras,
+        drawCameraSlotRect: curDrawCameraSlotRect,
+      } = latestRenderLoopPropsRef.current;
 
       // 1. Render Left PREVIEW Canvas
       const pCanvas = previewCanvasRef.current;
       if (pCanvas) {
         const pCtx = pCanvas.getContext("2d");
         if (pCtx) {
-          renderSceneToCanvas(
+          curRenderSceneToCanvas(
             pCtx,
             pCanvas.width,
             pCanvas.height,
-            previewScene,
+            curPreviewScene,
             previewReplayVideoRef.current,
             previewMediaVideoRef.current,
-            showOverlayInPreview,
+            curShowOverlayInPreview,
             false,
             nowMs
           );
@@ -6459,11 +6526,11 @@ function LiveBroadcastStudioContent() {
       if (lCanvas) {
         const lCtx = lCanvas.getContext("2d");
         if (lCtx) {
-          renderSceneToCanvas(
+          curRenderSceneToCanvas(
             lCtx,
             lCanvas.width,
             lCanvas.height,
-            liveScene,
+            curLiveScene,
             liveReplayVideoRef.current,
             liveMediaVideoRef.current,
             true,
@@ -6482,7 +6549,7 @@ function LiveBroadcastStudioContent() {
               // Automatically turn OFF Starting 5 Lineups Overlay when transition switches to next scene
               setShowStartingLineupOverlay(false);
             }
-            drawLogoStingerOverlay(
+            curDrawLogoStingerOverlay(
               lCtx,
               lCanvas.width,
               lCanvas.height,
@@ -6541,11 +6608,11 @@ function LiveBroadcastStudioContent() {
       if (cleanCanvas) {
         const cleanCtx = cleanCanvas.getContext("2d");
         if (cleanCtx) {
-          renderSceneToCanvas(
+          curRenderSceneToCanvas(
             cleanCtx,
             cleanCanvas.width,
             cleanCanvas.height,
-            liveScene,
+            curLiveScene,
             liveReplayVideoRef.current,
             liveMediaVideoRef.current,
             false, // NO Scorebug on raw camera recording!
@@ -6558,7 +6625,7 @@ function LiveBroadcastStudioContent() {
       // 2C. Render Individual Multi-Camera Raw Canvases (~15fps) so every camera has its own raw timeline & instant replay buffer
       if (nowMs - lastCamRawRenderMs >= 66 && typeof document !== "undefined") {
         lastCamRawRenderMs = nowMs;
-        availableStudioCameras.forEach((camTrack, idx) => {
+        curAvailableStudioCameras.forEach((camTrack, idx) => {
           if (camTrack.cameraId === "clean_program" || !camTrack.slot) return;
           let camCanvas = cameraRawCanvasByKeyRef.current[camTrack.cameraId];
           if (!camCanvas) {
@@ -6574,7 +6641,7 @@ function LiveBroadcastStudioContent() {
           if (camCtx) {
             camCtx.fillStyle = "#090d16";
             camCtx.fillRect(0, 0, camCanvas.width, camCanvas.height);
-            drawCameraSlotRect(
+            curDrawCameraSlotRect(
               camCtx,
               camTrack.slot,
               idx,
@@ -6591,26 +6658,26 @@ function LiveBroadcastStudioContent() {
       // 3. Render Miniature Scene Preview Thumbnails in Preview Strip (10fps)
       if (nowMs - lastThumbRenderMs >= 100) {
         lastThumbRenderMs = nowMs;
-        for (const sceneItem of scenes) {
+        for (const sceneItem of curScenes) {
           const tCanvas = sceneThumbCanvasByIdRef.current[sceneItem.id];
           if (!tCanvas) continue;
           const tCtx = tCanvas.getContext("2d");
           if (!tCtx) continue;
           tCtx.save();
           tCtx.scale(tCanvas.width / 1920, tCanvas.height / 1080);
-          renderSceneToCanvas(
+          curRenderSceneToCanvas(
             tCtx,
             1920,
             1080,
             sceneItem,
-            sceneItem.id === previewScene?.id
+            sceneItem.id === curPreviewScene?.id
               ? previewReplayVideoRef.current
-              : sceneItem.id === liveScene?.id
+              : sceneItem.id === curLiveScene?.id
                 ? liveReplayVideoRef.current
                 : null,
-            sceneItem.id === previewScene?.id
+            sceneItem.id === curPreviewScene?.id
               ? previewMediaVideoRef.current
-              : sceneItem.id === liveScene?.id
+              : sceneItem.id === curLiveScene?.id
                 ? liveMediaVideoRef.current
                 : null,
             false,
@@ -6651,7 +6718,7 @@ function LiveBroadcastStudioContent() {
                   !cleanPopupWindowRef.current.closed
               ))
           ) {
-            syncFromLocalStorage();
+            latestRenderLoopPropsRef.current.syncFromLocalStorage();
             tick(performance.now());
           }
         };
@@ -6661,14 +6728,14 @@ function LiveBroadcastStudioContent() {
     const fallbackBgTimer = setInterval(() => {
       if (!isRunning) return;
       if (typeof document !== "undefined" && document.hidden) {
-        syncFromLocalStorage();
+        latestRenderLoopPropsRef.current.syncFromLocalStorage();
         tick(performance.now());
       }
     }, 100);
 
     const handleVisibilityChange = () => {
       if (typeof document !== "undefined" && !document.hidden && isRunning) {
-        syncFromLocalStorage();
+        latestRenderLoopPropsRef.current.syncFromLocalStorage();
         cancelAnimationFrame(rafId);
         rafId = requestAnimationFrame(tick);
       }
@@ -6696,17 +6763,7 @@ function LiveBroadcastStudioContent() {
         } catch {}
       }
     };
-  }, [
-    scenes,
-    previewScene,
-    liveScene,
-    showOverlayInPreview,
-    renderSceneToCanvas,
-    drawLogoStingerOverlay,
-    availableStudioCameras,
-    drawCameraSlotRect,
-    syncFromLocalStorage,
-  ]);
+  }, []);
 
   // Section Order, Visibility & Light/Dark Theme Toggle Handlers
   const handleSwapTopSection = (target?: "timeline" | "scenes_and_live") => {
@@ -10067,6 +10124,28 @@ function LiveBroadcastStudioContent() {
               <div className="flex flex-wrap items-center gap-1.5">
                 <button
                   type="button"
+                  aria-pressed={scorebugPosition !== "off"}
+                  onClick={() =>
+                    setScorebugPosition((pos) =>
+                      pos === "off"
+                        ? lastActiveScorebugPosRef.current || "bottom_bar"
+                        : "off"
+                    )
+                  }
+                  className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-[0.62rem] font-black uppercase cursor-pointer border transition-all ${
+                    scorebugPosition === "off"
+                      ? "bg-rose-600 border-rose-400 text-white shadow"
+                      : "bg-slate-900 border-slate-700 text-slate-200 hover:border-rose-400"
+                  }`}
+                  title="Turn Scorebug ON or OFF on the Live Broadcast"
+                >
+                  <span>
+                    {scorebugPosition === "off" ? "🚫 Scorebug OFF (Click to Show)" : "📺 Scorebug ON"}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
                   aria-pressed={showTeamComparisonOverlay}
                   onClick={() => {
                     setShowTeamComparisonOverlay((v) => {
@@ -12900,11 +12979,11 @@ function LiveBroadcastStudioContent() {
               <label className="text-[0.65rem] font-black uppercase text-slate-400">
                 Scoreboard Position (with Team Logos):
               </label>
-              <div className="grid grid-cols-3 gap-1.5">
+              <div className="grid grid-cols-4 gap-1.5">
                 <button
                   type="button"
                   onClick={() => setScorebugPosition("bottom_bar")}
-                  className={`rounded-lg py-1.5 px-1 text-[0.64rem] font-black uppercase border cursor-pointer ${
+                  className={`rounded-lg py-1.5 px-1 text-[0.6rem] font-black uppercase border cursor-pointer ${
                     scorebugPosition === "bottom_bar"
                       ? "bg-rose-600 border-rose-500 text-white"
                       : "bg-slate-900 border-slate-700 text-slate-400 hover:text-white"
@@ -12915,24 +12994,35 @@ function LiveBroadcastStudioContent() {
                 <button
                   type="button"
                   onClick={() => setScorebugPosition("bottom_left")}
-                  className={`rounded-lg py-1.5 px-1 text-[0.64rem] font-black uppercase border cursor-pointer ${
+                  className={`rounded-lg py-1.5 px-1 text-[0.6rem] font-black uppercase border cursor-pointer ${
                     scorebugPosition === "bottom_left"
                       ? "bg-rose-600 border-rose-500 text-white"
                       : "bg-slate-900 border-slate-700 text-slate-400 hover:text-white"
                   }`}
                 >
-                  Bottom-Left Bug
+                  Bottom-Left
                 </button>
                 <button
                   type="button"
                   onClick={() => setScorebugPosition("top_corner")}
-                  className={`rounded-lg py-1.5 px-1 text-[0.64rem] font-black uppercase border cursor-pointer ${
+                  className={`rounded-lg py-1.5 px-1 text-[0.6rem] font-black uppercase border cursor-pointer ${
                     scorebugPosition === "top_corner"
                       ? "bg-rose-600 border-rose-500 text-white"
                       : "bg-slate-900 border-slate-700 text-slate-400 hover:text-white"
                   }`}
                 >
-                  Top-Left Bug
+                  Top-Left
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setScorebugPosition("off")}
+                  className={`rounded-lg py-1.5 px-1 text-[0.6rem] font-black uppercase border cursor-pointer ${
+                    scorebugPosition === "off"
+                      ? "bg-slate-700 border-rose-400 text-rose-300 shadow"
+                      : "bg-slate-900 border-slate-700 text-slate-400 hover:text-white"
+                  }`}
+                >
+                  Scorebug Off
                 </button>
               </div>
             </div>

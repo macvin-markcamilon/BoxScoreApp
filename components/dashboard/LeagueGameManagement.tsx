@@ -555,11 +555,16 @@ export function LeagueGameManagement({
       const latest = useBoxScoreStore.getState().gameSessionsByMatchId[matchId];
       if (!latest || !latest.isClockRunning) return;
 
-      if (latest.clockSecondsRemaining <= 0) {
+      // Convert both clocks to exact tenths of a second (e.g., 20s + 0 tenths = 200 tenths, 19s + 4 tenths = 194 tenths)
+      const currentGameTenths =
+        latest.clockSecondsRemaining * 10 + (latest.clockTenthsRemaining ?? 0);
+
+      if (currentGameTenths <= 0) {
         saveGameSession(matchId, {
           ...latest,
           isClockRunning: false,
           clockSecondsRemaining: 0,
+          clockTenthsRemaining: 0,
           updatedAt: new Date().toISOString(),
         });
         playGameClockBuzzer(isBuzzerMutedRef.current);
@@ -573,22 +578,31 @@ export function LeagueGameManagement({
       }
 
       const defaultShotClock = league.rulesConfig.shotClockSeconds || 24;
+      const currentShotTenths =
+        latest.shotClockSeconds * 10 + (latest.shotClockTenthsRemaining ?? 0);
+
       // If the game clock is already less than the shot clock (or <= defaultShotClock when resetting), the shot clock is turned OFF
       const isShotClockTurnedOff =
-        latest.clockSecondsRemaining < latest.shotClockSeconds ||
-        (latest.shotClockSeconds <= 0 &&
-          latest.clockSecondsRemaining <= defaultShotClock);
+        currentGameTenths < currentShotTenths ||
+        (currentShotTenths <= 0 && currentGameTenths <= defaultShotClock * 10);
 
-      const baseShotClock = isShotClockTurnedOff
+      const baseShotTenths = isShotClockTurnedOff
         ? 0
-        : latest.shotClockSeconds <= 0
-        ? defaultShotClock
-        : latest.shotClockSeconds;
-      const nextGameClock = Math.max(0, latest.clockSecondsRemaining - secondsToDeduct);
-      const nextShotClock =
-        isShotClockTurnedOff || nextGameClock < baseShotClock - secondsToDeduct
+        : currentShotTenths <= 0
+        ? defaultShotClock * 10
+        : currentShotTenths;
+
+      const tenthsToDeduct = secondsToDeduct * 10;
+      const nextGameTenths = Math.max(0, currentGameTenths - tenthsToDeduct);
+      const nextShotTenths =
+        isShotClockTurnedOff || nextGameTenths < baseShotTenths - tenthsToDeduct
           ? 0
-          : Math.max(0, baseShotClock - secondsToDeduct);
+          : Math.max(0, baseShotTenths - tenthsToDeduct);
+
+      const nextGameClock = Math.floor(nextGameTenths / 10);
+      const nextGameClockTenths = nextGameTenths % 10;
+      const nextShotClock = Math.floor(nextShotTenths / 10);
+      const nextShotClockTenths = nextShotTenths % 10;
 
       // Increment secondsPlayed and compute minutesPlayed for all on-court players
       const updatedHomeStats = { ...latest.homePlayerStats };
@@ -621,14 +635,16 @@ export function LeagueGameManagement({
 
       if (
         !isShotClockTurnedOff &&
-        nextShotClock === 0 &&
-        baseShotClock > 0 &&
-        nextGameClock > 0
+        nextShotTenths === 0 &&
+        baseShotTenths > 0 &&
+        nextGameTenths > 0
       ) {
         saveGameSession(matchId, {
           ...latest,
           clockSecondsRemaining: nextGameClock,
+          clockTenthsRemaining: nextGameClockTenths,
           shotClockSeconds: 0,
+          shotClockTenthsRemaining: 0,
           isClockRunning: false,
           homePlayerStats: updatedHomeStats,
           awayPlayerStats: updatedAwayStats,
@@ -641,11 +657,35 @@ export function LeagueGameManagement({
         return;
       }
 
+      if (nextGameTenths === 0) {
+        saveGameSession(matchId, {
+          ...latest,
+          clockSecondsRemaining: 0,
+          clockTenthsRemaining: 0,
+          shotClockSeconds: 0,
+          shotClockTenthsRemaining: 0,
+          isClockRunning: false,
+          homePlayerStats: updatedHomeStats,
+          awayPlayerStats: updatedAwayStats,
+          updatedAt: new Date().toISOString(),
+        });
+        playGameClockBuzzer(isBuzzerMutedRef.current);
+        setHornAlertMessage(
+          `END OF ${getPeriodLabel(
+            latest.currentPeriod,
+            periodsCountRef.current
+          )} — GAME CLOCK BUZZER SOUNDED!`
+        );
+        return;
+      }
+
       saveGameSession(matchId, {
         ...latest,
         clockSecondsRemaining: nextGameClock,
+        clockTenthsRemaining: nextGameClockTenths,
         shotClockSeconds: nextShotClock,
-        isClockRunning: nextGameClock > 0,
+        shotClockTenthsRemaining: nextShotClockTenths,
+        isClockRunning: nextGameTenths > 0,
         clockLeaderId: clientInstanceIdRef.current,
         homePlayerStats: updatedHomeStats,
         awayPlayerStats: updatedAwayStats,
@@ -659,25 +699,34 @@ export function LeagueGameManagement({
   // Sub-second tenths (milliseconds) ticker when Game Clock < 24s or Shot Clock < 5s
   useEffect(() => {
     const gameSec = session?.clockSecondsRemaining ?? 600;
+    const gameTenths = session?.clockTenthsRemaining ?? 0;
     const shotSec = session?.shotClockSeconds ?? 24;
+    const shotTenths = session?.shotClockTenthsRemaining ?? 0;
+    const gameTotalTenths = gameSec * 10 + gameTenths;
+    const shotTotalTenths = shotSec * 10 + shotTenths;
     if (
-      lastObservedClockSecRef.current !== gameSec ||
-      lastObservedShotClockSecRef.current !== shotSec
+      lastObservedClockSecRef.current !== gameTotalTenths ||
+      lastObservedShotClockSecRef.current !== shotTotalTenths
     ) {
-      lastObservedClockSecRef.current = gameSec;
-      lastObservedShotClockSecRef.current = shotSec;
+      lastObservedClockSecRef.current = gameTotalTenths;
+      lastObservedShotClockSecRef.current = shotTotalTenths;
       clockStepAnchorPerfMsRef.current =
         typeof performance !== "undefined" ? performance.now() : Date.now();
       setDisplaySubsecondTenths(0);
     }
-  }, [session?.clockSecondsRemaining, session?.shotClockSeconds]);
+  }, [
+    session?.clockSecondsRemaining,
+    session?.clockTenthsRemaining,
+    session?.shotClockSeconds,
+    session?.shotClockTenthsRemaining,
+  ]);
 
   useEffect(() => {
     const gameSec = session?.clockSecondsRemaining ?? 600;
     const shotSec = session?.shotClockSeconds ?? 24;
     const needsSubsecond =
       isClockRunning &&
-      ((gameSec > 0 && gameSec < 24) || (shotSec > 0 && shotSec < 5));
+      ((gameSec >= 0 && gameSec <= 24) || (shotSec >= 0 && shotSec <= 5));
     if (!needsSubsecond) {
       setDisplaySubsecondTenths(0);
       return;
@@ -691,14 +740,20 @@ export function LeagueGameManagement({
         999,
         Math.max(0, nowPerf - clockStepAnchorPerfMsRef.current)
       );
-      const tenthsRemaining = Math.max(
+      const tenthsElapsed = Math.max(
         0,
-        Math.min(9, Math.floor((1000 - elapsedInSec) / 100))
+        Math.min(9, Math.floor(elapsedInSec / 100))
       );
-      setDisplaySubsecondTenths(tenthsRemaining);
+      setDisplaySubsecondTenths(tenthsElapsed);
     }, 80);
     return () => clearInterval(subTimer);
-  }, [isClockRunning, session?.clockSecondsRemaining, session?.shotClockSeconds]);
+  }, [
+    isClockRunning,
+    session?.clockSecondsRemaining,
+    session?.clockTenthsRemaining,
+    session?.shotClockSeconds,
+    session?.shotClockTenthsRemaining,
+  ]);
 
   // Live Timeout Countdown Timer (60s official timeout countdown)
   useEffect(() => {
@@ -815,6 +870,17 @@ export function LeagueGameManagement({
       return;
     }
     setHornAlertMessage(null);
+    const nowPerf =
+      typeof performance !== "undefined" ? performance.now() : Date.now();
+    const elapsedInSec = Math.min(
+      999,
+      Math.max(0, nowPerf - clockStepAnchorPerfMsRef.current)
+    );
+    const elapsedTenths = Math.max(
+      0,
+      Math.min(9, Math.floor(elapsedInSec / 100))
+    );
+
     updateSession((prev) => {
       const nextRunning = !prev.isClockRunning;
       if (nextRunning && activeMatch.status === "SCHEDULED") {
@@ -822,21 +888,68 @@ export function LeagueGameManagement({
           status: "LIVE",
         });
       }
+
+      // If pausing the clock, freeze the exact tenths-of-a-second (milliseconds) so 19.4 stays at 19.4 instead of rounding up to 20!
+      if (!nextRunning) {
+        const curGameTenths =
+          prev.clockSecondsRemaining * 10 + (prev.clockTenthsRemaining ?? 0);
+        const pausedGameTenths = Math.max(0, curGameTenths - elapsedTenths);
+        const pausedGameSec = Math.floor(pausedGameTenths / 10);
+        const pausedGameRemTenths = pausedGameTenths % 10;
+
+        const curShotTenths =
+          prev.shotClockSeconds * 10 + (prev.shotClockTenthsRemaining ?? 0);
+        const isShotOff =
+          pausedGameTenths < curShotTenths || curShotTenths <= 0;
+        const pausedShotTenths = isShotOff
+          ? 0
+          : Math.max(0, curShotTenths - elapsedTenths);
+        const pausedShotSec = Math.floor(pausedShotTenths / 10);
+        const pausedShotRemTenths = pausedShotTenths % 10;
+
+        return {
+          ...prev,
+          isClockRunning: false,
+          clockSecondsRemaining: pausedGameSec,
+          clockTenthsRemaining: pausedGameRemTenths,
+          shotClockSeconds: pausedShotSec,
+          shotClockTenthsRemaining: pausedShotRemTenths,
+          clockLeaderId: undefined,
+        };
+      }
+
       // Automatically reset & start shot clock from 24s if starting game clock after a 24s shot clock violation (0s),
       // EXCEPT when the game clock is less than or equal to the shot clock (in which case shot clock is turned OFF).
-      const nextShotClock =
-        prev.clockSecondsRemaining < prev.shotClockSeconds
-          ? 0
-          : nextRunning && prev.shotClockSeconds <= 0
-          ? prev.clockSecondsRemaining > shotClockDefault
-            ? shotClockDefault
-            : 0
-          : prev.shotClockSeconds;
+      const curGameTenths =
+        prev.clockSecondsRemaining * 10 + (prev.clockTenthsRemaining ?? 0);
+      const curShotTenths =
+        prev.shotClockSeconds * 10 + (prev.shotClockTenthsRemaining ?? 0);
+
+      let nextShotSec = prev.shotClockSeconds;
+      let nextShotTenths = prev.shotClockTenthsRemaining ?? 0;
+
+      if (curGameTenths < curShotTenths) {
+        nextShotSec = 0;
+        nextShotTenths = 0;
+      } else if (curShotTenths <= 0) {
+        if (curGameTenths > shotClockDefault * 10) {
+          nextShotSec = shotClockDefault;
+          nextShotTenths = 0;
+        } else {
+          nextShotSec = 0;
+          nextShotTenths = 0;
+        }
+      }
+
+      clockStepAnchorPerfMsRef.current = nowPerf;
+      setDisplaySubsecondTenths(0);
+
       return {
         ...prev,
-        isClockRunning: nextRunning,
-        shotClockSeconds: nextShotClock,
-        clockLeaderId: nextRunning ? clientInstanceIdRef.current : undefined,
+        isClockRunning: true,
+        shotClockSeconds: nextShotSec,
+        shotClockTenthsRemaining: nextShotTenths,
+        clockLeaderId: clientInstanceIdRef.current,
       };
     });
   };
@@ -851,11 +964,21 @@ export function LeagueGameManagement({
         0,
         prev.clockSecondsRemaining + deltaSeconds
       );
+      const nextGameTenths =
+        nextGameClock === 0 ? 0 : prev.clockTenthsRemaining ?? 0;
+      const totalGameTenths = nextGameClock * 10 + nextGameTenths;
+      const totalShotTenths =
+        prev.shotClockSeconds * 10 + (prev.shotClockTenthsRemaining ?? 0);
       return {
         ...prev,
         clockSecondsRemaining: nextGameClock,
+        clockTenthsRemaining: nextGameTenths,
         shotClockSeconds:
-          nextGameClock < prev.shotClockSeconds ? 0 : prev.shotClockSeconds,
+          totalGameTenths < totalShotTenths ? 0 : prev.shotClockSeconds,
+        shotClockTenthsRemaining:
+          totalGameTenths < totalShotTenths
+            ? 0
+            : prev.shotClockTenthsRemaining ?? 0,
       };
     });
   };
@@ -873,7 +996,9 @@ export function LeagueGameManagement({
       ...prev,
       isClockRunning: false,
       clockSecondsRemaining: mins * 60,
+      clockTenthsRemaining: 0,
       shotClockSeconds: shotClockDefault,
+      shotClockTenthsRemaining: 0,
     }));
   };
 
@@ -883,15 +1008,30 @@ export function LeagueGameManagement({
       alert("Permission Denied: Only Game Timers, Table Officials, or League Admins can edit the game clock.");
       return;
     }
-    const mins = Math.max(0, Number(manualMinutesInput) || 0);
-    const secs = Math.min(59, Math.max(0, Number(manualSecondsInput) || 0));
+    const mins = Math.max(0, Math.floor(Number(manualMinutesInput) || 0));
+    const rawSecsVal = Math.max(0, Number(manualSecondsInput) || 0);
+    const secs = Math.min(59, Math.floor(rawSecsVal));
+    const tenths = Math.min(
+      9,
+      Math.max(0, Math.round((rawSecsVal - Math.floor(rawSecsVal)) * 10))
+    );
     const nextGameClock = mins * 60 + secs;
-    updateSession((prev) => ({
-      ...prev,
-      clockSecondsRemaining: nextGameClock,
-      shotClockSeconds:
-        nextGameClock < prev.shotClockSeconds ? 0 : prev.shotClockSeconds,
-    }));
+    const totalGameTenths = nextGameClock * 10 + tenths;
+    updateSession((prev) => {
+      const totalShotTenths =
+        prev.shotClockSeconds * 10 + (prev.shotClockTenthsRemaining ?? 0);
+      return {
+        ...prev,
+        clockSecondsRemaining: nextGameClock,
+        clockTenthsRemaining: tenths,
+        shotClockSeconds:
+          totalGameTenths < totalShotTenths ? 0 : prev.shotClockSeconds,
+        shotClockTenthsRemaining:
+          totalGameTenths < totalShotTenths
+            ? 0
+            : prev.shotClockTenthsRemaining ?? 0,
+      };
+    });
     setIsEditingClock(false);
   };
 
@@ -901,12 +1041,17 @@ export function LeagueGameManagement({
       return;
     }
     setHornAlertMessage(null);
-    updateSession((prev) => ({
-      ...prev,
+    updateSession((prev) => {
+      const totalGameTenths =
+        prev.clockSecondsRemaining * 10 + (prev.clockTenthsRemaining ?? 0);
       // If the game clock is less than the requested shot clock reset, turn the shot clock off (0)
-      shotClockSeconds:
-        prev.clockSecondsRemaining < seconds ? 0 : seconds,
-    }));
+      const shouldTurnOff = totalGameTenths < seconds * 10;
+      return {
+        ...prev,
+        shotClockSeconds: shouldTurnOff ? 0 : seconds,
+        shotClockTenthsRemaining: 0,
+      };
+    });
   };
 
   const handleSelectPeriod = (nextPeriod: number) => {
@@ -930,7 +1075,9 @@ export function LeagueGameManagement({
         currentPeriod: nextPeriod,
         isClockRunning: false,
         clockSecondsRemaining: mins * 60,
+        clockTenthsRemaining: 0,
         shotClockSeconds: shotClockDefault,
+        shotClockTenthsRemaining: 0,
         homeQuarterScores: nextQHome,
         awayQuarterScores: nextQAway,
         homeTeamFoulsByPeriod: nextFHome,
@@ -987,6 +1134,17 @@ export function LeagueGameManagement({
       } — TIMEOUT BUZZER SOUNDED! (60s Countdown Active)`
     );
 
+    const nowPerf =
+      typeof performance !== "undefined" ? performance.now() : Date.now();
+    const elapsedInSec = Math.min(
+      999,
+      Math.max(0, nowPerf - clockStepAnchorPerfMsRef.current)
+    );
+    const elapsedTenths = Math.max(
+      0,
+      Math.min(9, Math.floor(elapsedInSec / 100))
+    );
+
     updateSession((prev) => {
       const rem =
         side === "HOME"
@@ -994,12 +1152,33 @@ export function LeagueGameManagement({
           : prev.awayTimeoutsRemaining;
       if (rem <= 0) return prev;
       const tName = side === "HOME" ? homeTeamName : awayTeamName;
+
+      // Freeze exact tenths if clock was running when timeout was called
+      let nextGameSec = prev.clockSecondsRemaining;
+      let nextGameTenths = prev.clockTenthsRemaining ?? 0;
+      let nextShotSec = prev.shotClockSeconds;
+      let nextShotTenths = prev.shotClockTenthsRemaining ?? 0;
+      if (prev.isClockRunning) {
+        const curGameTenths = nextGameSec * 10 + nextGameTenths;
+        const pausedGameTenths = Math.max(0, curGameTenths - elapsedTenths);
+        nextGameSec = Math.floor(pausedGameTenths / 10);
+        nextGameTenths = pausedGameTenths % 10;
+
+        const curShotTenths = nextShotSec * 10 + nextShotTenths;
+        const isShotOff = pausedGameTenths < curShotTenths || curShotTenths <= 0;
+        const pausedShotTenths = isShotOff
+          ? 0
+          : Math.max(0, curShotTenths - elapsedTenths);
+        nextShotSec = Math.floor(pausedShotTenths / 10);
+        nextShotTenths = pausedShotTenths % 10;
+      }
+
       const event: ScorebookPlayEvent = {
         id: generateUUID(),
         matchId: activeMatch.id,
         period: prev.currentPeriod,
         periodLabel: getPeriodLabel(prev.currentPeriod, regPeriodsCount),
-        gameClockDisplay: formatClock(prev.clockSecondsRemaining),
+        gameClockDisplay: formatClock(nextGameSec),
         teamSide: side,
         teamId:
           side === "HOME" ? homeTeam?.id || "home" : awayTeam?.id || "away",
@@ -1016,6 +1195,10 @@ export function LeagueGameManagement({
       return {
         ...prev,
         isClockRunning: false,
+        clockSecondsRemaining: nextGameSec,
+        clockTenthsRemaining: nextGameTenths,
+        shotClockSeconds: nextShotSec,
+        shotClockTenthsRemaining: nextShotTenths,
         homeTimeoutsRemaining:
           side === "HOME" ? rem - 1 : prev.homeTimeoutsRemaining,
         awayTimeoutsRemaining:
@@ -1445,10 +1628,22 @@ export function LeagueGameManagement({
         createdAt: new Date().toISOString(),
       };
 
+      const prevGameTotalTenths =
+        prev.clockSecondsRemaining * 10 + (prev.clockTenthsRemaining ?? 0);
+      const resolvedShotTotalTenths =
+        nextShotClock !== undefined
+          ? nextShotClock * 10
+          : resolvedShotClock * 10 + (prev.shotClockTenthsRemaining ?? 0);
+      const shouldTurnShotOff = prevGameTotalTenths < resolvedShotTotalTenths;
+
       return {
         ...prev,
-        shotClockSeconds:
-          prev.clockSecondsRemaining < resolvedShotClock ? 0 : resolvedShotClock,
+        shotClockSeconds: shouldTurnShotOff ? 0 : resolvedShotClock,
+        shotClockTenthsRemaining: shouldTurnShotOff
+          ? 0
+          : nextShotClock !== undefined
+          ? 0
+          : prev.shotClockTenthsRemaining ?? 0,
         activeBallPossession:
           nextPossessionSide ?? prev.activeBallPossession ?? side,
         homeScore: nextHomeScore,
@@ -1504,12 +1699,23 @@ export function LeagueGameManagement({
         createdAt: new Date().toISOString(),
       };
       const candidateShotClock = params.nextShotClock ?? prev.shotClockSeconds;
+      const prevGameTotalTenths =
+        prev.clockSecondsRemaining * 10 + (prev.clockTenthsRemaining ?? 0);
+      const candidateShotTotalTenths =
+        params.nextShotClock !== undefined
+          ? candidateShotClock * 10
+          : candidateShotClock * 10 + (prev.shotClockTenthsRemaining ?? 0);
+      const shouldTurnShotOff = prevGameTotalTenths < candidateShotTotalTenths;
       return {
         ...prev,
         activeBallPossession:
           params.nextPossessionSide ?? prev.activeBallPossession,
-        shotClockSeconds:
-          prev.clockSecondsRemaining < candidateShotClock ? 0 : candidateShotClock,
+        shotClockSeconds: shouldTurnShotOff ? 0 : candidateShotClock,
+        shotClockTenthsRemaining: shouldTurnShotOff
+          ? 0
+          : params.nextShotClock !== undefined
+          ? 0
+          : prev.shotClockTenthsRemaining ?? 0,
         playEvents: [newEvent, ...prev.playEvents],
       };
     });
@@ -3328,11 +3534,12 @@ export function LeagueGameManagement({
                           setManualMinutesInput(
                             String(Math.floor(session.clockSecondsRemaining / 60))
                           );
+                          const remSecs = session.clockSecondsRemaining % 60;
+                          const remTenths = session.clockTenthsRemaining ?? 0;
                           setManualSecondsInput(
-                            String(session.clockSecondsRemaining % 60).padStart(
-                              2,
-                              "0"
-                            )
+                            remTenths > 0
+                              ? `${remSecs}.${remTenths}`
+                              : String(remSecs).padStart(2, "0")
                           );
                           setIsEditingClock((prev) => !prev);
                         }}
@@ -3359,11 +3566,12 @@ export function LeagueGameManagement({
                       <span className="text-lg font-black text-slate-900">:</span>
                       <input
                         type="number"
+                        step="0.1"
                         min={0}
-                        max={59}
+                        max={59.9}
                         value={manualSecondsInput}
                         onChange={(e) => setManualSecondsInput(e.target.value)}
-                        className="w-14 rounded bg-slate-50 border border-slate-300 px-2 py-1 text-center text-lg font-black text-slate-900"
+                        className="w-16 rounded bg-slate-50 border border-slate-300 px-2 py-1 text-center text-lg font-black text-slate-900"
                       />
                       <button
                         type="submit"
@@ -3380,14 +3588,20 @@ export function LeagueGameManagement({
                           : "text-[#0B2F5C]"
                       }`}
                     >
-                      {session.clockSecondsRemaining < 24 &&
-                      session.clockSecondsRemaining > 0
-                        ? `${Math.max(
-                            0,
-                            session.clockSecondsRemaining -
-                              (session.isClockRunning ? 1 : 0)
-                          )}.${session.isClockRunning ? displaySubsecondTenths : 0}`
-                        : formatClock(session.clockSecondsRemaining)}
+                      {(() => {
+                        const baseTenths =
+                          session.clockSecondsRemaining * 10 +
+                          (session.clockTenthsRemaining ?? 0);
+                        const liveTenths = session.isClockRunning
+                          ? Math.max(0, baseTenths - displaySubsecondTenths)
+                          : baseTenths;
+                        if (liveTenths > 0 && liveTenths < 240) {
+                          const s = Math.floor(liveTenths / 10);
+                          const d = liveTenths % 10;
+                          return `${s}.${d}`;
+                        }
+                        return formatClock(Math.floor(liveTenths / 10));
+                      })()}
                     </div>
                   )}
 
@@ -3439,31 +3653,44 @@ export function LeagueGameManagement({
                   <span className="block text-[0.6rem] font-black uppercase text-[#8B0D0E]">
                     SHOT CLOCK
                   </span>
-                  {session.clockSecondsRemaining < session.shotClockSeconds ||
-                  (session.shotClockSeconds <= 0 &&
-                    session.clockSecondsRemaining < shotClockDefault &&
-                    session.clockSecondsRemaining > 0) ? (
-                    <div className="text-3xl sm:text-4xl font-black uppercase tracking-wider text-slate-400 py-1">
-                      OFF
-                    </div>
-                  ) : (
-                    <div
-                      className={`text-4xl sm:text-5xl font-black tabular-nums ${
-                        session.shotClockSeconds <= 5
-                          ? "text-rose-600 animate-pulse"
-                          : "text-[#8B0D0E]"
-                      }`}
-                    >
-                      {session.shotClockSeconds < 5 &&
-                      session.shotClockSeconds > 0
-                        ? `${Math.max(
-                            0,
-                            session.shotClockSeconds -
-                              (session.isClockRunning ? 1 : 0)
-                          )}.${session.isClockRunning ? displaySubsecondTenths : 0}`
-                        : session.shotClockSeconds}
-                    </div>
-                  )}
+                  {(() => {
+                    const baseGameTenths =
+                      session.clockSecondsRemaining * 10 +
+                      (session.clockTenthsRemaining ?? 0);
+                    const baseShotTenths =
+                      session.shotClockSeconds * 10 +
+                      (session.shotClockTenthsRemaining ?? 0);
+                    const isOff =
+                      baseGameTenths < baseShotTenths ||
+                      (baseShotTenths <= 0 &&
+                        baseGameTenths < shotClockDefault * 10 &&
+                        baseGameTenths > 0);
+                    if (isOff) {
+                      return (
+                        <div className="text-3xl sm:text-4xl font-black uppercase tracking-wider text-slate-400 py-1">
+                          OFF
+                        </div>
+                      );
+                    }
+                    const liveShotTenths = session.isClockRunning
+                      ? Math.max(0, baseShotTenths - displaySubsecondTenths)
+                      : baseShotTenths;
+                    const shotText =
+                      liveShotTenths > 0 && liveShotTenths < 50
+                        ? `${Math.floor(liveShotTenths / 10)}.${liveShotTenths % 10}`
+                        : String(Math.floor(liveShotTenths / 10));
+                    return (
+                      <div
+                        className={`text-4xl sm:text-5xl font-black tabular-nums ${
+                          liveShotTenths <= 50
+                            ? "text-rose-600 animate-pulse"
+                            : "text-[#8B0D0E]"
+                        }`}
+                      >
+                        {shotText}
+                      </div>
+                    );
+                  })()}
                   <div className="mt-2 grid grid-cols-2 gap-1">
                     <button
                       type="button"
